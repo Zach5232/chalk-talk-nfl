@@ -79,6 +79,22 @@ service cloud.firestore {
       allow delete: if true;   // dashboard's existing "Delete" button needs this
     }
 
+    // ---- CFB model: power ratings + schedule/lines (public read, server-only write) ----
+    match /cfb_rankings/{team} {
+      allow read: if true;
+      allow write: if false;   // only the weekly pipeline (Admin SDK) writes these
+    }
+    match /cfb_schedule/{weekId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ---- Chalk Talk: PIN config -- never accessible from any client, ever ----
+    match /config/{doc} {
+      allow read: if false;
+      allow write: if false;
+    }
+
     // ---- fallback for everything else (unchanged): requires auth ----
     match /{document=**} {
       allow read, write: if request.auth != null;
