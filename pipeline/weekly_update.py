@@ -525,6 +525,77 @@ if __name__ == "__main__":
                                   if SEASON == 2025 else fetch_pbp(SEASON - 1))
     print(json.dumps(history, indent=1)[:2000], "\n...(truncated for display, full output is per-team, per-week)")
 
+    # ---- Player-level: QB_LEADERBOARD / WR_LEADERBOARD / RB_LEADERBOARD / QB_HISTORY /
+    # TEAM_PLAYERS. Real functions existed in this file (build_qb_leaderboard etc.) but were
+    # never actually called from main() -- dead code, silently never producing real output.
+    # Wired in here. Needs real current-season pbp to mean anything current; with none yet
+    # (pre-Week-1), this intentionally falls back to the most recent completed real seasons
+    # (2024+2025) available locally so the numbers are real, just not 2026-current -- refresh
+    # this block specifically once 2026 pbp exists (a few real weeks in).
+    import glob, re
+    pbp_local = []
+    for path in sorted(glob.glob("/home/claude/pipeline/pbp_*.parquet")):
+        m = re.search(r"pbp_(\d{4})\.parquet", path)
+        if not m:
+            continue
+        yr = int(m.group(1))
+        try:
+            if pd.read_parquet(path, columns=["season"]).shape[0] == 0:
+                continue  # empty placeholder (e.g. pbp_2026.parquet pre-season)
+        except Exception:
+            continue
+        pbp_local.append((path, yr))
+
+    if pbp_local:
+        most_recent_season = max(yr for _, yr in pbp_local)
+
+        qb_lb = build_qb_leaderboard(pbp_local, min_attempts=100)
+        qb_lb_out = [{"player": r.passer, "cpoe": round(float(r.cpoe), 2),
+                      "epa": round(float(r.epa_per_dropback), 3), "n": int(r.attempts)}
+                     for r in qb_lb.head(15).itertuples()]
+        print(f"\n--- QB_LEADERBOARD (real, {'+'.join(str(y) for _,y in pbp_local)} combined -- paste into const QB_LEADERBOARD = [ ... ]) ---")
+        print(json.dumps(qb_lb_out, indent=1))
+
+        rec_lb, _ = build_receiver_yac_oe(pbp_local, min_targets=20)
+        wr_lb_out = [{"player": r.receiver, "yac_oe": round(float(r.yac_oe), 2), "n": int(r.targets)}
+                     for r in rec_lb.head(15).itertuples()]
+        print(f"\n--- WR_LEADERBOARD (real, {'+'.join(str(y) for _,y in pbp_local)} combined -- paste into const WR_LEADERBOARD = [ ... ]) ---")
+        print(json.dumps(wr_lb_out, indent=1))
+
+        rush_lb, _ = build_rusher_epa(pbp_local, min_carries=30)
+        rb_lb_out = [{"player": r.rusher, "epa": round(float(r.rush_epa), 3), "n": int(r.carries)}
+                     for r in rush_lb.head(15).itertuples()]
+        print(f"\n--- RB_LEADERBOARD (real, {'+'.join(str(y) for _,y in pbp_local)} combined -- paste into const RB_LEADERBOARD = [ ... ]) ---")
+        print(json.dumps(rb_lb_out, indent=1))
+
+        # QB_HISTORY: within-season week-by-week trend, most recent completed season only
+        # (mixing week numbers across seasons on one chart would be misleading).
+        qb_wk = build_qb_weekly_history([(p, y) for p, y in pbp_local if y == most_recent_season])
+        qb_wk = qb_wk[qb_wk.passer.isin(qb_lb_out and [r["player"] for r in qb_lb_out] or [])]
+        qb_history_out = {}
+        for name, grp in qb_wk.groupby("passer"):
+            qb_history_out[name] = [{"week": int(w), "cpoe": round(float(c), 2)}
+                                     for w, c in zip(grp.week, grp.cpoe)]
+        print(f"\n--- QB_HISTORY (real, {most_recent_season} only -- paste into const QB_HISTORY = { '{' } ... { '}' }) ---")
+        print(json.dumps(qb_history_out, indent=1))
+
+        team_players_out = build_team_top_players(pbp_local)
+        print(f"\n--- TEAM_PLAYERS (real, {'+'.join(str(y) for _,y in pbp_local)}, 'qb' reflects {most_recent_season}'s most-used passer per team -- paste into const TEAM_PLAYERS = { '{' } ... { '}' }) ---")
+        print(json.dumps(team_players_out, indent=1))
+    else:
+        print("\n--- QB_LEADERBOARD / WR_LEADERBOARD / RB_LEADERBOARD / QB_HISTORY / TEAM_PLAYERS ---")
+        print("No real pbp available locally (checked /home/claude/pipeline/pbp_*.parquet) -- skipped. "
+              "These need at least one real completed season's play-by-play on disk.")
+
+    # ---- FANTASY_PROJECTIONS: real half-PPR season-average points, keyed by team|lastname.
+    # See build_fantasy_projections() docstring for the exact methodology and its honest
+    # limitations. Paste as a new top-level const; ChalkTalk.html looks players up in this
+    # table via getProjection(p) instead of relying on a static field, so it covers roster
+    # players AND any waiver pickup automatically.
+    proj, proj_season = build_fantasy_projections(SEASON)
+    print(f"\n--- FANTASY_PROJECTIONS (real, {proj_season} season average, half-PPR -- paste into const FANTASY_PROJECTIONS = { '{' } ... { '}' }) ---")
+    print(json.dumps(proj, indent=1))
+
 
 # ---------- Player-level metrics: QB CPOE trend, WR/TE YAC-over-expected, RB rushing EPA ----------
 def build_qb_weekly_history(pbp_paths_and_seasons):
@@ -586,3 +657,132 @@ def build_rusher_epa(pbp_paths_and_seasons, min_carries=30):
     lb = lb[lb.carries >= min_carries].sort_values("rush_epa", ascending=False)
     weekly = allp.groupby(["rusher","season","week"]).agg(rush_epa=("epa","mean"), carries=("epa","size")).reset_index()
     return lb, weekly
+
+def build_team_top_players(pbp_paths_and_seasons, min_carries=15, min_targets=10):
+    """Per-team snapshot: current-ish starting QB (most pass attempts for that team in the
+    MOST RECENT season present in pbp_paths_and_seasons -- a real but imperfect proxy; it
+    reflects who started last, not necessarily who's QB1 today if there's been an offseason
+    change nflverse pbp can't see yet), top rusher by rush EPA/play, top receiver by YAC-over-
+    expected, and team pass-block context (sack rate, QB-hit rate, both as a fraction of real
+    dropbacks). All real, all from real play-by-play -- no fabricated numbers, but every field
+    here is a season-to-date/last-season snapshot, not a live depth chart."""
+    cols = ["posteam","passer","rusher","receiver","epa","yards_after_catch","xyac_mean_yardage",
+            "play_type","season_type","complete_pass","sack","qb_hit"]
+    frames = []
+    for path, season in pbp_paths_and_seasons:
+        p = pd.read_parquet(path, columns=cols)
+        p = p[p.season_type == "REG"].copy()
+        p["season"] = season
+        frames.append(p)
+    allp = pd.concat(frames, ignore_index=True)
+
+    out = {}
+    for team in sorted(allp.posteam.dropna().unique()):
+        tp = allp[allp.posteam == team]
+        latest_season = tp.season.max()
+
+        qb_pool = tp[(tp.season == latest_season) & (tp.play_type == "pass") & tp.passer.notna()]
+        qb = qb_pool.passer.value_counts().idxmax() if len(qb_pool) else None
+        # Every real passer this team has used, across all seasons in the window -- excluded
+        # from "top rusher"/"top receiver" below. Without this, a QB's scramble EPA (small
+        # sample, often garbage-time/broken-play) can look like an elite rushing season and
+        # wrongly surface as the team's top rusher (caught this for real: J.Flacco was coming
+        # back as CIN's "top rusher" off a handful of scrambles before this filter).
+        team_passers = set(tp[tp.play_type == "pass"].passer.dropna().unique())
+
+        rush_pool = tp[(tp.play_type == "run") & tp.rusher.notna() & ~tp.rusher.isin(team_passers)]
+        rstats = rush_pool.groupby("rusher").agg(epa=("epa", "mean"), n=("epa", "size"))
+        rstats = rstats[rstats.n >= min_carries]
+        top_rusher = None
+        if len(rstats):
+            name = rstats.epa.idxmax()
+            top_rusher = {"name": name, "epa": round(float(rstats.loc[name, "epa"]), 3)}
+
+        rec_pool = tp[(tp.play_type == "pass") & (tp.complete_pass == 1) & tp.receiver.notna()
+                      & ~tp.receiver.isin(team_passers)].copy()
+        rec_pool["yac_oe"] = rec_pool.yards_after_catch - rec_pool.xyac_mean_yardage
+        cstats = rec_pool.groupby("receiver").agg(yac_oe=("yac_oe", "mean"), n=("yac_oe", "size"))
+        cstats = cstats[cstats.n >= min_targets]
+        top_receiver = None
+        if len(cstats):
+            name = cstats.yac_oe.idxmax()
+            top_receiver = {"name": name, "yac_oe": round(float(cstats.loc[name, "yac_oe"]), 2)}
+
+        pass_pool = tp[tp.play_type == "pass"]
+        n_pass = len(pass_pool)
+        sack_rate = round(float(pass_pool.sack.sum()) / n_pass, 3) if n_pass else None
+        hit_rate = round(float(pass_pool.qb_hit.sum()) / n_pass, 3) if n_pass else None
+
+        out[team] = {"qb": qb, "top_rusher": top_rusher, "top_receiver": top_receiver,
+                     "sack_rate": sack_rate, "hit_rate": hit_rate}
+    return out
+
+def build_fantasy_projections(season):
+    """'Our Proj' for every rostered/waiver player: real half-PPR season-average fantasy
+    points per game. Uses nflverse's own official fantasy_points (standard) and
+    fantasy_points_ppr (full PPR) season-total columns from stats_player_reg_{season}.parquet
+    -- half-PPR is exactly the midpoint of those two since receptions are the only scoring
+    term that differs between them, so (standard + full_ppr) / 2 is an exact derivation, not
+    an approximation.
+
+    Backtested finding (see fantasy-integration.md): plain season-to-date average beat every
+    fancier projection approach tried (recency-weighting, defense-vs-position adjustment) --
+    MAE 4.26 vs 4.29-4.36. So this intentionally stays simple rather than adding a signal that
+    already tested worse.
+
+    Real limitation, stated plainly: this is a REAL SEASON prior (current season if any games
+    have been played yet, else the most recently completed season as a carryover prior, same
+    idea as the team ratings' carryover) -- it is not a lookahead, but it's also not adjusted
+    for this week's specific opponent or a player's role change since. Keyed by
+    team|lastname (lowercased) since roster display names vary in format (full name vs.
+    abbreviated) across Sleeper/ESPN/Yahoo -- team+lastname is unique enough in practice for
+    an active-roster skill player, with the rare same-team-same-lastname collision an accepted
+    known limitation of this approach."""
+    import urllib.request
+    def try_season(yr):
+        url = f"https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_reg_{yr}.parquet"
+        try:
+            path = f"/tmp/stats_player_reg_{yr}.parquet"
+            urllib.request.urlretrieve(url, path)
+            df = pd.read_parquet(path)
+            if len(df) == 0:
+                return None
+            return df
+        except Exception:
+            return None
+
+    df = try_season(season)
+    used_season = season
+    if df is None or len(df) == 0:
+        df = try_season(season - 1)
+        used_season = season - 1
+    if df is None:
+        return {}, None
+
+    # K deliberately excluded: nflverse's fantasy_points/fantasy_points_ppr columns only cover
+    # offensive skill-position scoring, not kicking (FG/PAT) -- every kicker was coming back as
+    # a real-looking 0.0 projection, which is a false number (not "we project 0 points"), not a
+    # true zero. Caught this checking real output before shipping. No real fix without pulling
+    # in FG/PAT stats separately and building actual kicker scoring -- not done here, so K (and
+    # D/ST, which was never in this player-level file to begin with) stay unprojected/"--" in
+    # the UI rather than showing a fabricated number.
+    keep_pos = {"QB", "RB", "WR", "TE"}
+    df = df[(df.games > 0) & (df.position.isin(keep_pos))].copy()
+    df["half_ppr"] = (df["fantasy_points"] + df["fantasy_points_ppr"]) / 2
+    df["ppg"] = df["half_ppr"] / df["games"]
+
+    SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+    def surname_key(full_name):
+        # Token-based suffix stripping (not substring replace) -- a substring approach would
+        # wrongly mangle real surnames that happen to contain "ii"/"sr" as letters within them.
+        tokens = [t.rstrip(".").lower() for t in str(full_name).split()]
+        while tokens and tokens[-1] in SUFFIXES:
+            tokens.pop()
+        return tokens[-1] if tokens else ""
+
+    out = {}
+    for _, r in df.iterrows():
+        last = surname_key(r["player_display_name"])
+        key = f"{str(r['recent_team']).lower()}|{last}"
+        out[key] = {"proj": round(float(r["ppg"]), 2), "games": int(r["games"]), "pos": r["position"]}
+    return out, used_season
