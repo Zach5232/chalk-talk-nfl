@@ -61,3 +61,4 @@ jobs:
       - name: Clean up credentials
         if: always()
         run: rm -f /tmp/firebase-key.json
+# touch to retrigger workflow indexing Tue Sep  8 17:29:53 EDT 2026
