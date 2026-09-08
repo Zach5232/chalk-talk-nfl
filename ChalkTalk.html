@@ -225,6 +225,7 @@
     <button id="nav-ranks" onclick="showView('ranks')">The Margin</button>
     <button id="nav-fantasy" onclick="showView('fantasy')">Player Watch</button>
     <button id="nav-survivor" onclick="showView('survivor')">Survivor</button>
+    <button id="nav-results" onclick="showView('results')">Results</button>
     <button id="nav-tracker" onclick="showView('tracker')">Tracker</button>
   </nav>
 
@@ -328,9 +329,23 @@
     <div class="section-label">Teams used</div>
     <div class="dash-card" id="survivor-used"></div>
 
+    <div class="section-label">Pool Entrants &amp; Strikes</div>
+    <div class="dash-card" id="survivor-entrants"></div>
+
     <div class="section-label">This Week's Board</div>
     <div class="empty-note" id="survivor-note" style="padding:0 0 14px;"></div>
-    <div class="dash-card" id="survivor-board"></div>
+    <div id="survivor-board-wrap"></div>
+  </div>
+
+  <div id="view-results" class="view">
+    <div class="section-label">Pick'em Record</div>
+    <div class="dash-card" id="results-pickem"></div>
+
+    <div class="section-label">Survivor Record</div>
+    <div class="dash-card" id="results-survivor"></div>
+
+    <div class="section-label">Fantasy Records</div>
+    <div id="results-fantasy"></div>
   </div>
 
   <div id="view-tracker" class="view">
@@ -400,11 +415,13 @@ function showView(name){
   document.getElementById('nav-ranks').classList.toggle('active', name==='ranks');
   document.getElementById('nav-fantasy').classList.toggle('active', name==='fantasy');
   document.getElementById('nav-survivor').classList.toggle('active', name==='survivor');
+  document.getElementById('nav-results').classList.toggle('active', name==='results');
   document.getElementById('nav-tracker').classList.toggle('active', name==='tracker');
   if(name==='tracker'){ populateGameSelect(); renderBets(); }
   if(name==='dash'){ renderDashboard(); }
   if(name==='fantasy'){ renderFantasy(); }
   if(name==='survivor'){ renderSurvivor(); }
+  if(name==='results'){ renderResults(); }
   window.scrollTo(0,0);
 }
 
@@ -2169,9 +2186,62 @@ function isDivisional(away, home){
   return !!DIVISIONS[away] && DIVISIONS[away] === DIVISIONS[home];
 }
 
-function getPickemSelections(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_pickem_selections') || '[]'); }
-  catch(e){ return []; }
+// ---- Pick'em: week-scoped, records WHICH team was picked per game (not just a checkbox) so
+// we can auto-grade ATS once that week's CLOSING_RESULTS come in. Shape:
+// { "<week>": { "<gameId>": "<pickedTeamAbbrev>" } }
+function getPickemHistory(){
+  try{ return JSON.parse(localStorage.getItem('chalktalk_pickem_history') || '{}'); }
+  catch(e){ return {}; }
+}
+function getPickemWeekPicks(week){
+  const hist = getPickemHistory();
+  return hist[week] || {};
+}
+function setPickemPick(week, gameId, team){
+  const hist = getPickemHistory();
+  const weekPicks = {...(hist[week]||{})};
+  if(weekPicks[gameId] === team){
+    delete weekPicks[gameId]; // clicking the already-picked side again un-picks the game
+  } else {
+    const isNewGame = !(gameId in weekPicks);
+    if(isNewGame && Object.keys(weekPicks).length >= 5){
+      alert("You already have 5 picks locked for this week -- remove one first.");
+      return;
+    }
+    weekPicks[gameId] = team;
+  }
+  hist[week] = weekPicks;
+  try{ localStorage.setItem('chalktalk_pickem_history', JSON.stringify(hist)); } catch(e){}
+  renderPickemHelper();
+}
+
+// gameId is always "<away>-<home>" lowercase (e.g. "ne-sea") -- no team abbrev contains a
+// hyphen, so this split is safe and matches how GAMES[].id is built by the pipeline.
+function parseGameId(gameId){
+  const parts = String(gameId).split('-');
+  return {away: (parts[0]||'').toUpperCase(), home: (parts[1]||'').toUpperCase()};
+}
+// ATS grade for a pick'em pick, using the real closing line + final score from CLOSING_RESULTS.
+// close_home is the home team's expected margin (positive = home favored by that many points,
+// the verified games.csv convention) -- so home covers when its real margin beat that number.
+function gradeATSPick(gameId, pickedTeam){
+  const cr = CLOSING_RESULTS[gameId];
+  if(!cr) return null; // not final yet
+  const {home} = parseGameId(gameId);
+  const margin = cr.home_score - cr.away_score;
+  const diff = margin - cr.close_home;
+  if(Math.abs(diff) < 1e-9) return 'push';
+  const homeCovered = diff > 0;
+  return (homeCovered === (pickedTeam === home)) ? 'win' : 'loss';
+}
+// Straight win/loss grade for a survivor pick (no spread involved).
+function gradeSurvivorPick(gameId, pickedTeam){
+  const cr = CLOSING_RESULTS[gameId];
+  if(!cr) return null;
+  if(cr.home_score === cr.away_score) return 'push';
+  const {away, home} = parseGameId(gameId);
+  const winner = cr.home_score > cr.away_score ? home : away;
+  return winner === pickedTeam ? 'win' : 'loss';
 }
 
 // ---- Splash locked line vs. live market ----
@@ -2200,27 +2270,17 @@ function setSplashLine(gameId, val){
   try{ localStorage.setItem('chalktalk_pickem_splash_lines', JSON.stringify(lines)); } catch(e){}
   renderPickemHelper();
 }
-function togglePickemPick(gameId){
-  let sel = getPickemSelections();
-  if(sel.includes(gameId)){
-    sel = sel.filter(id => id!==gameId);
-  } else {
-    if(sel.length >= 5){
-      alert('You already have 5 picks selected for this week -- uncheck one first.');
-      return;
-    }
-    sel = [...sel, gameId];
-  }
-  try{ localStorage.setItem('chalktalk_pickem_selections', JSON.stringify(sel)); } catch(e){}
-  renderPickemHelper();
-}
+let pickemExpanded = false;
+function togglePickemExpanded(){ pickemExpanded = !pickemExpanded; renderPickemHelper(); }
 
 function renderPickemHelper(){
   const el = document.getElementById('pickem-helper');
   if(!el) return;
   if(!GAMES || GAMES.length===0){ el.innerHTML = '<div class="empty-note">No games loaded yet.</div>'; return; }
 
-  const sel = getPickemSelections();
+  const currentWeek = GAMES[0] ? GAMES[0].week : 1;
+  const weekPicks = getPickemWeekPicks(currentWeek);
+  const pickedCount = Object.keys(weekPicks).length;
   const splashLines = getSplashLines();
   const rows = GAMES.map(g => {
     const modelHomeFavored = -g.model, marketHomeFavored = -g.market;
@@ -2231,8 +2291,28 @@ function renderPickemHelper(){
     return {g, es, pickTeam, favTeam, favSpread, divisional: isDivisional(g.away, g.home)};
   }).sort((a,b) => b.favSpread - a.favSpread);
 
+  const lockedTeams = rows.filter(r => weekPicks[r.g.id]).map(r => weekPicks[r.g.id]);
+  const summaryHtml = `
+    <div style="font-size:13px;margin-bottom:10px;">
+      <b>${pickedCount} / 5 picks locked for Week ${currentWeek}.</b>
+      ${lockedTeams.length ? lockedTeams.map(t => `<span class="status-pill" style="margin:2px 4px 2px 0;">${t}</span>`).join('') : ''}
+    </div>`;
+
+  if(pickedCount >= 5 && !pickemExpanded){
+    el.innerHTML = `
+      ${summaryHtml}
+      <div style="font-size:12px;color:var(--sage);margin-bottom:10px;">
+        You've got your 5 in for Week ${currentWeek} -- tucked away so this doesn't eat page space. They'll auto-grade
+        once results are in; check the Results tab for your running ATS record.
+      </div>
+      <button class="btn" onclick="togglePickemExpanded()">Show board / change picks</button>
+    `;
+    return;
+  }
+
   const rowsHtml = rows.map(r => {
-    const checked = sel.includes(r.g.id);
+    const pickedSide = weekPicks[r.g.id];
+    const atCap = pickedCount >= 5 && !pickedSide;
     const splashVal = splashLines[r.g.id];
     let clvHtml = '';
     if(splashVal !== undefined && !isNaN(splashVal)){
@@ -2254,33 +2334,39 @@ function renderPickemHelper(){
       }
     }
     return `
-    <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);">
-      <input type="checkbox" ${checked?'checked':''} ${!checked && sel.length>=5 ? 'disabled':''} onchange="togglePickemPick('${r.g.id}')" style="width:16px;height:16px;flex-shrink:0;">
-      <div style="flex:1;">
-        <div style="font-size:12.5px;">
+    <div style="padding:9px 0;border-bottom:1px solid var(--line);">
+      <div style="font-size:12.5px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <span>
           ${logoImg(r.g.away,16)}${r.g.away} @ ${logoImg(r.g.home,16)}${r.g.home}
           <span style="color:var(--sage);">&middot; market favorite: <b style="color:var(--chalk);">${r.favTeam}</b> by ${r.favSpread.toFixed(1)}</span>
           ${r.divisional ? '<span class="status-pill questionable" style="margin-left:6px;">DIVISIONAL</span>' : ''}
-        </div>
-        <div style="font-size:11px;color:var(--sage);margin-top:2px;">Our model's side: ${r.pickTeam} &middot; edge ${Math.abs(r.es.edge).toFixed(1)} pts vs. market (${r.es.tag})</div>
-        ${clvHtml}
-        <div style="margin-top:4px;">
-          <label style="font-size:10.5px;color:var(--sage);">Splash locked line (${r.g.home} spread):
-            <input type="number" step="0.5" placeholder="e.g. -3" value="${splashVal !== undefined ? splashVal : ''}"
-              onchange="setSplashLine('${r.g.id}', this.value)"
-              style="width:64px;margin-left:4px;font-size:11px;padding:2px 4px;background:var(--panel,#1a1a1a);color:var(--chalk);border:1px solid var(--line);border-radius:4px;">
-          </label>
-        </div>
+        </span>
+        <span style="flex-shrink:0;">
+          <button class="btn" style="padding:4px 10px;font-size:11px;${pickedSide===r.g.away?'background:var(--gold);color:#000;':''}" ${atCap?'disabled':''} onclick="setPickemPick(${currentWeek}, '${r.g.id}', '${r.g.away}')">Pick ${r.g.away}</button>
+          <button class="btn" style="padding:4px 10px;font-size:11px;${pickedSide===r.g.home?'background:var(--gold);color:#000;':''}" ${atCap?'disabled':''} onclick="setPickemPick(${currentWeek}, '${r.g.id}', '${r.g.home}')">Pick ${r.g.home}</button>
+        </span>
+      </div>
+      <div style="font-size:11px;color:var(--sage);margin-top:2px;">Our model's side: ${r.pickTeam} &middot; edge ${Math.abs(r.es.edge).toFixed(1)} pts vs. market (${r.es.tag})</div>
+      ${clvHtml}
+      <div style="margin-top:4px;">
+        <label style="font-size:10.5px;color:var(--sage);">Splash locked line (${r.g.home} spread):
+          <input type="number" step="0.5" placeholder="e.g. -3" value="${splashVal !== undefined ? splashVal : ''}"
+            onchange="setSplashLine('${r.g.id}', this.value)"
+            style="width:64px;margin-left:4px;font-size:11px;padding:2px 4px;background:var(--panel,#1a1a1a);color:var(--chalk);border:1px solid var(--line);border-radius:4px;">
+        </label>
       </div>
     </div>`;
   }).join('');
 
   el.innerHTML = `
-    <div style="font-size:13px;margin-bottom:10px;">
-      <b>${sel.length} / 5 picks selected.</b> Ranked by market favorite size -- a real backtest (2 seasons, 130 picks) found
-      this beat ranking by our model's edge for this pool format (51.5% ATS vs. 43.1% ATS), though the sample's small enough
-      not to treat as gospel. Our model's own side and its edge vs. market are shown too so you can weigh both.
-      Divisional games are flagged, not excluded -- real, more variance/upset-prone than a normal game.
+    ${summaryHtml}
+    <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
+      Ranked by market favorite size -- a real backtest (2 seasons, 130 picks) found this beat ranking by our model's
+      edge for this pool format (51.5% ATS vs. 43.1% ATS), though the sample's small enough not to treat as gospel.
+      Our model's own side and its edge vs. market are shown too so you can weigh both. Divisional games are flagged,
+      not excluded -- real, more variance/upset-prone than a normal game. Tap a team to lock it in; picks save
+      automatically and get graded once that game's closing result comes in -- check the Results tab for your
+      running record.
     </div>
     <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
       Splash Sports has no public data feed, so type in the line it locked you into (per game, once you're picking that
@@ -2288,6 +2374,7 @@ function renderPickemHelper(){
       keeps drifting toward your side after you locked it is a real signal you got a good number, not just noise.
     </div>
     ${rowsHtml}
+    ${pickedCount>=5 ? `<button class="btn" style="margin-top:10px;" onclick="togglePickemExpanded()">Collapse</button>` : ''}
   `;
 }
 
@@ -2360,18 +2447,148 @@ function setSurvivorPickPct(team, val){
   renderSurvivor();
 }
 
+// ---- Survivor: week-scoped pick history, so we know exactly which team you rode each week
+// (not just the running "used" list) and can auto-grade it once that game's real score is in.
+// Shape: { "<week>": "<teamAbbrev>" }
+function getSurvivorHistory(){
+  try{ return JSON.parse(localStorage.getItem('chalktalk_survivor_history') || '{}'); }
+  catch(e){ return {}; }
+}
+function lockSurvivorPick(week, team){
+  const hist = getSurvivorHistory();
+  const prev = hist[week];
+  let used = getSurvivorUsed();
+  if(prev && prev !== team){ used = used.filter(t => t !== prev); }
+  if(!used.includes(team)) used = [...used, team];
+  hist[week] = team;
+  try{
+    localStorage.setItem('chalktalk_survivor_history', JSON.stringify(hist));
+    localStorage.setItem('chalktalk_survivor_used', JSON.stringify(used));
+  } catch(e){}
+  renderSurvivor();
+}
+function unlockSurvivorPick(week){
+  const hist = getSurvivorHistory();
+  const team = hist[week];
+  if(!team) return;
+  delete hist[week];
+  const used = getSurvivorUsed().filter(t => t !== team);
+  try{
+    localStorage.setItem('chalktalk_survivor_history', JSON.stringify(hist));
+    localStorage.setItem('chalktalk_survivor_used', JSON.stringify(used));
+  } catch(e){}
+  renderSurvivor();
+}
+// Your own alive/eliminated status, derived automatically from your own graded pick history --
+// no separate manual "am I still alive" toggle to forget about.
+function getMySurvivorStatus(currentWeek){
+  const hist = getSurvivorHistory();
+  const picks = Object.keys(hist).map(Number).filter(w => w < currentWeek).sort((a,b)=>a-b);
+  for(const w of picks){
+    const team = hist[w];
+    const gameId = GAMES.find(g => (g.home===team || g.away===team) && g.week===w)?.id
+      || FULL_SCHEDULE.filter(g => g.week===w && (g.home===team || g.away===team))
+           .map(g => `${g.away.toLowerCase()}-${g.home.toLowerCase()}`)[0];
+    const grade = gameId ? gradeSurvivorPick(gameId, team) : null;
+    if(grade === 'loss') return {alive:false, eliminatedWeek: w, eliminatedWith: team};
+  }
+  return {alive:true, eliminatedWeek:null, eliminatedWith:null};
+}
+
+// ---- Pool entrants + strikes: one-time paste of names, then a per-person "+1 strike" button.
+// Remaining is computed automatically (2-strike pool -- an entrant is out once they hit 2), not
+// hand-tracked as a running number.
+function getSurvivorEntrants(){
+  try{ return JSON.parse(localStorage.getItem('chalktalk_survivor_entrants') || '[]'); }
+  catch(e){ return []; }
+}
+function setSurvivorEntrants(list){
+  try{ localStorage.setItem('chalktalk_survivor_entrants', JSON.stringify(list)); } catch(e){}
+}
+function importSurvivorEntrants(){
+  const ta = document.getElementById('survivor-entrants-paste');
+  if(!ta) return;
+  const names = ta.value.split(/[\n,]+/).map(s=>s.trim()).filter(Boolean);
+  if(names.length===0) return;
+  const list = getSurvivorEntrants();
+  const existing = new Set(list.map(e=>e.name.toLowerCase()));
+  names.forEach(n => {
+    if(!existing.has(n.toLowerCase())){ list.push({name:n, strikes:0}); existing.add(n.toLowerCase()); }
+  });
+  setSurvivorEntrants(list);
+  ta.value = '';
+  renderSurvivor();
+}
+function addSurvivorStrike(name){
+  setSurvivorEntrants(getSurvivorEntrants().map(e => e.name===name ? {...e, strikes: Math.min(2, e.strikes+1)} : e));
+  renderSurvivor();
+}
+function removeSurvivorStrike(name){
+  setSurvivorEntrants(getSurvivorEntrants().map(e => e.name===name ? {...e, strikes: Math.max(0, e.strikes-1)} : e));
+  renderSurvivor();
+}
+function removeSurvivorEntrant(name){
+  setSurvivorEntrants(getSurvivorEntrants().filter(e => e.name!==name));
+  renderSurvivor();
+}
+
+let survivorExpanded = false;
+function toggleSurvivorExpanded(){ survivorExpanded = !survivorExpanded; renderSurvivor(); }
+
+function renderSurvivorEntrants(){
+  const el = document.getElementById('survivor-entrants');
+  if(!el) return;
+  const entrants = getSurvivorEntrants();
+  const remaining = entrants.length ? entrants.filter(e => e.strikes < 2).length : null;
+  el.innerHTML = `
+    <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
+      One-time paste of everyone in the pool (newline or comma separated) -- after that, just tap "+1 strike" for
+      whoever busts each week and "remaining" below updates itself instead of you re-counting by hand. This is your
+      own manual roster (Yahoo group 20877 doesn't expose it via API), 2-strike elimination per the pool's real rules.
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px;">
+      <textarea id="survivor-entrants-paste" placeholder="Paste names, one per line (or comma-separated)..." style="flex:1;min-width:220px;min-height:60px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
+      <button class="btn" onclick="importSurvivorEntrants()">Add to pool</button>
+    </div>
+    ${entrants.length===0 ? '<div class="empty-note">No entrants added yet.</div>' : `
+      <div style="font-size:13px;margin-bottom:8px;"><b>${remaining} / ${entrants.length}</b> entrants still alive (${entrants.length-remaining} eliminated at 2 strikes).</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">
+        ${entrants.map(e => `
+          <div style="padding:6px 10px;border-radius:8px;font-size:12px;display:flex;align-items:center;gap:6px;background:${e.strikes>=2?'var(--panel2)':'transparent'};border:1px solid var(--line);opacity:${e.strikes>=2?'0.5':'1'};">
+            <span>${e.name}</span>
+            <span style="color:var(--sage);">${'&#10007;'.repeat(e.strikes)}${e.strikes>=2?' OUT':''}</span>
+            <button class="btn" style="padding:2px 6px;font-size:10px;" onclick="addSurvivorStrike('${e.name.replace(/'/g,"\\'")}')" ${e.strikes>=2?'disabled':''}>+1 strike</button>
+            <button class="btn" style="padding:2px 6px;font-size:10px;" onclick="removeSurvivorStrike('${e.name.replace(/'/g,"\\'")}')" ${e.strikes<=0?'disabled':''}>undo</button>
+            <button class="btn" style="padding:2px 6px;font-size:10px;" onclick="removeSurvivorEntrant('${e.name.replace(/'/g,"\\'")}')">&times;</button>
+          </div>`).join('')}
+      </div>`}
+  `;
+}
+
 function renderSurvivor(){
   const statusEl = document.getElementById('survivor-pool-status');
   const usedEl = document.getElementById('survivor-used');
-  const boardEl = document.getElementById('survivor-board');
+  const wrapEl = document.getElementById('survivor-board-wrap');
   const noteEl = document.getElementById('survivor-note');
-  if(!usedEl || !boardEl) return;
+  if(!usedEl || !wrapEl) return;
+
+  renderSurvivorEntrants();
+
+  const currentWeek = GAMES && GAMES.length ? GAMES[0].week : 1;
+  const myStatus = getMySurvivorStatus(currentWeek);
+  const entrants = getSurvivorEntrants();
+  const entrantsRemaining = entrants.length ? entrants.filter(e => e.strikes < 2).length : null;
 
   if(statusEl){
     const st = getSurvivorPoolStatus();
-    const pct = (st.remaining!=null && st.total) ? Math.round((st.remaining/st.total)*100) : null;
+    const remaining = entrantsRemaining != null ? entrantsRemaining : st.remaining;
+    const total = entrantsRemaining != null ? entrants.length : st.total;
+    const pct = (remaining!=null && total) ? Math.round((remaining/total)*100) : null;
     statusEl.innerHTML = `
-      <div style="display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap;">
+      <div style="display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px;">
+        ${entrantsRemaining != null ? `
+          <div style="font-size:13px;">${pct}% of the field still alive -- ${remaining} / ${total} entrants (from your pasted pool list below).</div>
+        ` : `
         <div>
           <label style="font-size:11px;color:var(--sage);text-transform:uppercase;font-weight:700;">Entrants Remaining</label><br>
           <input type="number" min="0" value="${st.remaining!=null?st.remaining:''}" placeholder="--" style="width:70px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--chalk);padding:6px 8px;font-size:14px;" onchange="setSurvivorPoolStatus('remaining', this.value)">
@@ -2381,14 +2598,20 @@ function renderSurvivor(){
           <label style="font-size:11px;color:var(--sage);text-transform:uppercase;font-weight:700;">Started With</label><br>
           <input type="number" min="0" value="${st.total!=null?st.total:''}" placeholder="--" style="width:70px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--chalk);padding:6px 8px;font-size:14px;" onchange="setSurvivorPoolStatus('total', this.value)">
         </div>
-        ${pct!=null ? `<div style="font-size:13px;color:var(--sage);">${pct}% of the field still alive -- ${100-pct}% eliminated.</div>` : `<div style="font-size:12px;color:var(--sage);">Check "Members" or "Overview" in the Yahoo app for your live count.</div>`}
+        ${pct!=null ? `<div style="font-size:13px;color:var(--sage);">${pct}% of the field still alive -- ${100-pct}% eliminated.</div>` : `<div style="font-size:12px;color:var(--sage);">Check "Members" or "Overview" in the Yahoo app for your live count, or paste your pool list below for an auto-count.</div>`}
+        `}
+      </div>
+      <div style="font-size:13px;">
+        Your status: ${myStatus.alive
+          ? '<b style="color:var(--good);">Still alive</b>'
+          : `<b style="color:var(--alert);">Eliminated Week ${myStatus.eliminatedWeek} (${myStatus.eliminatedWith})</b>`}
       </div>`;
   }
 
   const used = getSurvivorUsed();
   const allTeams = [...RATINGS].map(r=>r.team).sort();
   usedEl.innerHTML = `
-    <div style="font-size:12px;color:var(--sage);margin-bottom:8px;">Click a team once you've used it -- used teams drop out of this week's board below (can't reuse a team in survivor).</div>
+    <div style="font-size:12px;color:var(--sage);margin-bottom:8px;">Click a team once you've used it -- used teams drop out of this week's board below (can't reuse a team in survivor). Normally this fills in on its own when you lock a weekly pick below; click here directly only to correct something.</div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;">
       ${allTeams.map(t => `
         <div onclick="toggleSurvivorUsed('${t}')" style="cursor:pointer;padding:5px 10px;border-radius:8px;font-size:12px;display:flex;align-items:center;gap:5px;background:${used.includes(t)?'var(--panel2)':'transparent'};border:1px solid var(--line);opacity:${used.includes(t)?'0.5':'1'};">
@@ -2396,11 +2619,26 @@ function renderSurvivor(){
         </div>`).join('')}
     </div>`;
 
-  if(!GAMES || GAMES.length===0){ boardEl.innerHTML = '<div class="empty-note">No games loaded yet.</div>'; noteEl.innerHTML=''; return; }
+  if(!GAMES || GAMES.length===0){ wrapEl.innerHTML = '<div class="empty-note">No games loaded yet.</div>'; noteEl.innerHTML=''; return; }
 
-  noteEl.innerHTML = "W% is real -- our own model's win probability plus the market's, from the same backtested spread-to-win-prob curve used elsewhere in this dashboard. P% is NOT ours to generate -- paste in that week's numbers from survivorgrid.com and the leverage score updates. Leverage is our own simple stand-in for the win%-vs-crowd% principle, not a copy of survivorgrid's actual EV formula. \"Future Look\" is our own answer to \"should I save this team\" -- it projects every remaining game on the real 2026 schedule using CURRENT ratings held flat (not a full week-by-week re-simulation), so treat it as a rough guide that sharpens as the season updates ratings, not a certainty.";
+  const hist = getSurvivorHistory();
+  const lockedTeam = hist[currentWeek];
 
-  const currentWeek = GAMES[0] ? GAMES[0].week : 1;
+  if(lockedTeam && !survivorExpanded){
+    noteEl.innerHTML = '';
+    wrapEl.innerHTML = `
+      <div class="dash-card">
+        <div style="font-size:13px;margin-bottom:8px;">
+          <b>You've locked ${logoImg(lockedTeam,18)}${lockedTeam} for Week ${currentWeek}.</b>
+        </div>
+        <div style="font-size:12px;color:var(--sage);margin-bottom:10px;">Tucked away so this doesn't eat page space -- it'll auto-grade once that game's final comes in. Check the Results tab for your survivor history.</div>
+        <button class="btn" onclick="toggleSurvivorExpanded()">Show board / change pick</button>
+      </div>`;
+    return;
+  }
+
+  noteEl.innerHTML = "<b>Leverage is your EV% read</b> -- our own win probability minus the crowd's pick%, both real inputs (not simulated): W% is our backtested model+market win-probability curve, P% is what you paste in from survivorgrid.com. A team with high win probability that few others are on is exactly the leveraged spot survivor strategy is built around -- that's the whole \"EV vs. public and pool size\" idea rolled into one number, updating automatically as you refresh W% weekly and paste in P%. \"Future Look\" answers \"should I save this team\" -- it projects every remaining game on the real 2026 schedule using CURRENT ratings held flat (not a full week-by-week re-simulation), so treat it as a rough guide that sharpens as the season updates ratings, not a certainty.";
+
   function ratingFor(team){ return RATINGS.find(r=>r.team===team); }
   function projectHomeFavoredPts(home, away){
     const h = ratingFor(home), a = ratingFor(away);
@@ -2440,10 +2678,12 @@ function renderSurvivor(){
   });
   rows.sort((a,b) => (b.leverage ?? b.ourWP) - (a.leverage ?? a.ourWP));
 
-  boardEl.innerHTML = `
+  wrapEl.innerHTML = `
+    <div class="dash-card">
+    ${lockedTeam ? `<div style="font-size:12.5px;margin-bottom:10px;">Currently locked for Week ${currentWeek}: <b>${logoImg(lockedTeam,16)}${lockedTeam}</b> <button class="btn" style="padding:3px 8px;font-size:10.5px;margin-left:6px;" onclick="unlockSurvivorPick(${currentWeek})">Unlock</button></div>` : ''}
     <div class="table-wrap">
     <table class="rank">
-      <thead><tr><th>Team</th><th>Matchup</th><th>Our Win%</th><th>Market Win%</th><th>Pick% (from survivorgrid.com)</th><th>Leverage</th><th>Future Look</th><th></th></tr></thead>
+      <thead><tr><th>Team</th><th>Matchup</th><th>Our Win%</th><th>Market Win%</th><th>Pick% (from survivorgrid.com)</th><th>Leverage (EV%)</th><th>Future Look</th><th></th></tr></thead>
       <tbody>
         ${rows.map(r => {
           let futureCell = '&mdash;';
@@ -2463,12 +2703,180 @@ function renderSurvivor(){
           <td><input type="number" min="0" max="100" step="1" value="${r.p!=null?r.p:''}" placeholder="--" style="width:60px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--chalk);padding:4px 6px;" onchange="setSurvivorPickPct('${r.team}', this.value)"></td>
           <td>${r.leverage!=null ? `<b style="color:${r.leverage>=0?'var(--good)':'var(--alert)'};">${r.leverage>=0?'+':''}${(r.leverage*100).toFixed(0)}</b>` : '&mdash;'}</td>
           <td style="font-size:11.5px;">${futureCell}</td>
-          <td><button class="btn" style="padding:5px 10px;font-size:11px;" onclick="toggleSurvivorUsed('${r.team}')">Use this pick</button></td>
+          <td><button class="btn" style="padding:5px 10px;font-size:11px;" onclick="lockSurvivorPick(${currentWeek}, '${r.team}')">Lock this week's pick</button></td>
         </tr>`;
         }).join('')}
       </tbody>
     </table>
+    </div>
+    ${lockedTeam ? `<button class="btn" style="margin-top:10px;" onclick="toggleSurvivorExpanded()">Collapse</button>` : ''}
     </div>`;
+}
+
+// ---- Results / History page ----
+// Pick'em + survivor grade themselves off real data already in the file (CLOSING_RESULTS +
+// FULL_SCHEDULE); fantasy has no API access for any of the 3 leagues (Yahoo has none at all,
+// ESPN/Sleeper would need per-league auth we haven't wired up), so those matchups are a quick
+// manual score entry per week -- W/L is still derived automatically from the two scores, not
+// typed in separately, so there's no chance of that going stale vs. the numbers you enter.
+function getFantasyMatchups(){
+  try{ return JSON.parse(localStorage.getItem('chalktalk_fantasy_matchups') || '{}'); }
+  catch(e){ return {}; }
+}
+function setFantasyMatchups(obj){
+  try{ localStorage.setItem('chalktalk_fantasy_matchups', JSON.stringify(obj)); } catch(e){}
+}
+function addFantasyMatchup(leagueId){
+  const wkEl = document.getElementById('fm-week-'+leagueId);
+  const oppEl = document.getElementById('fm-opp-'+leagueId);
+  const pfEl = document.getElementById('fm-pf-'+leagueId);
+  const paEl = document.getElementById('fm-pa-'+leagueId);
+  if(!wkEl) return;
+  const week = parseInt(wkEl.value, 10), opp = (oppEl.value||'').trim(), pf = parseFloat(pfEl.value), pa = parseFloat(paEl.value);
+  if(!week || isNaN(pf) || isNaN(pa)){ alert('Enter the week, your points, and your opponent\'s points.'); return; }
+  const all = getFantasyMatchups();
+  const list = (all[leagueId] || []).filter(m => m.week !== week);
+  all[leagueId] = [...list, {week, opp, pf, pa}].sort((a,b) => a.week - b.week);
+  setFantasyMatchups(all);
+  wkEl.value = ''; oppEl.value = ''; pfEl.value = ''; paEl.value = '';
+  renderResults();
+}
+function removeFantasyMatchup(leagueId, week){
+  const all = getFantasyMatchups();
+  all[leagueId] = (all[leagueId] || []).filter(m => m.week !== week);
+  setFantasyMatchups(all);
+  renderResults();
+}
+
+function renderResults(){
+  const pickemEl = document.getElementById('results-pickem');
+  const survivorEl = document.getElementById('results-survivor');
+  const fantasyEl = document.getElementById('results-fantasy');
+  if(!pickemEl || !survivorEl || !fantasyEl) return;
+
+  const currentWeek = GAMES && GAMES.length ? GAMES[0].week : 1;
+
+  // gameId lookup that works whether or not that week's matchup is still in the live GAMES
+  // array -- GAMES only ever holds the current week, so past weeks fall back to FULL_SCHEDULE.
+  function gameIdForWeekTeam(week, team){
+    const live = GAMES.find(g => g.week===week && (g.home===team || g.away===team));
+    if(live) return live.id;
+    const sched = FULL_SCHEDULE.find(g => g.week===week && (g.home===team || g.away===team));
+    return sched ? `${sched.away.toLowerCase()}-${sched.home.toLowerCase()}` : null;
+  }
+
+  // ---- Pick'em record ----
+  const pickemHist = getPickemHistory();
+  const pickemWeeks = Object.keys(pickemHist).map(Number).sort((a,b)=>a-b);
+  let cumW=0, cumL=0, cumP=0;
+  const weekRows = pickemWeeks.map(week => {
+    const picks = pickemHist[week];
+    let w=0, l=0, p=0, pend=0;
+    const pickDetails = Object.entries(picks).map(([gameId, team]) => {
+      const grade = gradeATSPick(gameId, team);
+      if(grade==='win') w++; else if(grade==='loss') l++; else if(grade==='push') p++; else pend++;
+      return {gameId, team, grade};
+    });
+    cumW+=w; cumL+=l; cumP+=p;
+    return {week, w, l, p, pend, pickDetails};
+  });
+  const cumTotal = cumW+cumL+cumP;
+  const cumPct = cumTotal>0 ? ((cumW/(cumW+cumL||1))*100).toFixed(1) : null;
+
+  pickemEl.innerHTML = pickemWeeks.length===0 ? '<div class="empty-note">No picks locked yet -- head to Spread Zone and lock your 5 for this week.</div>' : `
+    <div style="font-size:13px;margin-bottom:12px;">
+      <b>Season record: ${cumW}-${cumL}${cumP?`-${cumP}`:''} ATS${cumPct?` (${cumPct}%)`:''}</b> across ${weekRows.filter(r=>r.w+r.l+r.p>0).length} graded week(s).
+    </div>
+    <div class="table-wrap">
+    <table class="rank">
+      <thead><tr><th>Week</th><th>Record</th><th>Picks</th></tr></thead>
+      <tbody>
+        ${weekRows.slice().reverse().map(r => `
+        <tr>
+          <td>Wk ${r.week}${r.week===currentWeek?' <span style="color:var(--sage);">(current)</span>':''}</td>
+          <td>${r.w}-${r.l}${r.p?`-${r.p}`:''}${r.pend?` <span style="color:var(--sage);">(${r.pend} pending)</span>`:''}</td>
+          <td style="font-size:11.5px;">
+            ${r.pickDetails.map(d => `<span class="status-pill" style="margin:2px 4px 2px 0;${d.grade==='win'?'color:var(--good);':d.grade==='loss'?'color:var(--alert);':''}">${d.team}${d.grade?` (${d.grade})`:' (pending)'}</span>`).join('')}
+          </td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+    </div>`;
+
+  // ---- Survivor record ----
+  const survivorHist = getSurvivorHistory();
+  const survivorWeeks = Object.keys(survivorHist).map(Number).sort((a,b)=>a-b);
+  const myStatus = getMySurvivorStatus(currentWeek);
+  const entrants = getSurvivorEntrants();
+  const entrantsRemaining = entrants.length ? entrants.filter(e=>e.strikes<2).length : null;
+  const survivorRows = survivorWeeks.map(week => {
+    const team = survivorHist[week];
+    const gameId = gameIdForWeekTeam(week, team);
+    const grade = gameId ? gradeSurvivorPick(gameId, team) : null;
+    return {week, team, grade};
+  });
+
+  survivorEl.innerHTML = `
+    <div style="font-size:13px;margin-bottom:12px;">
+      <b>Your status: ${myStatus.alive ? 'Still alive' : `Eliminated Week ${myStatus.eliminatedWeek} (${myStatus.eliminatedWith})`}</b>
+      ${entrantsRemaining!=null ? ` &middot; ${entrantsRemaining} / ${entrants.length} entrants still alive in the pool` : ''}
+    </div>
+    ${survivorRows.length===0 ? '<div class="empty-note">No survivor picks locked yet.</div>' : `
+    <div class="table-wrap">
+    <table class="rank">
+      <thead><tr><th>Week</th><th>Team</th><th>Result</th></tr></thead>
+      <tbody>
+        ${survivorRows.slice().reverse().map(r => `
+        <tr>
+          <td>Wk ${r.week}${r.week===currentWeek?' <span style="color:var(--sage);">(current)</span>':''}</td>
+          <td>${logoImg(r.team,16)}${r.team}</td>
+          <td style="${r.grade==='win'?'color:var(--good);':r.grade==='loss'?'color:var(--alert);':''}">${r.grade || 'pending'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+    </div>`}
+  `;
+
+  // ---- Fantasy records (manual entry, W/L derived) ----
+  const fmAll = getFantasyMatchups();
+  fantasyEl.innerHTML = FANTASY_ROSTERS.map(league => {
+    const matchups = fmAll[league.id] || [];
+    const wins = matchups.filter(m=>m.pf>m.pa).length;
+    const losses = matchups.filter(m=>m.pf<m.pa).length;
+    const ties = matchups.filter(m=>m.pf===m.pa).length;
+    const pf = matchups.reduce((s,m)=>s+m.pf,0), pa = matchups.reduce((s,m)=>s+m.pa,0);
+    return `
+    <div class="dash-card">
+      <div class="fantasy-league-name">${league.team_name} <span style="color:var(--sage);font-weight:400;">&middot; ${league.platform}, "${league.league_name}"</span></div>
+      <div style="font-size:13px;margin:6px 0 10px;">
+        <b>${wins}-${losses}${ties?`-${ties}`:''}</b>${matchups.length ? ` &middot; ${pf.toFixed(1)} PF / ${pa.toFixed(1)} PA` : ''}
+      </div>
+      ${matchups.length ? `
+      <div class="table-wrap" style="margin-bottom:10px;">
+      <table class="rank">
+        <thead><tr><th>Week</th><th>Opp</th><th>PF</th><th>PA</th><th>Result</th><th></th></tr></thead>
+        <tbody>
+          ${matchups.slice().reverse().map(m => `
+          <tr>
+            <td>${m.week}</td>
+            <td>${m.opp||'--'}</td>
+            <td>${m.pf.toFixed(1)}</td>
+            <td>${m.pa.toFixed(1)}</td>
+            <td style="${m.pf>m.pa?'color:var(--good);':m.pf<m.pa?'color:var(--alert);':''}">${m.pf>m.pa?'W':m.pf<m.pa?'L':'T'}</td>
+            <td><button class="btn" style="padding:2px 6px;font-size:10px;" onclick="removeFantasyMatchup('${league.id}', ${m.week})">&times;</button></td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+      </div>` : '<div class="empty-note" style="margin-bottom:10px;">No matchups logged yet.</div>'}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+        <div><label style="font-size:10.5px;color:var(--sage);">Week</label><br><input type="number" id="fm-week-${league.id}" min="1" style="width:60px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--chalk);padding:5px 6px;"></div>
+        <div><label style="font-size:10.5px;color:var(--sage);">Opponent</label><br><input type="text" id="fm-opp-${league.id}" style="width:120px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--chalk);padding:5px 6px;"></div>
+        <div><label style="font-size:10.5px;color:var(--sage);">Your Pts</label><br><input type="number" step="0.1" id="fm-pf-${league.id}" style="width:80px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--chalk);padding:5px 6px;"></div>
+        <div><label style="font-size:10.5px;color:var(--sage);">Opp Pts</label><br><input type="number" step="0.1" id="fm-pa-${league.id}" style="width:80px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--chalk);padding:5px 6px;"></div>
+        <button class="btn" onclick="addFantasyMatchup('${league.id}')">Log matchup</button>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 function renderBiggestEdges(){
