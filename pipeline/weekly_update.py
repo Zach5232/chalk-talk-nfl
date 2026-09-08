@@ -825,7 +825,7 @@ if __name__ == "__main__":
         book_entry = books.get(gid)
         market_home_favored = -float(book_entry["books"][0]["home_pt"]) if book_entry else None
         games_out.append({
-            "id": gid, "away": a, "home": h,
+            "id": gid, "away": a, "home": h, "week": week, "season": season,
             "model": round(-model_home_favored, 2),
             "market": round(-market_home_favored, 2) if market_home_favored is not None else None,
             "ah": None, "aa": None,

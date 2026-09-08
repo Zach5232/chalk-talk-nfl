@@ -79,6 +79,18 @@ service cloud.firestore {
       allow delete: if true;   // dashboard's existing "Delete" button needs this
     }
 
+    // ---- Chalk Talk: generic cross-device dashboard state (public read AND write, same
+    // trust level as bets/fantasy_roster_overrides above -- pick'em picks, Splash lines,
+    // survivor entrants/history/pool-picks/pick%, hidden fantasy leagues, fantasy matchups.
+    // One doc per state key, e.g. dashboard_state/survivor_entrants. No login system, single
+    // real user across however many of their own devices.) ----
+    match /dashboard_state/{key} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
+      allow delete: if true;
+    }
+
     // ---- CFB model: power ratings + schedule/lines (public read, server-only write) ----
     match /cfb_rankings/{team} {
       allow read: if true;

@@ -335,6 +335,9 @@
     <div class="section-label">Pool Entrants &amp; Strikes</div>
     <div class="dash-card" id="survivor-entrants"></div>
 
+    <div class="section-label">Your Pool's Picks This Week</div>
+    <div class="dash-card" id="survivor-pool-picks"></div>
+
     <div class="section-label">This Week's Board</div>
     <div class="empty-note" id="survivor-note" style="padding:0 0 14px;"></div>
     <div id="survivor-board-wrap"></div>
@@ -918,6 +921,57 @@ async function persistLeagueOverride(leagueId, moves){
 }
 function playerKey(name, team){ return (name+'|'+team).toLowerCase(); }
 
+// ---- Generic cross-device state, same pattern as fantasy_roster_overrides above ----
+// Everything that used to be a standalone localStorage key (pick'em picks, Splash lines,
+// survivor entrants/history/pool-picks/etc, hidden fantasy leagues, fantasy matchups) now
+// lives in Firestore's `dashboard_state/{key}` collection instead, one doc per key, each
+// holding {value: <whatever that key used to store>}. There's exactly one real user of this
+// dashboard across however many of their own devices, so no login/per-user scoping is needed --
+// same trust model as bets/fantasy_roster_overrides. boot() loads every doc in the collection
+// once into DASHBOARD_STATE_CACHE; getState() reads that cache synchronously so no call site
+// needs to become async, and setState() updates the cache immediately (UI reacts right away)
+// then persists to Firestore in the background.
+let DASHBOARD_STATE_CACHE = {};
+function getState(key, fallback){
+  return (key in DASHBOARD_STATE_CACHE) ? DASHBOARD_STATE_CACHE[key] : fallback;
+}
+async function setState(key, value){
+  DASHBOARD_STATE_CACHE[key] = value;
+  try{
+    await db.collection('dashboard_state').doc(key).set({value});
+  } catch(e){
+    console.error('setState failed for', key, e);
+  }
+}
+// One-time-per-key migration: if Firestore doesn't have a key yet but this browser's
+// localStorage does (from before this feature existed), copy it up to Firestore so nothing
+// you've already entered -- pool entrants, strikes, pick history -- gets lost in the switch.
+// Once a key exists in Firestore this is a permanent no-op for it, on every device.
+const DASHBOARD_STATE_LOCALSTORAGE_KEYS = {
+  pickem_history: 'chalktalk_pickem_history',
+  pickem_splash_lines: 'chalktalk_pickem_splash_lines',
+  survivor_entrants: 'chalktalk_survivor_entrants',
+  survivor_history: 'chalktalk_survivor_history',
+  survivor_pickpct: 'chalktalk_survivor_pickpct',
+  survivor_pool_picks: 'chalktalk_survivor_pool_picks',
+  survivor_pool_status: 'chalktalk_survivor_pool_status',
+  survivor_used: 'chalktalk_survivor_used',
+  hidden_leagues: 'chalktalk_hidden_leagues',
+  fantasy_matchups: 'chalktalk_fantasy_matchups',
+};
+function migrateLocalStorageStateToFirestore(){
+  Object.entries(DASHBOARD_STATE_LOCALSTORAGE_KEYS).forEach(([newKey, oldKey]) => {
+    if(newKey in DASHBOARD_STATE_CACHE) return; // already in Firestore, nothing to do
+    let raw;
+    try{ raw = localStorage.getItem(oldKey); } catch(e){ return; }
+    if(raw == null) return;
+    try{
+      const parsed = JSON.parse(raw);
+      setState(newKey, parsed); // updates cache immediately + fires the Firestore write
+    } catch(e){ /* corrupt local value -- nothing sane to migrate */ }
+  });
+}
+
 function applyRosterOverrides(){
   const overrides = getRosterOverrides();
   FANTASY_ROSTERS_BASE.forEach((baseLeague, i) => {
@@ -1185,7 +1239,7 @@ function renderGamesList(){
     <div class="game-card" onclick="openGame('${g.id}')">
       <div class="game-card-top">
         <div class="gc-teams">${logoImg(g.away,22)}${g.away}<span class="at">at</span>${logoImg(g.home,22)}${g.home}</div>
-        <div class="gc-lines">MARKET ${g.home} ${(-g.market>0?'+':'')}${(-g.market).toFixed(1)}<br><span class="model">MODEL ${g.home} ${(-g.model>0?'+':'')}${(-g.model).toFixed(1)}</span></div>
+        <div class="gc-lines">MARKET ${g.home} ${(g.market>0?'+':'')}${(g.market).toFixed(1)}<br><span class="model">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</span></div>
       </div>
       <div class="gc-blurb">${g.blurb}</div>
       <div class="gc-final">Final: ${g.away} ${g.aa} – ${g.home} ${g.ah}${g.hasDetail?'  <span class="chevron">&middot; full breakdown &rarr;</span>':''}</div>
@@ -1429,17 +1483,17 @@ function openGame(id){
           <p class="empty-note" style="margin-top:8px;">A full player-level write-up (like the Week 9 Ravens/Chargers examples) hasn't been produced for this game yet -- this breakdown is auto-generated from the real team ratings, not a placeholder.</p>
         </div>`;
     } else {
-      autoStoryHtml = `<div class="story"><p>${g.blurb}</p><p>Market had ${g.home} at ${(-g.market>0?'+':'')}${(-g.market).toFixed(1)}, our model had them at ${(-g.model>0?'+':'')}${(-g.model).toFixed(1)}.</p></div>`;
+      autoStoryHtml = `<div class="story"><p>${g.blurb}</p><p>Market had ${g.home} at ${(g.market>0?'+':'')}${(g.market).toFixed(1)}, our model had them at ${(g.model>0?'+':'')}${(g.model).toFixed(1)}.</p></div>`;
     }
 
     el.innerHTML = `<div class="detail-teams">${logoImg(g.away,32)}${g.away}<span class="at">at</span>${logoImg(g.home,32)}${g.home}</div>
-      <div class="detail-sub">WEEK ${g.week}, 2024 &middot; ${g.ah!=null && g.aa!=null ? `FINAL: ${g.away} ${g.aa} – ${g.home} ${g.ah}` : 'UPCOMING'}</div>
+      <div class="detail-sub">WEEK ${g.week}, ${g.season} &middot; ${g.ah!=null && g.aa!=null ? `FINAL: ${g.away} ${g.aa} – ${g.home} ${g.ah}` : 'UPCOMING'}</div>
       ${signalHtml}
 
       <div class="gauge">
         <div class="gauge-track">
-          <div class="tick market" style="left:${pos(g.market)}%"><div class="pin"></div><div class="lbl">MARKET ${g.home} ${(-g.market>0?'+':'')}${(-g.market).toFixed(1)}</div></div>
-          <div class="tick model" style="left:${pos(g.model)}%"><div class="pin"></div><div class="lbl">MODEL ${g.home} ${(-g.model>0?'+':'')}${(-g.model).toFixed(1)}</div></div>
+          <div class="tick market" style="left:${pos(g.market)}%"><div class="pin"></div><div class="lbl">MARKET ${g.home} ${(g.market>0?'+':'')}${(g.market).toFixed(1)}</div></div>
+          <div class="tick model" style="left:${pos(g.model)}%"><div class="pin"></div><div class="lbl">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</div></div>
         </div>
         <div class="gauge-caption"><span>${g.away}</span><span>${g.home}</span></div>
       </div>
@@ -1459,8 +1513,8 @@ function openGame(id){
 
     <div class="gauge">
       <div class="gauge-track">
-        <div class="tick market" style="left:${pos(g.market)}%"><div class="pin"></div><div class="lbl">MARKET ${g.home} ${(-g.market>0?'+':'')}${(-g.market).toFixed(1)}</div></div>
-        <div class="tick model" style="left:${pos(g.model)}%"><div class="pin"></div><div class="lbl">MODEL ${g.home} ${(-g.model>0?'+':'')}${(-g.model).toFixed(1)}</div></div>
+        <div class="tick market" style="left:${pos(g.market)}%"><div class="pin"></div><div class="lbl">MARKET ${g.home} ${(g.market>0?'+':'')}${(g.market).toFixed(1)}</div></div>
+        <div class="tick model" style="left:${pos(g.model)}%"><div class="pin"></div><div class="lbl">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</div></div>
       </div>
       <div class="gauge-caption"><span>${g.away}</span><span>${g.home}</span></div>
     </div>
@@ -1575,13 +1629,12 @@ function computeStartSit(p){
 // ---- League show/hide, persisted in this browser (real Netlify site, not a Claude
 // artifact, so localStorage is fine here) ----
 function getHiddenLeagues(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_hidden_leagues') || '[]'); }
-  catch(e){ return []; }
+  return getState('hidden_leagues', []);
 }
 function toggleLeagueVisibility(leagueId, checked){
   let hidden = getHiddenLeagues();
   hidden = checked ? hidden.filter(id=>id!==leagueId) : [...new Set([...hidden, leagueId])];
-  try{ localStorage.setItem('chalktalk_hidden_leagues', JSON.stringify(hidden)); } catch(e){}
+  setState('hidden_leagues', hidden);
   renderFantasy();
 }
 
@@ -2056,8 +2109,7 @@ function isDivisional(away, home){
 // we can auto-grade ATS once that week's CLOSING_RESULTS come in. Shape:
 // { "<week>": { "<gameId>": "<pickedTeamAbbrev>" } }
 function getPickemHistory(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_pickem_history') || '{}'); }
-  catch(e){ return {}; }
+  return getState('pickem_history', {});
 }
 function getPickemWeekPicks(week){
   const hist = getPickemHistory();
@@ -2077,7 +2129,7 @@ function setPickemPick(week, gameId, team){
     weekPicks[gameId] = team;
   }
   hist[week] = weekPicks;
-  try{ localStorage.setItem('chalktalk_pickem_history', JSON.stringify(hist)); } catch(e){}
+  setState('pickem_history', hist);
   renderPickemHelper();
 }
 
@@ -2123,8 +2175,7 @@ function gradeSurvivorPick(gameId, pickedTeam){
 // home favored, positive = home underdog) -- the same convention GAMES[].market already uses
 // everywhere else in this file, so no mental conversion needed when typing it in.
 function getSplashLines(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_pickem_splash_lines') || '{}'); }
-  catch(e){ return {}; }
+  return getState('pickem_splash_lines', {});
 }
 function setSplashLine(gameId, val){
   const lines = getSplashLines();
@@ -2133,7 +2184,7 @@ function setSplashLine(gameId, val){
   } else {
     lines[gameId] = parseFloat(val);
   }
-  try{ localStorage.setItem('chalktalk_pickem_splash_lines', JSON.stringify(lines)); } catch(e){}
+  setState('pickem_splash_lines', lines);
   renderPickemHelper();
 }
 let pickemExpanded = false;
@@ -2289,36 +2340,33 @@ function renderPickemHelper(){
 // means low-P% picks matter more (less field left to separate from), which is exactly what
 // the leverage score below already accounts for once you update these two numbers.
 function getSurvivorPoolStatus(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_survivor_pool_status') || '{}'); }
-  catch(e){ return {}; }
+  return getState('survivor_pool_status', {});
 }
 function setSurvivorPoolStatus(field, val){
   const st = getSurvivorPoolStatus();
   const n = parseInt(val, 10);
   if(val==='' || isNaN(n)){ delete st[field]; } else { st[field] = n; }
-  try{ localStorage.setItem('chalktalk_survivor_pool_status', JSON.stringify(st)); } catch(e){}
+  setState('survivor_pool_status', st);
   renderSurvivor();
 }
 
 function getSurvivorUsed(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_survivor_used') || '[]'); }
-  catch(e){ return []; }
+  return getState('survivor_used', []);
 }
 function toggleSurvivorUsed(team){
   let used = getSurvivorUsed();
   used = used.includes(team) ? used.filter(t=>t!==team) : [...used, team];
-  try{ localStorage.setItem('chalktalk_survivor_used', JSON.stringify(used)); } catch(e){}
+  setState('survivor_used', used);
   renderSurvivor();
 }
 function getSurvivorPickPct(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_survivor_pickpct') || '{}'); }
-  catch(e){ return {}; }
+  return getState('survivor_pickpct', {});
 }
 function setSurvivorPickPct(team, val){
   const pct = getSurvivorPickPct();
   const n = parseFloat(val);
   if(val==='' || isNaN(n)){ delete pct[team]; } else { pct[team] = n; }
-  try{ localStorage.setItem('chalktalk_survivor_pickpct', JSON.stringify(pct)); } catch(e){}
+  setState('survivor_pickpct', pct);
   renderSurvivor();
 }
 
@@ -2326,8 +2374,7 @@ function setSurvivorPickPct(team, val){
 // (not just the running "used" list) and can auto-grade it once that game's real score is in.
 // Shape: { "<week>": "<teamAbbrev>" }
 function getSurvivorHistory(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_survivor_history') || '{}'); }
-  catch(e){ return {}; }
+  return getState('survivor_history', {});
 }
 function lockSurvivorPick(week, team){
   const hist = getSurvivorHistory();
@@ -2336,10 +2383,8 @@ function lockSurvivorPick(week, team){
   if(prev && prev !== team){ used = used.filter(t => t !== prev); }
   if(!used.includes(team)) used = [...used, team];
   hist[week] = team;
-  try{
-    localStorage.setItem('chalktalk_survivor_history', JSON.stringify(hist));
-    localStorage.setItem('chalktalk_survivor_used', JSON.stringify(used));
-  } catch(e){}
+  setState('survivor_history', hist);
+  setState('survivor_used', used);
   renderSurvivor();
 }
 function unlockSurvivorPick(week){
@@ -2348,10 +2393,8 @@ function unlockSurvivorPick(week){
   if(!team) return;
   delete hist[week];
   const used = getSurvivorUsed().filter(t => t !== team);
-  try{
-    localStorage.setItem('chalktalk_survivor_history', JSON.stringify(hist));
-    localStorage.setItem('chalktalk_survivor_used', JSON.stringify(used));
-  } catch(e){}
+  setState('survivor_history', hist);
+  setState('survivor_used', used);
   renderSurvivor();
 }
 // Your own alive/eliminated status, derived automatically from your own graded pick history --
@@ -2374,11 +2417,10 @@ function getMySurvivorStatus(currentWeek){
 // Remaining is computed automatically (2-strike pool -- an entrant is out once they hit 2), not
 // hand-tracked as a running number.
 function getSurvivorEntrants(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_survivor_entrants') || '[]'); }
-  catch(e){ return []; }
+  return getState('survivor_entrants', []);
 }
 function setSurvivorEntrants(list){
-  try{ localStorage.setItem('chalktalk_survivor_entrants', JSON.stringify(list)); } catch(e){}
+  setState('survivor_entrants', list);
 }
 function importSurvivorEntrants(){
   const ta = document.getElementById('survivor-entrants-paste');
@@ -2405,6 +2447,96 @@ function removeSurvivorStrike(name){
 function removeSurvivorEntrant(name){
   setSurvivorEntrants(getSurvivorEntrants().filter(e => e.name!==name));
   renderSurvivor();
+}
+
+// ---- Your pool's actual picks, per week -- the real differentiator survivorgrid's national
+// P% can't give you: with only ~43 people in this specific pool, knowing 30 of them are on the
+// same team this week is a much sharper signal than a generic national percentage. No API for
+// this (Yahoo doesn't expose it), so it's a paste-in from screenshots, same trust model as
+// everything else manual in this dashboard. Shape: { "<week>": { "<entrantName>": "<TEAM>" } }
+function getSurvivorPoolPicks(){
+  return getState('survivor_pool_picks', {});
+}
+function importSurvivorPoolPicks(week){
+  const ta = document.getElementById('survivor-poolpicks-paste');
+  if(!ta) return;
+  const validTeams = new Set(Object.keys(TEAM_COLORS));
+  const lines = ta.value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const picks = getSurvivorPoolPicks();
+  const weekPicks = {...(picks[week]||{})};
+  const entrants = getSurvivorEntrants();
+  const existingNames = new Set(entrants.map(e=>e.name.toLowerCase()));
+  const skipped = [];
+  lines.forEach(line => {
+    const idx = line.indexOf(':');
+    if(idx === -1){ skipped.push(line); return; }
+    const name = line.slice(0, idx).trim();
+    const team = line.slice(idx+1).trim().toUpperCase();
+    if(!name || !validTeams.has(team)){ skipped.push(line); return; }
+    weekPicks[name] = team;
+    if(!existingNames.has(name.toLowerCase())){
+      entrants.push({name, strikes:0});
+      existingNames.add(name.toLowerCase());
+    }
+  });
+  picks[week] = weekPicks;
+  setState('survivor_pool_picks', picks);
+  setSurvivorEntrants(entrants);
+  ta.value = '';
+  if(skipped.length){
+    alert(`Added ${lines.length-skipped.length} pick(s). Skipped ${skipped.length} line(s) -- expected "Name: TEAM" with a real team abbreviation:\n\n${skipped.join('\n')}`);
+  }
+  renderSurvivor();
+}
+function removeSurvivorPoolPick(week, name){
+  const picks = getSurvivorPoolPicks();
+  if(picks[week]) delete picks[week][name];
+  setState('survivor_pool_picks', picks);
+  renderSurvivor();
+}
+// {team: {count, pct}} for one week, pct out of however many picks were actually entered that
+// week (not the full pool size) -- so it reads correctly even for a partially-filled-in week.
+function poolPickStatsForWeek(week){
+  const weekPicks = getSurvivorPoolPicks()[week] || {};
+  const names = Object.keys(weekPicks);
+  const stats = {};
+  names.forEach(n => {
+    const t = weekPicks[n];
+    stats[t] = (stats[t] || 0) + 1;
+  });
+  Object.keys(stats).forEach(t => { stats[t] = {count: stats[t], pct: (stats[t]/names.length)*100}; });
+  return {stats, total: names.length};
+}
+function renderSurvivorPoolPicks(week){
+  const el = document.getElementById('survivor-pool-picks');
+  if(!el) return;
+  const weekPicks = getSurvivorPoolPicks()[week] || {};
+  const entries = Object.entries(weekPicks);
+  const {stats, total} = poolPickStatsForWeek(week);
+  const breakdown = Object.entries(stats).sort((a,b)=>b[1].count-a[1].count)
+    .map(([t,s]) => `<span class="status-pill" style="margin:2px 4px 2px 0;">${logoImg(t,14)} ${t} &middot; ${s.count}/${total} (${s.pct.toFixed(0)}%)</span>`).join('');
+  el.innerHTML = `
+    <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
+      Paste this week's picks from your pool (one per line, "Name: TEAM" -- read straight off a Yahoo screenshot).
+      Matches against your entrant list above by name, adding anyone new automatically. This drives the "Your Pool %"
+      column and leverage read on the board below -- a real 43-person read beats a generic national percentage for
+      deciding whether to pivot off the crowd.
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px;">
+      <textarea id="survivor-poolpicks-paste" placeholder="$$$D-Love's Picks$$$: KC&#10;Armando's Picks: PHI&#10;Benton's: DAL" style="flex:1;min-width:220px;min-height:70px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
+      <button class="btn" onclick="importSurvivorPoolPicks(${week})">Add picks</button>
+    </div>
+    ${entries.length===0 ? '<div class="empty-note">No picks entered yet for Week '+week+'.</div>' : `
+      <div style="font-size:12.5px;margin-bottom:8px;"><b>${total}</b> pick(s) entered for Week ${week}:</div>
+      <div style="margin-bottom:12px;">${breakdown}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        ${entries.map(([name,team]) => `
+          <div style="padding:4px 8px;border-radius:8px;font-size:11.5px;display:flex;align-items:center;gap:5px;border:1px solid var(--line);">
+            <span>${name}</span><span style="color:var(--sage);">&rarr; ${team}</span>
+            <button class="btn" style="padding:1px 5px;font-size:10px;" onclick="removeSurvivorPoolPick(${week}, '${name.replace(/'/g,"\\'")}')">&times;</button>
+          </div>`).join('')}
+      </div>`}
+  `;
 }
 
 let survivorExpanded = false;
@@ -2450,6 +2582,7 @@ function renderSurvivor(){
   renderSurvivorEntrants();
 
   const currentWeek = GAMES && GAMES.length ? GAMES[0].week : 1;
+  renderSurvivorPoolPicks(currentWeek);
   const myStatus = getMySurvivorStatus(currentWeek);
   const entrants = getSurvivorEntrants();
   const entrantsRemaining = entrants.length ? entrants.filter(e => e.strikes < 2).length : null;
@@ -2512,7 +2645,7 @@ function renderSurvivor(){
     return;
   }
 
-  noteEl.innerHTML = "<b>Leverage is your EV% read</b> -- our own win probability minus the crowd's pick%, both real inputs (not simulated): W% is our backtested model+market win-probability curve, P% is what you paste in from survivorgrid.com. A team with high win probability that few others are on is exactly the leveraged spot survivor strategy is built around -- that's the whole \"EV vs. public and pool size\" idea rolled into one number, updating automatically as you refresh W% weekly and paste in P%. \"Future Look\" answers \"should I save this team\" -- it projects every remaining game on the real 2026 schedule using CURRENT ratings held flat (not a full week-by-week re-simulation), so treat it as a rough guide that sharpens as the season updates ratings, not a certainty.";
+  noteEl.innerHTML = "<b>Leverage is your EV% read</b> -- our own win probability minus the crowd's pick%, both real inputs (not simulated): W% is our backtested model+market win-probability curve. \"Your Pool %\" (paste-in, from screenshots of your actual pool's picks) is used for leverage whenever you've entered it for the week -- it's a sharper read than a generic number since it's your real ~43 people, not a national aggregate; Pick% from survivorgrid.com is the fallback for weeks you haven't pasted your pool's picks yet. A team with high win probability that few in YOUR pool are on is exactly the leveraged spot survivor strategy is built around: if the crowd's team loses, most of your pool goes with it, and being the one who pivoted is worth more than just riding the statistically-best team. \"Future Look\" answers \"should I save this team\" -- it projects every remaining game on the real 2026 schedule using CURRENT ratings held flat (not a full week-by-week re-simulation), so treat it as a rough guide that sharpens as the season updates ratings, not a certainty.";
 
   function ratingFor(team){ return RATINGS.find(r=>r.team===team); }
   function projectHomeFavoredPts(home, away){
@@ -2534,6 +2667,7 @@ function renderSurvivor(){
   }
 
   const pickPct = getSurvivorPickPct();
+  const poolStats = poolPickStatsForWeek(currentWeek).stats;
   const rows = [];
   GAMES.forEach(g => {
     const awayFavoredModel = g.model, homeFavoredModel = -g.model;
@@ -2546,9 +2680,14 @@ function renderSurvivor(){
       const ourWP = empiricalWinProb(t.modelFav);
       const marketWP = empiricalWinProb(t.marketFav);
       const p = pickPct[t.team];
-      const leverage = p!=null ? ourWP - (p/100) : null;
+      const pool = poolStats[t.team]; // real read from your own pool's pasted picks, if any this week
+      // Prefer your actual pool's number over the generic national one when you have it --
+      // it's the more specific, more relevant read for whether YOUR pool is stacked on this team.
+      const leverageSource = pool ? 'pool' : (p!=null ? 'natl' : null);
+      const leveragePct = pool ? pool.pct : p;
+      const leverage = leveragePct!=null ? ourWP - (leveragePct/100) : null;
       const future = bestRemainingWeek(t.team);
-      rows.push({...t, ourWP, marketWP, p, leverage, future});
+      rows.push({...t, ourWP, marketWP, p, pool, leverage, leverageSource, future});
     });
   });
   rows.sort((a,b) => (b.leverage ?? b.ourWP) - (a.leverage ?? a.ourWP));
@@ -2558,7 +2697,7 @@ function renderSurvivor(){
     ${lockedTeam ? `<div style="font-size:12.5px;margin-bottom:10px;">Currently locked for Week ${currentWeek}: <b>${logoImg(lockedTeam,16)}${lockedTeam}</b> <button class="btn" style="padding:3px 8px;font-size:10.5px;margin-left:6px;" onclick="unlockSurvivorPick(${currentWeek})">Unlock</button></div>` : ''}
     <div class="table-wrap">
     <table class="rank">
-      <thead><tr><th>Team</th><th>Matchup</th><th>Our Win%</th><th>Market Win%</th><th>Pick% (from survivorgrid.com)</th><th>Leverage (EV%)</th><th>Future Look</th><th></th></tr></thead>
+      <thead><tr><th>Team</th><th>Matchup</th><th>Our Win%</th><th>Market Win%</th><th>Your Pool %</th><th>Pick% (survivorgrid.com)</th><th>Leverage (EV%)</th><th>Future Look</th><th></th></tr></thead>
       <tbody>
         ${rows.map(r => {
           let futureCell = '&mdash;';
@@ -2575,8 +2714,9 @@ function renderSurvivor(){
           <td style="color:var(--sage);">${r.atOrVs} ${r.opp}</td>
           <td>${(r.ourWP*100).toFixed(0)}%</td>
           <td style="color:var(--sage);">${(r.marketWP*100).toFixed(0)}%</td>
+          <td>${r.pool ? `<b>${r.pool.count}</b> <span style="color:var(--sage);">(${r.pool.pct.toFixed(0)}%)</span>` : '<span style="color:var(--sage);">no data</span>'}</td>
           <td><input type="number" min="0" max="100" step="1" value="${r.p!=null?r.p:''}" placeholder="--" style="width:60px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--chalk);padding:4px 6px;" onchange="setSurvivorPickPct('${r.team}', this.value)"></td>
-          <td>${r.leverage!=null ? `<b style="color:${r.leverage>=0?'var(--good)':'var(--alert)'};">${r.leverage>=0?'+':''}${(r.leverage*100).toFixed(0)}</b>` : '&mdash;'}</td>
+          <td>${r.leverage!=null ? `<b style="color:${r.leverage>=0?'var(--good)':'var(--alert)'};">${r.leverage>=0?'+':''}${(r.leverage*100).toFixed(0)}</b> <span style="color:var(--sage);font-size:10.5px;">(${r.leverageSource==='pool'?'your pool':'national'})</span>` : '&mdash;'}</td>
           <td style="font-size:11.5px;">${futureCell}</td>
           <td><button class="btn" style="padding:5px 10px;font-size:11px;" onclick="lockSurvivorPick(${currentWeek}, '${r.team}')">Lock this week's pick</button></td>
         </tr>`;
@@ -2595,11 +2735,10 @@ function renderSurvivor(){
 // manual score entry per week -- W/L is still derived automatically from the two scores, not
 // typed in separately, so there's no chance of that going stale vs. the numbers you enter.
 function getFantasyMatchups(){
-  try{ return JSON.parse(localStorage.getItem('chalktalk_fantasy_matchups') || '{}'); }
-  catch(e){ return {}; }
+  return getState('fantasy_matchups', {});
 }
 function setFantasyMatchups(obj){
-  try{ localStorage.setItem('chalktalk_fantasy_matchups', JSON.stringify(obj)); } catch(e){}
+  setState('fantasy_matchups', obj);
 }
 function addFantasyMatchup(leagueId){
   const wkEl = document.getElementById('fm-week-'+leagueId);
@@ -3314,7 +3453,7 @@ async function boot(){
     const weekId = `${meta.season}-wk${meta.week}`;
 
     const [ratingsSnap, historySnap, gamesSnap, booksSnap, weatherSnap, closingSnap,
-           leaderboardsSnap, projSnap, rostersSnap, overridesSnap] = await Promise.all([
+           leaderboardsSnap, projSnap, rostersSnap, overridesSnap, stateSnap] = await Promise.all([
       db.collection('ratings').get(),
       db.collection('ratings_history').get(),
       db.collection('games').doc(weekId).get(),
@@ -3325,6 +3464,7 @@ async function boot(){
       db.collection('fantasy_projections').doc('current').get(),
       db.collection('fantasy_rosters').get(),
       db.collection('fantasy_roster_overrides').get(),
+      db.collection('dashboard_state').get(),
     ]);
 
     RATINGS.push(...ratingsSnap.docs.map(d => d.data()));
@@ -3335,7 +3475,11 @@ async function boot(){
     });
 
     if(gamesSnap.exists){
-      GAMES.push(...((gamesSnap.data() || {}).games || []));
+      const gdoc = gamesSnap.data() || {};
+      // Individual game objects don't carry their own week/season (only the parent doc
+      // does) -- stamp it onto each one here so every g.week/g.season read elsewhere
+      // (detail page header, etc.) has a real value instead of undefined.
+      GAMES.push(...((gdoc.games || []).map(g => ({...g, week: g.week ?? gdoc.week, season: g.season ?? gdoc.season}))));
     } else {
       showBootBanner(`No games doc found yet for ${weekId} -- meta/current may be ahead of what the pipeline has written. Showing an otherwise-live dashboard with no games this week.`, true);
     }
@@ -3364,6 +3508,10 @@ async function boot(){
     overridesSnap.docs.forEach(d => {
       window.__rosterOverridesCache[d.id] = (d.data() || {}).moves || [];
     });
+
+    DASHBOARD_STATE_CACHE = {};
+    stateSnap.docs.forEach(d => { DASHBOARD_STATE_CACHE[d.id] = (d.data() || {}).value; });
+    migrateLocalStorageStateToFirestore();
 
     hideBootBanner();
   } catch(e){
