@@ -2139,6 +2139,15 @@ function setSplashLine(gameId, val){
 let pickemExpanded = false;
 function togglePickemExpanded(){ pickemExpanded = !pickemExpanded; renderPickemHelper(); }
 
+// Visual state for a pick'em team button: gold+bold when it's your pick for that game,
+// dimmed (but still clickable, so tapping it switches your pick) when you've picked the
+// OTHER side of that same game, and default when the game has no pick yet.
+function pickemBtnStyle(pickedSide, team){
+  if(pickedSide === team) return 'background:var(--gold);color:#000;font-weight:600;';
+  if(pickedSide) return 'opacity:0.4;';
+  return '';
+}
+
 function renderPickemHelper(){
   const el = document.getElementById('pickem-helper');
   if(!el) return;
@@ -2208,8 +2217,8 @@ function renderPickemHelper(){
           ${r.divisional ? '<span class="status-pill questionable" style="margin-left:6px;">DIVISIONAL</span>' : ''}
         </span>
         <span style="flex-shrink:0;">
-          <button class="btn" style="padding:4px 10px;font-size:11px;${pickedSide===r.g.away?'background:var(--gold);color:#000;':''}" ${atCap?'disabled':''} onclick="setPickemPick(${currentWeek}, '${r.g.id}', '${r.g.away}')">Pick ${r.g.away}</button>
-          <button class="btn" style="padding:4px 10px;font-size:11px;${pickedSide===r.g.home?'background:var(--gold);color:#000;':''}" ${atCap?'disabled':''} onclick="setPickemPick(${currentWeek}, '${r.g.id}', '${r.g.home}')">Pick ${r.g.home}</button>
+          <button class="btn" style="padding:4px 10px;font-size:11px;${pickemBtnStyle(pickedSide, r.g.away)}" ${atCap?'disabled':''} onclick="setPickemPick(${currentWeek}, '${r.g.id}', '${r.g.away}')">${pickedSide===r.g.away?'&#10003; ':''}Pick ${r.g.away}</button>
+          <button class="btn" style="padding:4px 10px;font-size:11px;${pickemBtnStyle(pickedSide, r.g.home)}" ${atCap?'disabled':''} onclick="setPickemPick(${currentWeek}, '${r.g.id}', '${r.g.home}')">${pickedSide===r.g.home?'&#10003; ':''}Pick ${r.g.home}</button>
         </span>
       </div>
       <div style="font-size:11px;color:var(--sage);margin-top:2px;">Our model's side: ${r.pickTeam} &middot; edge ${Math.abs(r.es.edge).toFixed(1)} pts vs. market (${r.es.tag})</div>
