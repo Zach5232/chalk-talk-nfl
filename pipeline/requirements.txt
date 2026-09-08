@@ -1,0 +1,7 @@
+# Chalk Talk pipeline dependencies -- installed by the GitHub Action before each run.
+# Pin loosely (major-version floors only) so routine patch releases don't break the
+# scheduled run; bump these by hand if a real breaking change shows up.
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+firebase-admin>=6.0

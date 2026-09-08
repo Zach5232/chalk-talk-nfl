@@ -1,0 +1,87 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- existing apps: unchanged ----
+    match /zach_job_tracker/{document} {
+      allow read, write: if true;
+    }
+    match /shwam_draft/{document} {
+      allow read, write: if true;
+    }
+
+    // ---- Chalk Talk: NFL model + odds data (public read, server-only write) ----
+    // "server-only" = the GitHub Action's Admin SDK, which bypasses these rules entirely --
+    // there is no deployed service to gate here, just repo access to the Action itself.
+    match /ratings/{team} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /ratings_history/{team} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /games/{weekId} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /books/{gameId} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /closing_results/{gameId} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /weather/{gameId} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /leaderboards/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /fantasy_projections/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /meta/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ---- Chalk Talk: fantasy roster base snapshot (public read, server-only write --
+    // hand-seeded, not written by the weekly Action) ----
+    match /fantasy_rosters/{leagueId} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /fantasy_weekly/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ---- Chalk Talk: roster overrides (public read AND write -- the roster editor's
+    // Add/Drop/Start-Bench buttons write directly from the browser, same trust level as
+    // bets below: no login system, your own browser writing your own data) ----
+    match /fantasy_roster_overrides/{leagueId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
+      allow delete: if true;   // "Reset to snapshot" needs this
+    }
+
+    // ---- Chalk Talk: bet tracker (public read AND write -- browser writes directly) ----
+    match /bets/{betId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
+      allow delete: if true;   // dashboard's existing "Delete" button needs this
+    }
+
+    // ---- fallback for everything else (unchanged): requires auth ----
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}

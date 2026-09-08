@@ -16,10 +16,24 @@ import subprocess, json, csv, os
 import pandas as pd
 import numpy as np
 
-SEASON = 2026          # real season, kicks off 2026-09-09
-WEEK = 1               # Week 1 -- no 2026 games played yet, ratings run purely off the
-                        # carryover-from-2025 prior (see run_ratings: hist is empty for
-                        # week 1, so off/deft = prior_off/prior_def directly)
+# Firestore write path -- optional import so a local "just show me the numbers" run still
+# works with zero setup even without firebase-admin installed or credentials configured.
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    _FIREBASE_AVAILABLE = True
+except ImportError:
+    _FIREBASE_AVAILABLE = False
+
+# SEASON/WEEK: env-var overridable (CHALKTALK_SEASON / CHALKTALK_WEEK) so the GitHub Actions
+# "Run workflow" button can target a different week with no code edit or push required -- the
+# literals below are just the defaults for a bare local run. The scheduled cron trigger has no
+# way to pass inputs, so it always uses these defaults; bump them here specifically to change
+# what the unattended weekly run targets.
+SEASON = int(os.environ.get("CHALKTALK_SEASON", 2026))   # real season, kicks off 2026-09-09
+WEEK = int(os.environ.get("CHALKTALK_WEEK", 1))           # Week 1 -- no 2026 games played yet,
+                        # ratings run purely off the carryover-from-2025 prior (see run_ratings:
+                        # hist is empty for week 1, so off/deft = prior_off/prior_def directly)
 
 # API_KEY now comes from config_local.py (gitignored -- never committed) or the ODDS_API_KEY
 # env var, NOT hardcoded here. This file is going into a GitHub repo, and a real key sitting
@@ -50,6 +64,28 @@ TEAM_MAP = {
 }
 REV_MAP = {v: k for k, v in TEAM_MAP.items()}
 
+# All scratch/cache files (downloaded pbp, games.csv, odds/weather json dumps) live under a
+# directory next to this script, not a hardcoded /home/claude path -- so this pipeline runs
+# identically on a bare GitHub Actions runner as it does anywhere else. Ephemeral by design:
+# a CI runner starts empty every run, so nothing here needs to survive between runs.
+PIPELINE_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIR = os.path.join(PIPELINE_DIR, "_cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def fetch_games_csv():
+    """Real, always-current nflverse schedule/results dataset -- every game ever played, plus
+    the full scheduled slate for the current season with real scores filled in as they
+    finish. Re-downloaded on every call (small file, cheap) rather than assumed to exist on
+    disk already -- same reasoning as fetch_pbp() below."""
+    path = os.path.join(CACHE_DIR, "games.csv")
+    url = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
+    code = subprocess.run(["curl", "-sL", "-o", path, "-w", "%{http_code}", url],
+                           capture_output=True, text=True).stdout.strip()
+    if code != "200":
+        raise RuntimeError(f"Failed to download games.csv from nflverse (HTTP {code}).")
+    return path
+
 
 # ---------- STEP 1: play-by-play -> team-game EPA splits ----------
 def fetch_pbp(season):
@@ -60,7 +96,7 @@ def fetch_pbp(season):
     writes the error page to the file, so this checks the real HTTP status instead of
     trusting the exit code, and never silently hands back a bad file.
     """
-    path = f"/home/claude/pipeline/pbp_{season}.parquet"
+    path = os.path.join(CACHE_DIR, f"pbp_{season}.parquet")
     url = f"https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_{season}.parquet"
     code = subprocess.run(["curl", "-sL", "-o", path, "-w", "%{http_code}", url],
                            capture_output=True, text=True).stdout.strip()
@@ -108,7 +144,7 @@ _NEUTRAL_IDS_CACHE = None
 def get_neutral_game_ids():
     global _NEUTRAL_IDS_CACHE
     if _NEUTRAL_IDS_CACHE is None:
-        g = pd.read_csv("/home/claude/odds_pull/games.csv")
+        g = pd.read_csv(fetch_games_csv())
         _NEUTRAL_IDS_CACHE = set(g[g.location == "Neutral"]["game_id"])
     return _NEUTRAL_IDS_CACHE
 
@@ -183,7 +219,7 @@ def build_st_games(pbp_path):
 def _real_teams_for_season(season):
     """32 real team abbreviations for this season, from the schedule itself -- doesn't
     depend on any current-season pbp existing yet (true for Week 1 before kickoff)."""
-    games = pd.read_csv("/home/claude/odds_pull/games.csv")
+    games = pd.read_csv(fetch_games_csv())
     g = games[games.season.astype(str) == str(season)]
     return sorted(set(g.home_team) | set(g.away_team))
 
@@ -199,7 +235,7 @@ def run_ratings(season, week, prior_season_pbp_path):
     prior_def = (def_prior_final * 0.05).to_dict()
 
     # fit pts_per_epa using ALL completed games so far this season
-    games = pd.read_csv("/home/claude/odds_pull/games.csv")
+    games = pd.read_csv(fetch_games_csv())
     g_season = games[(games.season.astype(str)==str(season)) & (games.game_type=="REG")].copy()
     completed = g_season[g_season.result.notna() & (g_season.week < week)]
     tg_idx = tg.set_index(["game_id","team"])
@@ -261,7 +297,7 @@ def pull_week_odds(mode, api_key, hist_date=None):
         url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/?apiKey={api_key}&regions=us&markets=spreads&oddsFormat=american"
     else:
         url = f"https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds/?apiKey={api_key}&regions=us&markets=spreads&oddsFormat=american&date={hist_date}"
-    out_path = "/home/claude/pipeline/week_odds.json"
+    out_path = os.path.join(CACHE_DIR, "week_odds.json")
     subprocess.run(["curl","-s","-o",out_path,url], check=True)
     d = json.load(open(out_path))
     return d.get("data", d) if isinstance(d, dict) else d
@@ -302,7 +338,7 @@ def build_closing_results(games_prev_week):
 
 # ---------- STEP 5: weather (outdoor/retractable stadiums only) ----------
 import sys
-sys.path.insert(0, "/home/claude/pipeline")
+sys.path.insert(0, PIPELINE_DIR)
 from stadiums import STADIUMS
 
 def pull_weather_for_week(games_this_week):
@@ -325,7 +361,7 @@ def pull_weather_for_week(games_this_week):
                f"&daily=temperature_2m_max,temperature_2m_min,windspeed_10m_max,precipitation_probability_max"
                f"&temperature_unit=fahrenheit&windspeed_unit=mph&timezone=America%2FNew_York"
                f"&start_date={game_date}&end_date={game_date}")
-        out_path = f"/home/claude/pipeline/wx_{r.home_team}_{r.week}.json"
+        out_path = os.path.join(CACHE_DIR, f"wx_{r.home_team}_{r.week}.json")
         code = subprocess.run(["curl","-s","-o",out_path,"-w","%{http_code}",url], capture_output=True, text=True).stdout.strip()
         gid = f"{r.away_team.lower()}-{home.lower()}"
         if code != "200":
@@ -409,7 +445,7 @@ def run_rating_history(season, week, prior_season_pbp_path):
     havoc_games = build_havoc_games(pbp_path)
     st_games = build_st_games(pbp_path)
 
-    games = pd.read_csv("/home/claude/odds_pull/games.csv")
+    games = pd.read_csv(fetch_games_csv())
     g_season = games[(games.season.astype(str)==str(season)) & (games.game_type=="REG")].copy()
 
     history = {t: [] for t in teams}
@@ -451,150 +487,100 @@ def run_rating_history(season, week, prior_season_pbp_path):
     return history
 
 
-if __name__ == "__main__":
-    print(f"=== Chalk Talk weekly update: season {SEASON}, week {WEEK} ({MODE} mode) ===\n")
+# ---------- Firestore write path (GitHub Actions cron + manual "Run workflow" trigger) ----------
+# Real write, no local paste-into-ChalkTalk.html step anymore: this is what replaces the old
+# "copy the printed JSON blocks into the file by hand" workflow. The site reads all of this
+# live via the Firebase JS SDK -- see firestore-schema.md for the exact doc shapes this
+# writes, which the site's loader expects verbatim.
+def get_firestore_client(cred_path):
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(cred_path)
+        firebase_admin.initialize_app(cred)
+    return firestore.client()
 
-    ratings = run_ratings(SEASON, WEEK, prior_season_pbp_path="/home/claude/odds_pull/pbp_2024.parquet"
-                           if SEASON == 2025 else fetch_pbp(SEASON - 1))
 
-    odds_data = pull_week_odds(MODE, API_KEY, HIST_DATE)
-    books = build_books_for_week(odds_data, ratings["games_this_week"])
-    closing = build_closing_results(ratings["games_prev_week"])
-    weather = pull_weather_for_week(ratings["games_this_week"])
+def write_firestore(db, *, season, week, ratings_rows, games, books, closing, weather,
+                     rating_history, qb_leaderboard, wr_leaderboard, rb_leaderboard,
+                     qb_history, team_players, fantasy_projections):
+    """One real write per real thing computed this run. Batches where Firestore allows it
+    (500-write cap per batch, nowhere close to hit here); ratings_history/leaderboards/
+    fantasy_projections/meta are each a single doc, so those are plain sets."""
+    written = []
 
-    # ---- RATINGS array ----
-    rows = []
-    for t in ratings["teams"]:
-        off_pts = round(ratings["off"][t] * ratings["pts_per_epa"], 1)
-        def_pts = round(ratings["deft"][t] * ratings["pts_per_epa"], 1)
-        overall = round(off_pts - def_pts, 1)
-        off_prev_pts = ratings["off_prev"][t] * ratings["pts_per_epa"]
-        def_prev_pts = ratings["deft_prev"][t] * ratings["pts_per_epa"]
-        overall_prev = off_prev_pts - def_prev_pts
-        st_pts = round(ratings["st_rating"][t] * ratings["pts_per_epa"], 1)          # same units as off/def: pts
-        havoc_pts = round(ratings["havoc_rating"][t] * 100, 1)                        # percentage-point deviation from average havoc rate, NOT the points scale
-        rows.append({"team": t, "off_pts": off_pts, "def_pts": def_pts, "overall_pts": overall,
-                      "st_pts": st_pts, "havoc_pts": havoc_pts,
-                      "_overall_prev": overall_prev})
-    rows_sorted_now = sorted(rows, key=lambda r: -r["overall_pts"])
-    rows_sorted_prev = sorted(rows, key=lambda r: -r["_overall_prev"])
-    prev_rank = {r["team"]: i for i, r in enumerate(rows_sorted_prev)}
-    for i, r in enumerate(rows_sorted_now):
-        r["move"] = prev_rank[r["team"]] - i
-        del r["_overall_prev"]
+    # ratings/{team} -- one doc per team, this week's snapshot
+    batch = db.batch()
+    for r in ratings_rows:
+        doc = {**r, "week": week, "season": season,
+               "updated_at": firestore.SERVER_TIMESTAMP}
+        batch.set(db.collection("ratings").document(r["team"]), doc)
+    batch.commit()
+    written.append(f"ratings/* ({len(ratings_rows)} teams)")
 
-    print("--- RATINGS (paste into const RATINGS = [ ... ]) ---")
-    print(json.dumps(rows_sorted_now, indent=1))
+    # ratings_history/{team} -- run_rating_history() recomputes the FULL walk-forward history
+    # from week 1 through `week` every time, so this is a plain overwrite, not a merge.
+    batch = db.batch()
+    for team, weeks in rating_history.items():
+        batch.set(db.collection("ratings_history").document(team), {"team": team, "weeks": weeks})
+    batch.commit()
+    written.append(f"ratings_history/* ({len(rating_history)} teams)")
 
-    print(f"\npts_per_epa used: {round(ratings['pts_per_epa'],2)}")
-    print(f"home field advantage (epa): {round(ratings['hfa'],4)}")
+    # games/{season}-wk{week} -- one doc, this week's full slate
+    db.collection("games").document(f"{season}-wk{week}").set({
+        "season": season, "week": week, "games": games,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    })
+    written.append(f"games/{season}-wk{week} ({len(games)} games)")
 
-    # ---- GAMES array (this week, model line vs market consensus) ----
-    games_out = []
-    for _, r in ratings["games_this_week"].iterrows():
-        h, a = r.home_team, r.away_team
-        if h not in ratings["off"].index or a not in ratings["off"].index:
-            continue
-        home_net = ratings["off"][h] - ratings["deft"][a]
-        away_net = ratings["off"][a] - ratings["deft"][h]
-        model_home_favored = (home_net - away_net + ratings["hfa"]) * ratings["pts_per_epa"]
-        gid = f"{a.lower()}-{h.lower()}"
-        book_entry = books.get(gid)
-        market_home_favored = -float(book_entry["books"][0]["home_pt"]) if book_entry else None
-        games_out.append({
-            "id": gid, "away": a, "home": h,
-            "model": round(-model_home_favored, 2),
-            "market": round(-market_home_favored, 2) if market_home_favored is not None else None,
-            "ah": None, "aa": None,
-            "blurb": "(auto-generated placeholder -- write-up not yet produced by this pipeline)"
+    # books/{gameId} -- one doc per game this week
+    batch = db.batch()
+    for gid, entry in books.items():
+        batch.set(db.collection("books").document(gid), entry)
+    batch.commit()
+    written.append(f"books/* ({len(books)} games)")
+
+    # weather/{gameId} -- one doc per game this week
+    batch = db.batch()
+    for gid, entry in weather.items():
+        batch.set(db.collection("weather").document(gid), entry)
+    batch.commit()
+    written.append(f"weather/* ({len(weather)} games)")
+
+    # closing_results/{gameId} -- set (not overwrite-the-collection), so this naturally
+    # accumulates across weeks: each week's real gameIds land as their own new docs
+    # alongside every prior week's, nothing gets clobbered.
+    if closing:
+        batch = db.batch()
+        for gid, entry in closing.items():
+            batch.set(db.collection("closing_results").document(gid), entry)
+        batch.commit()
+        written.append(f"closing_results/* ({len(closing)} games, previous week's finals)")
+
+    # leaderboards/current + fantasy_projections/current -- only written when this run
+    # actually had real pbp to compute them from (main() passes None otherwise), so an
+    # early-season run with no pbp yet never clobbers good data with an empty result.
+    if qb_leaderboard is not None:
+        db.collection("leaderboards").document("current").set({
+            "qb": qb_leaderboard, "wr": wr_leaderboard, "rb": rb_leaderboard,
+            "qb_history": qb_history, "team_players": team_players,
+            "updated_at": firestore.SERVER_TIMESTAMP,
         })
-    print("\n--- GAMES (paste into const GAMES = [ ... ], write-ups still need a pass) ---")
-    print(json.dumps(games_out, indent=1))
+        written.append("leaderboards/current")
 
-    print("\n--- BOOKS (paste into const BOOKS = { ... }) ---")
-    print(json.dumps(books, indent=1)[:3000], "\n...(truncated for display)" if len(json.dumps(books))>3000 else "")
+    if fantasy_projections:
+        db.collection("fantasy_projections").document("current").set({
+            "projections": fantasy_projections, "updated_at": firestore.SERVER_TIMESTAMP,
+        })
+        written.append("fantasy_projections/current")
 
-    print("\n--- CLOSING_RESULTS additions (merge into const CLOSING_RESULTS = { ... }) ---")
-    print(json.dumps(closing, indent=1))
+    # meta/current -- tells the live site which games/{weekId} doc is "this week"
+    db.collection("meta").document("current").set({
+        "season": season, "week": week, "updated_at": firestore.SERVER_TIMESTAMP,
+    })
+    written.append("meta/current")
 
-    print("\n--- WEATHER (paste into const WEATHER = { ... }) ---")
-    print(json.dumps(weather, indent=1))
-
-    print("\n--- RATING_HISTORY (paste into const RATING_HISTORY = { ... } -- merge/replace week-by-week) ---")
-    history = run_rating_history(SEASON, WEEK, prior_season_pbp_path="/home/claude/odds_pull/pbp_2024.parquet"
-                                  if SEASON == 2025 else fetch_pbp(SEASON - 1))
-    print(json.dumps(history, indent=1)[:2000], "\n...(truncated for display, full output is per-team, per-week)")
-
-    # ---- Player-level: QB_LEADERBOARD / WR_LEADERBOARD / RB_LEADERBOARD / QB_HISTORY /
-    # TEAM_PLAYERS. Real functions existed in this file (build_qb_leaderboard etc.) but were
-    # never actually called from main() -- dead code, silently never producing real output.
-    # Wired in here. Needs real current-season pbp to mean anything current; with none yet
-    # (pre-Week-1), this intentionally falls back to the most recent completed real seasons
-    # (2024+2025) available locally so the numbers are real, just not 2026-current -- refresh
-    # this block specifically once 2026 pbp exists (a few real weeks in).
-    import glob, re
-    pbp_local = []
-    for path in sorted(glob.glob("/home/claude/pipeline/pbp_*.parquet")):
-        m = re.search(r"pbp_(\d{4})\.parquet", path)
-        if not m:
-            continue
-        yr = int(m.group(1))
-        try:
-            if pd.read_parquet(path, columns=["season"]).shape[0] == 0:
-                continue  # empty placeholder (e.g. pbp_2026.parquet pre-season)
-        except Exception:
-            continue
-        pbp_local.append((path, yr))
-
-    if pbp_local:
-        most_recent_season = max(yr for _, yr in pbp_local)
-
-        qb_lb = build_qb_leaderboard(pbp_local, min_attempts=100)
-        qb_lb_out = [{"player": r.passer, "cpoe": round(float(r.cpoe), 2),
-                      "epa": round(float(r.epa_per_dropback), 3), "n": int(r.attempts)}
-                     for r in qb_lb.head(15).itertuples()]
-        print(f"\n--- QB_LEADERBOARD (real, {'+'.join(str(y) for _,y in pbp_local)} combined -- paste into const QB_LEADERBOARD = [ ... ]) ---")
-        print(json.dumps(qb_lb_out, indent=1))
-
-        rec_lb, _ = build_receiver_yac_oe(pbp_local, min_targets=20)
-        wr_lb_out = [{"player": r.receiver, "yac_oe": round(float(r.yac_oe), 2), "n": int(r.targets)}
-                     for r in rec_lb.head(15).itertuples()]
-        print(f"\n--- WR_LEADERBOARD (real, {'+'.join(str(y) for _,y in pbp_local)} combined -- paste into const WR_LEADERBOARD = [ ... ]) ---")
-        print(json.dumps(wr_lb_out, indent=1))
-
-        rush_lb, _ = build_rusher_epa(pbp_local, min_carries=30)
-        rb_lb_out = [{"player": r.rusher, "epa": round(float(r.rush_epa), 3), "n": int(r.carries)}
-                     for r in rush_lb.head(15).itertuples()]
-        print(f"\n--- RB_LEADERBOARD (real, {'+'.join(str(y) for _,y in pbp_local)} combined -- paste into const RB_LEADERBOARD = [ ... ]) ---")
-        print(json.dumps(rb_lb_out, indent=1))
-
-        # QB_HISTORY: within-season week-by-week trend, most recent completed season only
-        # (mixing week numbers across seasons on one chart would be misleading).
-        qb_wk = build_qb_weekly_history([(p, y) for p, y in pbp_local if y == most_recent_season])
-        qb_wk = qb_wk[qb_wk.passer.isin(qb_lb_out and [r["player"] for r in qb_lb_out] or [])]
-        qb_history_out = {}
-        for name, grp in qb_wk.groupby("passer"):
-            qb_history_out[name] = [{"week": int(w), "cpoe": round(float(c), 2)}
-                                     for w, c in zip(grp.week, grp.cpoe)]
-        print(f"\n--- QB_HISTORY (real, {most_recent_season} only -- paste into const QB_HISTORY = { '{' } ... { '}' }) ---")
-        print(json.dumps(qb_history_out, indent=1))
-
-        team_players_out = build_team_top_players(pbp_local)
-        print(f"\n--- TEAM_PLAYERS (real, {'+'.join(str(y) for _,y in pbp_local)}, 'qb' reflects {most_recent_season}'s most-used passer per team -- paste into const TEAM_PLAYERS = { '{' } ... { '}' }) ---")
-        print(json.dumps(team_players_out, indent=1))
-    else:
-        print("\n--- QB_LEADERBOARD / WR_LEADERBOARD / RB_LEADERBOARD / QB_HISTORY / TEAM_PLAYERS ---")
-        print("No real pbp available locally (checked /home/claude/pipeline/pbp_*.parquet) -- skipped. "
-              "These need at least one real completed season's play-by-play on disk.")
-
-    # ---- FANTASY_PROJECTIONS: real half-PPR season-average points, keyed by team|lastname.
-    # See build_fantasy_projections() docstring for the exact methodology and its honest
-    # limitations. Paste as a new top-level const; ChalkTalk.html looks players up in this
-    # table via getProjection(p) instead of relying on a static field, so it covers roster
-    # players AND any waiver pickup automatically.
-    proj, proj_season = build_fantasy_projections(SEASON)
-    print(f"\n--- FANTASY_PROJECTIONS (real, {proj_season} season average, half-PPR -- paste into const FANTASY_PROJECTIONS = { '{' } ... { '}' }) ---")
-    print(json.dumps(proj, indent=1))
+    print("\n--- Firestore write complete ---")
+    for w in written:
+        print(f"  wrote {w}")
 
 
 # ---------- Player-level metrics: QB CPOE trend, WR/TE YAC-over-expected, RB rushing EPA ----------
@@ -786,3 +772,172 @@ def build_fantasy_projections(season):
         key = f"{str(r['recent_team']).lower()}|{last}"
         out[key] = {"proj": round(float(r["ppg"]), 2), "games": int(r["games"]), "pos": r["position"]}
     return out, used_season
+
+
+if __name__ == "__main__":
+    print(f"=== Chalk Talk weekly update: season {SEASON}, week {WEEK} ({MODE} mode) ===\n")
+
+    ratings = run_ratings(SEASON, WEEK, prior_season_pbp_path="/home/claude/odds_pull/pbp_2024.parquet"
+                           if SEASON == 2025 else fetch_pbp(SEASON - 1))
+
+    odds_data = pull_week_odds(MODE, API_KEY, HIST_DATE)
+    books = build_books_for_week(odds_data, ratings["games_this_week"])
+    closing = build_closing_results(ratings["games_prev_week"])
+    weather = pull_weather_for_week(ratings["games_this_week"])
+
+    # ---- RATINGS array ----
+    rows = []
+    for t in ratings["teams"]:
+        off_pts = round(ratings["off"][t] * ratings["pts_per_epa"], 1)
+        def_pts = round(ratings["deft"][t] * ratings["pts_per_epa"], 1)
+        overall = round(off_pts - def_pts, 1)
+        off_prev_pts = ratings["off_prev"][t] * ratings["pts_per_epa"]
+        def_prev_pts = ratings["deft_prev"][t] * ratings["pts_per_epa"]
+        overall_prev = off_prev_pts - def_prev_pts
+        st_pts = round(ratings["st_rating"][t] * ratings["pts_per_epa"], 1)          # same units as off/def: pts
+        havoc_pts = round(ratings["havoc_rating"][t] * 100, 1)                        # percentage-point deviation from average havoc rate, NOT the points scale
+        rows.append({"team": t, "off_pts": off_pts, "def_pts": def_pts, "overall_pts": overall,
+                      "st_pts": st_pts, "havoc_pts": havoc_pts,
+                      "_overall_prev": overall_prev})
+    rows_sorted_now = sorted(rows, key=lambda r: -r["overall_pts"])
+    rows_sorted_prev = sorted(rows, key=lambda r: -r["_overall_prev"])
+    prev_rank = {r["team"]: i for i, r in enumerate(rows_sorted_prev)}
+    for i, r in enumerate(rows_sorted_now):
+        r["move"] = prev_rank[r["team"]] - i
+        del r["_overall_prev"]
+
+    print("--- RATINGS (paste into const RATINGS = [ ... ]) ---")
+    print(json.dumps(rows_sorted_now, indent=1))
+
+    print(f"\npts_per_epa used: {round(ratings['pts_per_epa'],2)}")
+    print(f"home field advantage (epa): {round(ratings['hfa'],4)}")
+
+    # ---- GAMES array (this week, model line vs market consensus) ----
+    games_out = []
+    for _, r in ratings["games_this_week"].iterrows():
+        h, a = r.home_team, r.away_team
+        if h not in ratings["off"].index or a not in ratings["off"].index:
+            continue
+        home_net = ratings["off"][h] - ratings["deft"][a]
+        away_net = ratings["off"][a] - ratings["deft"][h]
+        model_home_favored = (home_net - away_net + ratings["hfa"]) * ratings["pts_per_epa"]
+        gid = f"{a.lower()}-{h.lower()}"
+        book_entry = books.get(gid)
+        market_home_favored = -float(book_entry["books"][0]["home_pt"]) if book_entry else None
+        games_out.append({
+            "id": gid, "away": a, "home": h,
+            "model": round(-model_home_favored, 2),
+            "market": round(-market_home_favored, 2) if market_home_favored is not None else None,
+            "ah": None, "aa": None,
+            "blurb": "(auto-generated placeholder -- write-up not yet produced by this pipeline)"
+        })
+    print("\n--- GAMES (paste into const GAMES = [ ... ], write-ups still need a pass) ---")
+    print(json.dumps(games_out, indent=1))
+
+    print("\n--- BOOKS (paste into const BOOKS = { ... }) ---")
+    print(json.dumps(books, indent=1)[:3000], "\n...(truncated for display)" if len(json.dumps(books))>3000 else "")
+
+    print("\n--- CLOSING_RESULTS additions (merge into const CLOSING_RESULTS = { ... }) ---")
+    print(json.dumps(closing, indent=1))
+
+    print("\n--- WEATHER (paste into const WEATHER = { ... }) ---")
+    print(json.dumps(weather, indent=1))
+
+    print("\n--- RATING_HISTORY (paste into const RATING_HISTORY = { ... } -- merge/replace week-by-week) ---")
+    history = run_rating_history(SEASON, WEEK, prior_season_pbp_path="/home/claude/odds_pull/pbp_2024.parquet"
+                                  if SEASON == 2025 else fetch_pbp(SEASON - 1))
+    print(json.dumps(history, indent=1)[:2000], "\n...(truncated for display, full output is per-team, per-week)")
+
+    # ---- Player-level: QB_LEADERBOARD / WR_LEADERBOARD / RB_LEADERBOARD / QB_HISTORY /
+    # TEAM_PLAYERS. Real functions existed in this file (build_qb_leaderboard etc.) but were
+    # never actually called from main() -- dead code, silently never producing real output.
+    # Wired in here. Needs real current-season pbp to mean anything current; with none yet
+    # (pre-Week-1), this intentionally falls back to the most recent completed real seasons
+    # (2024+2025) available locally so the numbers are real, just not 2026-current -- refresh
+    # this block specifically once 2026 pbp exists (a few real weeks in).
+    import glob, re
+    pbp_local = []
+    for path in sorted(glob.glob(os.path.join(CACHE_DIR, "pbp_*.parquet"))):
+        m = re.search(r"pbp_(\d{4})\.parquet", path)
+        if not m:
+            continue
+        yr = int(m.group(1))
+        try:
+            if pd.read_parquet(path, columns=["season"]).shape[0] == 0:
+                continue  # empty placeholder (e.g. pbp_2026.parquet pre-season)
+        except Exception:
+            continue
+        pbp_local.append((path, yr))
+
+    if pbp_local:
+        most_recent_season = max(yr for _, yr in pbp_local)
+
+        qb_lb = build_qb_leaderboard(pbp_local, min_attempts=100)
+        qb_lb_out = [{"player": r.passer, "cpoe": round(float(r.cpoe), 2),
+                      "epa": round(float(r.epa_per_dropback), 3), "n": int(r.attempts)}
+                     for r in qb_lb.head(15).itertuples()]
+        print(f"\n--- QB_LEADERBOARD (real, {'+'.join(str(y) for _,y in pbp_local)} combined -- paste into const QB_LEADERBOARD = [ ... ]) ---")
+        print(json.dumps(qb_lb_out, indent=1))
+
+        rec_lb, _ = build_receiver_yac_oe(pbp_local, min_targets=20)
+        wr_lb_out = [{"player": r.receiver, "yac_oe": round(float(r.yac_oe), 2), "n": int(r.targets)}
+                     for r in rec_lb.head(15).itertuples()]
+        print(f"\n--- WR_LEADERBOARD (real, {'+'.join(str(y) for _,y in pbp_local)} combined -- paste into const WR_LEADERBOARD = [ ... ]) ---")
+        print(json.dumps(wr_lb_out, indent=1))
+
+        rush_lb, _ = build_rusher_epa(pbp_local, min_carries=30)
+        rb_lb_out = [{"player": r.rusher, "epa": round(float(r.rush_epa), 3), "n": int(r.carries)}
+                     for r in rush_lb.head(15).itertuples()]
+        print(f"\n--- RB_LEADERBOARD (real, {'+'.join(str(y) for _,y in pbp_local)} combined -- paste into const RB_LEADERBOARD = [ ... ]) ---")
+        print(json.dumps(rb_lb_out, indent=1))
+
+        # QB_HISTORY: within-season week-by-week trend, most recent completed season only
+        # (mixing week numbers across seasons on one chart would be misleading).
+        qb_wk = build_qb_weekly_history([(p, y) for p, y in pbp_local if y == most_recent_season])
+        qb_wk = qb_wk[qb_wk.passer.isin(qb_lb_out and [r["player"] for r in qb_lb_out] or [])]
+        qb_history_out = {}
+        for name, grp in qb_wk.groupby("passer"):
+            qb_history_out[name] = [{"week": int(w), "cpoe": round(float(c), 2)}
+                                     for w, c in zip(grp.week, grp.cpoe)]
+        print(f"\n--- QB_HISTORY (real, {most_recent_season} only -- paste into const QB_HISTORY = { '{' } ... { '}' }) ---")
+        print(json.dumps(qb_history_out, indent=1))
+
+        team_players_out = build_team_top_players(pbp_local)
+        print(f"\n--- TEAM_PLAYERS (real, {'+'.join(str(y) for _,y in pbp_local)}, 'qb' reflects {most_recent_season}'s most-used passer per team -- paste into const TEAM_PLAYERS = { '{' } ... { '}' }) ---")
+        print(json.dumps(team_players_out, indent=1))
+    else:
+        print("\n--- QB_LEADERBOARD / WR_LEADERBOARD / RB_LEADERBOARD / QB_HISTORY / TEAM_PLAYERS ---")
+        print("No real pbp available locally (checked " + CACHE_DIR + "/pbp_*.parquet) -- skipped. "
+              "These need at least one real completed season's play-by-play on disk.")
+        qb_lb_out = wr_lb_out = rb_lb_out = qb_history_out = team_players_out = None
+
+    # ---- FANTASY_PROJECTIONS: real half-PPR season-average points, keyed by team|lastname.
+    # See build_fantasy_projections() docstring for the exact methodology and its honest
+    # limitations. Paste as a new top-level const; ChalkTalk.html looks players up in this
+    # table via getProjection(p) instead of relying on a static field, so it covers roster
+    # players AND any waiver pickup automatically.
+    proj, proj_season = build_fantasy_projections(SEASON)
+    print(f"\n--- FANTASY_PROJECTIONS (real, {proj_season} season average, half-PPR -- paste into const FANTASY_PROJECTIONS = { '{' } ... { '}' }) ---")
+    print(json.dumps(proj, indent=1))
+
+    # ---- Write everything real above straight to Firestore -- the actual replacement for
+    # the old "paste these JSON blocks into ChalkTalk.html by hand" step. Only runs when
+    # credentials are actually configured (the GitHub Actions secret, or a local
+    # GOOGLE_APPLICATION_CREDENTIALS/FIREBASE_CREDENTIALS_PATH env var pointing at a real
+    # service-account key), so a bare local run with no setup still just prints the numbers
+    # like it always has -- nothing breaks for a quick manual sanity check.
+    cred_path = os.environ.get("FIREBASE_CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if _FIREBASE_AVAILABLE and cred_path:
+        fdb = get_firestore_client(cred_path)
+        write_firestore(
+            fdb, season=SEASON, week=WEEK, ratings_rows=rows_sorted_now, games=games_out,
+            books=books, closing=closing, weather=weather, rating_history=history,
+            qb_leaderboard=qb_lb_out, wr_leaderboard=wr_lb_out, rb_leaderboard=rb_lb_out,
+            qb_history=qb_history_out, team_players=team_players_out,
+            fantasy_projections=proj,
+        )
+    else:
+        reason = "firebase-admin not installed" if not _FIREBASE_AVAILABLE else "no credentials configured (FIREBASE_CREDENTIALS_PATH / GOOGLE_APPLICATION_CREDENTIALS)"
+        print(f"\n(Skipped Firestore write -- {reason}. Numbers above are still real, just not persisted this run.)")
+
+

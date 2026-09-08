@@ -1,0 +1,63 @@
+name: Chalk Talk Weekly Update
+
+# Two ways this runs:
+#   1. Scheduled (cron) -- always uses SEASON/WEEK's hardcoded defaults in weekly_update.py,
+#      since a cron trigger can't take inputs. Bump those defaults in the file itself if you
+#      want the unattended run to target a different week.
+#   2. Manual ("Run workflow" button, top right of this workflow in the Actions tab) -- lets
+#      you set season/week right from the GitHub UI, no code edit or push needed. This is the
+#      one to use for an on-demand odds refresh, or to re-run a week that needs fixing.
+on:
+  schedule:
+    # Tuesday 10:00 ET (14:00 UTC during EDT, 15:00 UTC during EST -- 14:00 UTC covers the
+    # real season, which runs entirely within EDT/EST's daylight-saving window this year).
+    - cron: "0 14 * * 2"
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "Season (leave blank to use the file's default)"
+        required: false
+        type: string
+      week:
+        description: "Week (leave blank to use the file's default)"
+        required: false
+        type: string
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r pipeline/requirements.txt
+
+      - name: Write Firebase service account key
+        run: echo "$FIREBASE_SERVICE_ACCOUNT" > /tmp/firebase-key.json
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
+      - name: Run pipeline
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          FIREBASE_CREDENTIALS_PATH: /tmp/firebase-key.json
+          # Only set when the manual trigger actually filled them in -- an empty string here
+          # would override weekly_update.py's real defaults with int("") and crash, so these
+          # env vars simply aren't set at all on a blank input (or a cron run).
+          CHALKTALK_SEASON: ${{ github.event.inputs.season || '' }}
+          CHALKTALK_WEEK: ${{ github.event.inputs.week || '' }}
+        run: |
+          # An unfilled manual-trigger input arrives here as an empty string, not unset --
+          # and int("") in weekly_update.py would crash, so blank ones get unset entirely
+          # rather than passed through, falling back to the file's real defaults.
+          [ -z "$CHALKTALK_SEASON" ] && unset CHALKTALK_SEASON
+          [ -z "$CHALKTALK_WEEK" ] && unset CHALKTALK_WEEK
+          python pipeline/weekly_update.py
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f /tmp/firebase-key.json
