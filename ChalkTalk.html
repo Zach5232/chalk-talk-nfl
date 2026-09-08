@@ -222,6 +222,7 @@
   <nav>
     <button id="nav-dash" class="active" onclick="showView('dash')">Dashboard</button>
     <button id="nav-week" onclick="showView('week')">Spread Zone</button>
+    <button id="nav-pickem" onclick="showView('pickem')">Pick'em</button>
     <button id="nav-ranks" onclick="showView('ranks')">The Margin</button>
     <button id="nav-fantasy" onclick="showView('fantasy')">Player Watch</button>
     <button id="nav-survivor" onclick="showView('survivor')">Survivor</button>
@@ -259,14 +260,16 @@
   </div>
 
   <div id="view-week" class="view">
+    <div class="section-label">Spread Zone &middot; Week 1, 2026</div>
+    <div id="games-list"></div>
+  </div>
+
+  <div id="view-pickem" class="view">
     <div class="section-label">Biggest Edges This Week</div>
     <div class="dash-card" id="biggest-edges"></div>
 
     <div class="section-label">Pick'em Helper &middot; $125 ATS pool, season-long record</div>
     <div class="dash-card" id="pickem-helper"></div>
-
-    <div class="section-label">Spread Zone &middot; Week 1, 2026</div>
-    <div id="games-list"></div>
   </div>
 
   <div id="view-detail" class="view">
@@ -412,6 +415,7 @@ function showView(name){
   document.getElementById('view-'+name).classList.add('active');
   document.getElementById('nav-dash').classList.toggle('active', name==='dash');
   document.getElementById('nav-week').classList.toggle('active', name==='week');
+  document.getElementById('nav-pickem').classList.toggle('active', name==='pickem');
   document.getElementById('nav-ranks').classList.toggle('active', name==='ranks');
   document.getElementById('nav-fantasy').classList.toggle('active', name==='fantasy');
   document.getElementById('nav-survivor').classList.toggle('active', name==='survivor');
