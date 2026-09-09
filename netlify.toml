@@ -6,3 +6,13 @@
   from = "/"
   to = "/ChalkTalk.html"
   status = 200
+
+# ChalkTalk.html has no cache-busting filename (no build hash), so without this, browsers
+# and Netlify's CDN edge can keep serving an old cached copy of the page after a new deploy --
+# the exact "I tested a feature and it didn't work" symptom that showed up 2026-09-08 turned
+# out to likely be a stale cache, not a real bug. This forces a revalidation check on every
+# load (still fast via a 304 when nothing changed) instead of trusting a stale local copy.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cache-Control = "no-cache, must-revalidate"

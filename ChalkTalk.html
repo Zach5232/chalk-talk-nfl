@@ -1247,15 +1247,31 @@ function formatGameDateTime(g){
   return `${dateStr} &middot; ${hh12}:${String(mm).padStart(2,'0')} ${ampm} ET`;
 }
 
+// Edge-size color: green for the 2-5pt range (context only -- see the detail page footnote
+// and the backtest behind this: 51.9% ATS combined across 2023-2025, 95% CI straddling the
+// 52.38% breakeven, and it didn't hold up out-of-sample -- NOT a validated "good bet" signal,
+// just the range worth a second look). Grey for under 2 or 5+, same as everything else here.
+function edgeValueColor(edge){
+  return (edge >= 2 && edge < 5) ? 'var(--good)' : 'var(--sage)';
+}
+
 function renderGamesList(){
   const el = document.getElementById('games-list');
   el.innerHTML = GAMES.map(g=>{
     const isFinal = g.ah != null && g.aa != null;
+    // g.market is null whenever the odds pull found no book match for this game (rare, but
+    // real -- late schedule changes, a book not covering a specific game). Guard it rather
+    // than crash the whole list or fabricate a fake edge number against a missing line.
+    const hasMarket = g.market != null;
+    const edge = hasMarket ? Math.abs(g.market - g.model) : null;
     return `
     <div class="game-card" onclick="openGame('${g.id}')">
       <div class="game-card-top">
         <div class="gc-teams">${logoImg(g.away,22)}${g.away}<span class="at">at</span>${logoImg(g.home,22)}${g.home}</div>
-        <div class="gc-lines">MARKET ${g.home} ${(g.market>0?'+':'')}${(g.market).toFixed(1)}<br><span class="model">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</span></div>
+        <div style="display:flex;align-items:baseline;gap:10px;">
+          ${edge!=null ? `<div style="font-size:15px;font-weight:800;color:${edgeValueColor(edge)};" title="Model vs. market edge">${edge.toFixed(1)}</div>` : ''}
+          <div class="gc-lines">MARKET ${g.home} ${hasMarket ? `${g.market>0?'+':''}${g.market.toFixed(1)}` : '&mdash; no line yet'}<br><span class="model">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</span></div>
+        </div>
       </div>
       ${formatGameDateTime(g) ? `<div class="gc-final" style="margin-top:0;">${formatGameDateTime(g)}</div>` : ''}
       <div class="gc-blurb">${g.blurb}</div>
