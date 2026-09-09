@@ -265,11 +265,11 @@
   </div>
 
   <div id="view-pickem" class="view">
-    <div class="section-label">Biggest Edges This Week</div>
-    <div class="dash-card" id="biggest-edges"></div>
-
     <div class="section-label">Pick'em Helper &middot; $125 ATS pool, season-long record</div>
     <div class="dash-card" id="pickem-helper"></div>
+
+    <div class="section-label">Market Movement vs. Your Splash Lines</div>
+    <div class="dash-card" id="splash-movement"></div>
   </div>
 
   <div id="view-detail" class="view">
@@ -1504,6 +1504,7 @@ function openGame(id){
           <p>${g.blurb}</p>
           <p>Our number favors ${favTeam}, driven by their offense (${favOff>0?'+':''}${favOff} pts above average) against a ${oppDef>0?'below-average':'above-average'} opposing defense (${oppDef>0?'+':''}${oppDef}), while the other side's offense (${oppOff>0?'+':''}${oppOff}) faces a ${favDef<0?'stronger':'weaker'} defense (${favDef>0?'+':''}${favDef}). That combination lands our projection ${agreement}.</p>
           <p class="empty-note" style="margin-top:8px;">A full player-level write-up (like the Week 9 Ravens/Chargers examples) hasn't been produced for this game yet -- this breakdown is auto-generated from the real team ratings, not a placeholder.</p>
+          <p class="empty-note" style="margin-top:8px;">This game's edge is ${edgeVsMarket.toFixed(1)} pts${edgeVsMarket>=2 && edgeVsMarket<5 ? ' -- inside the 2-5pt range' : edgeVsMarket<2 ? ' -- under 2 pts' : ' -- 5+ pts'}. A 3-season backtest (2023-2025, 563 games) found no edge-size range that reliably beat the market: the 2-5pt range came out to 51.9% ATS combined (95% CI 45.5-58.3%, straddling the 52.38% breakeven), and an out-of-sample check (discover on 2023-24, test on 2025 alone) found it didn't hold up on new data. Shown for context, not as a confidence signal.</p>
         </div>`;
     } else {
       autoStoryHtml = `<div class="story"><p>${g.blurb}</p><p>Market had ${g.home} at ${(g.market>0?'+':'')}${(g.market).toFixed(1)}, our model had them at ${(g.model>0?'+':'')}${(g.model).toFixed(1)}.</p></div>`;
@@ -2140,10 +2141,18 @@ function getPickemWeekPicks(week){
   const hist = getPickemHistory();
   return hist[week] || {};
 }
+// A pick'em entry is {team, lineAtPick} -- lineAtPick freezes the picked team's own market
+// spread at the moment you picked, since lines move and re-showing whatever the market drifted
+// to later would misrepresent what you actually saw. pickedTeam()/pickedLine() read both this
+// shape and the older plain-string shape (just a team name, no frozen line) that existed before
+// this was added, so nothing already recorded breaks.
+function pickedTeam(entry){ return (entry && typeof entry === 'object') ? entry.team : entry; }
+function pickedLine(entry){ return (entry && typeof entry === 'object') ? entry.lineAtPick : null; }
+
 function setPickemPick(week, gameId, team){
   const hist = getPickemHistory();
   const weekPicks = {...(hist[week]||{})};
-  if(weekPicks[gameId] === team){
+  if(pickedTeam(weekPicks[gameId]) === team){
     delete weekPicks[gameId]; // clicking the already-picked side again un-picks the game
   } else {
     const isNewGame = !(gameId in weekPicks);
@@ -2151,7 +2160,9 @@ function setPickemPick(week, gameId, team){
       alert("You already have 5 picks locked for this week -- remove one first.");
       return;
     }
-    weekPicks[gameId] = team;
+    const g = GAMES.find(x => x.id === gameId);
+    const lineAtPick = g ? (team === g.home ? g.market : -g.market) : null;
+    weekPicks[gameId] = {team, lineAtPick};
   }
   hist[week] = weekPicks;
   setState('pickem_history', hist);
@@ -2211,6 +2222,7 @@ function setSplashLine(gameId, val){
   }
   setState('pickem_splash_lines', lines);
   renderPickemHelper();
+  renderSplashMovement();
 }
 let pickemExpanded = false;
 function togglePickemExpanded(){ pickemExpanded = !pickemExpanded; renderPickemHelper(); }
@@ -2242,7 +2254,7 @@ function renderPickemHelper(){
     return {g, es, pickTeam, favTeam, favSpread, divisional: isDivisional(g.away, g.home)};
   }).sort((a,b) => b.favSpread - a.favSpread);
 
-  const lockedTeams = rows.filter(r => weekPicks[r.g.id]).map(r => weekPicks[r.g.id]);
+  const lockedTeams = rows.filter(r => weekPicks[r.g.id]).map(r => pickedTeam(weekPicks[r.g.id]));
   const summaryHtml = `
     <div style="font-size:13px;margin-bottom:10px;">
       <b>${pickedCount} / 5 picks locked for Week ${currentWeek}.</b>
@@ -2262,7 +2274,9 @@ function renderPickemHelper(){
   }
 
   const rowsHtml = rows.map(r => {
-    const pickedSide = weekPicks[r.g.id];
+    const pickedEntry = weekPicks[r.g.id];
+    const pickedSide = pickedTeam(pickedEntry);
+    const frozenLine = pickedLine(pickedEntry);
     const atCap = pickedCount >= 5 && !pickedSide;
     const splashVal = splashLines[r.g.id];
     let clvHtml = '';
@@ -2298,6 +2312,7 @@ function renderPickemHelper(){
         </span>
       </div>
       <div style="font-size:11px;color:var(--sage);margin-top:2px;">Our model's side: ${r.pickTeam} &middot; edge ${Math.abs(r.es.edge).toFixed(1)} pts vs. market (${r.es.tag})</div>
+      ${pickedSide && frozenLine!=null ? `<div style="font-size:11px;color:var(--sage);margin-top:2px;">Locked in at <b style="color:var(--chalk);">${pickedSide} ${frozenLine>0?'+':''}${frozenLine.toFixed(1)}</b> when you picked -- won't drift even as the market moves.</div>` : ''}
       ${clvHtml}
       <div style="margin-top:4px;">
         <label style="font-size:10.5px;color:var(--sage);">Splash locked line (${r.g.home} spread):
@@ -2811,10 +2826,11 @@ function renderResults(){
   const weekRows = pickemWeeks.map(week => {
     const picks = pickemHist[week];
     let w=0, l=0, p=0, pend=0;
-    const pickDetails = Object.entries(picks).map(([gameId, team]) => {
+    const pickDetails = Object.entries(picks).map(([gameId, entry]) => {
+      const team = pickedTeam(entry), lineAtPick = pickedLine(entry);
       const grade = gradeATSPick(gameId, team);
       if(grade==='win') w++; else if(grade==='loss') l++; else if(grade==='push') p++; else pend++;
-      return {gameId, team, grade};
+      return {gameId, team, lineAtPick, grade};
     });
     cumW+=w; cumL+=l; cumP+=p;
     return {week, w, l, p, pend, pickDetails};
@@ -2822,6 +2838,10 @@ function renderResults(){
   const cumTotal = cumW+cumL+cumP;
   const cumPct = cumTotal>0 ? ((cumW/(cumW+cumL||1))*100).toFixed(1) : null;
 
+  // Editable directly here, not just on the Pick'em page -- fixes a mis-recorded pick (fat
+  // fingered the wrong team, forgot to log it before the game) without needing that week's
+  // live market data: the two team options come from parseGameId, and setPickemPick already
+  // works for any week, not just the current one.
   pickemEl.innerHTML = pickemWeeks.length===0 ? '<div class="empty-note">No picks locked yet -- head to Spread Zone and lock your 5 for this week.</div>' : `
     <div style="font-size:13px;margin-bottom:12px;">
       <b>Season record: ${cumW}-${cumL}${cumP?`-${cumP}`:''} ATS${cumPct?` (${cumPct}%)`:''}</b> across ${weekRows.filter(r=>r.w+r.l+r.p>0).length} graded week(s).
@@ -2835,7 +2855,15 @@ function renderResults(){
           <td>Wk ${r.week}${r.week===currentWeek?' <span style="color:var(--sage);">(current)</span>':''}</td>
           <td>${r.w}-${r.l}${r.p?`-${r.p}`:''}${r.pend?` <span style="color:var(--sage);">(${r.pend} pending)</span>`:''}</td>
           <td style="font-size:11.5px;">
-            ${r.pickDetails.map(d => `<span class="status-pill" style="margin:2px 4px 2px 0;${d.grade==='win'?'color:var(--good);':d.grade==='loss'?'color:var(--alert);':''}">${d.team}${d.grade?` (${d.grade})`:' (pending)'}</span>`).join('')}
+            ${r.pickDetails.map(d => {
+              const {away, home} = parseGameId(d.gameId);
+              const lineStr = d.lineAtPick!=null ? ` @ ${d.lineAtPick>0?'+':''}${d.lineAtPick.toFixed(1)}` : '';
+              return `<span style="display:inline-flex;align-items:center;gap:3px;margin:2px 4px 2px 0;">
+                <span class="status-pill" style="${d.grade==='win'?'color:var(--good);':d.grade==='loss'?'color:var(--alert);':''}">${d.team}${lineStr}${d.grade?` (${d.grade})`:' (pending)'}</span>
+                <button class="btn" style="padding:1px 5px;font-size:9.5px;" title="Change to ${d.team===home?away:home}" onclick="setPickemPick(${r.week}, '${d.gameId}', '${d.team===home?away:home}'); renderResults();">&#8646;</button>
+                <button class="btn" style="padding:1px 5px;font-size:9.5px;" title="Remove this pick" onclick="setPickemPick(${r.week}, '${d.gameId}', '${d.team}'); renderResults();">&times;</button>
+              </span>`;
+            }).join('')}
           </td>
         </tr>`).join('')}
       </tbody>
@@ -2918,31 +2946,62 @@ function renderResults(){
   }).join('');
 }
 
-function renderBiggestEdges(){
-  const el = document.getElementById('biggest-edges');
+// Retired "Biggest Edges This Week" (sorted by |model - market|) from the Pick'em tab --
+// a real backtest (backtest_pickem_strategy.py, 2024+2025, weeks 5-17, 130 picks) found
+// ranking pick'em selections by model edge did WORSE than ranking by market favorite size
+// (43.08% vs 51.54% ATS), and a follow-up out-of-sample test (2026-09-08, this session --
+// discover on 2023-24, validate on 2025 alone) found edge size doesn't reliably predict
+// cover rate at all (51.9% combined, 95% CI [45.5%,58.3%], straddling the 52.38% breakeven).
+// Leading a pick'em strategy tool with that number was actively misleading. Replaced with
+// real market-movement tracking instead (below), same idea as Unabated's Splash-vs-market
+// comparison: you paste in the line Splash locked you into, this shows how far the live
+// market has moved since, per game, sorted by movement size. This is real, honest data
+// (not a model prediction) -- what it ISN'T is separately backtested as predictive; the one
+// prior finding on market movement specifically was "inconclusive except very large moves
+// (3.5+ pts), small sample" -- shown as context, not a confidence signal.
+function renderSplashMovement(){
+  const el = document.getElementById('splash-movement');
+  if(!el) return;
   if(!GAMES || GAMES.length===0){ el.innerHTML = '<div class="empty-note">No games loaded yet.</div>'; return; }
 
+  const splashLines = getSplashLines();
   const rows = GAMES.map(g => {
-    const modelHomeFavored = -g.model, marketHomeFavored = -g.market;
-    const edge = Math.abs(modelHomeFavored - marketHomeFavored);
-    const favSide = modelHomeFavored > marketHomeFavored ? g.home : g.away;
-    return {g, edge, favSide};
-  }).sort((a,b) => b.edge - a.edge).slice(0, 10);
+    const splashVal = splashLines[g.id];
+    if(splashVal === undefined || isNaN(splashVal)) return null;
+    const homeFavoredNow = -g.market, homeFavoredAtLock = -splashVal;
+    const moveTowardHome = homeFavoredNow - homeFavoredAtLock; // positive = moved toward home
+    if(Math.abs(moveTowardHome) < 0.05) return null; // no real movement to show
+    const movedTeam = moveTowardHome > 0 ? g.home : g.away;
+    return {g, splashVal, moveAbs: Math.abs(moveTowardHome), movedTeam};
+  }).filter(Boolean).sort((a,b) => b.moveAbs - a.moveAbs);
 
-  const maxEdge = Math.max(...rows.map(r=>r.edge), 1);
-  el.innerHTML = rows.map(r => {
-    const pct = (r.edge / maxEdge) * 100;
-    return `
-    <div onclick="openGame('${r.g.id}')" style="cursor:pointer;padding:9px 0;border-bottom:1px solid var(--line);">
-      <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:5px;">
-        <span>${logoImg(r.g.away,16)}${r.g.away} @ ${logoImg(r.g.home,16)}${r.g.home} <span style="color:var(--sage);">&middot; model favors ${r.favSide}</span></span>
-        <b style="color:var(--gold);">+${r.edge.toFixed(1)} pts</b>
-      </div>
-      <div style="background:var(--panel2);border-radius:6px;height:8px;overflow:hidden;">
-        <div style="background:var(--gold);height:100%;width:${pct}%;border-radius:6px;"></div>
-      </div>
-    </div>`;
-  }).join('');
+  if(rows.length === 0){
+    el.innerHTML = `<div class="empty-note">No movement to show yet -- enter this week's Splash-locked lines in the Pick'em Helper above (per game, "Splash locked line") and real market movement since will show up here automatically.</div>`;
+    return;
+  }
+
+  const maxMove = Math.max(...rows.map(r=>r.moveAbs), 1);
+  el.innerHTML = `
+    <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
+      Real market movement since you locked each Splash line, biggest movers first -- not a model
+      prediction, just what the market has actually done. Past backtesting on market movement as a
+      signal was inconclusive except at very large moves (3.5+ pts), and even then on a small
+      sample, so treat this as context to weigh, not a standalone "bet this" signal.
+    </div>
+    ${rows.map(r => {
+      const pct = (r.moveAbs / maxMove) * 100;
+      return `
+      <div onclick="openGame('${r.g.id}')" style="cursor:pointer;padding:9px 0;border-bottom:1px solid var(--line);">
+        <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:5px;">
+          <span>${logoImg(r.g.away,16)}${r.g.away} @ ${logoImg(r.g.home,16)}${r.g.home} <span style="color:var(--sage);">&middot; moved toward ${r.movedTeam}</span></span>
+          <b style="color:var(--gold);">${r.moveAbs.toFixed(1)} pts</b>
+        </div>
+        <div style="background:var(--panel2);border-radius:6px;height:8px;overflow:hidden;">
+          <div style="background:var(--gold);height:100%;width:${pct}%;border-radius:6px;"></div>
+        </div>
+      </div>`;
+    }).join('')}
+  `;
 }
 
 // Mini sparkline grid -- one small trend chart per team, all 32 at a glance. Only teams with
@@ -3548,7 +3607,7 @@ async function boot(){
   applyRosterOverrides();
   loadSleeperPlayerIndex();
   renderGamesList();
-  renderBiggestEdges();
+  renderSplashMovement();
   renderPickemHelper();
   renderRankings();
   renderHavocScatter();

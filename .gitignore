@@ -6,6 +6,7 @@ pipeline/config_local.py
 # already reflected in ChalkTalk.html's hardcoded arrays after each real run. No reason to
 # version-control multi-MB parquet/json snapshots week to week.
 pipeline/*.parquet
+pipeline/_cache/
 pipeline/week_odds.json
 pipeline/wx_*.json
 pipeline/schedule_2026_full.csv
