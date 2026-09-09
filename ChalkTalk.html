@@ -1375,6 +1375,10 @@ function prefillBet(gameId, side, book, line, odds){
 // drops you on the tracker form with everything filled in — edit anything, then hit Add Bet
 function quickAdd(gameId){
   const g = GAMES.find(x=>x.id===gameId);
+  if(!g || g.market == null){
+    alert("No market line yet for this game -- can't suggest a side/price without one. Add the bet manually once a line is available.");
+    return;
+  }
   const modelHomeFavored = -g.model;
   const marketHomeFavored = -g.market;
   const sig = edgeSignal(modelHomeFavored, marketHomeFavored);
@@ -1396,6 +1400,18 @@ function openGame(id){
   const g = GAMES.find(x=>x.id===id);
   const d = DETAILS[id];
   const el = document.getElementById('detail-content');
+
+  // g.market is null whenever the odds pull found no book match for this game -- the entire
+  // rest of this page (signal banner, gauge, breakdown, "Our bet") is a market-vs-model
+  // comparison, so there's nothing honest to show without a real market line. One early guard
+  // here instead of null-checking every downstream computation separately.
+  if(g.market == null){
+    el.innerHTML = `<div class="detail-teams">${logoImg(g.away,32)}${g.away}<span class="at">at</span>${logoImg(g.home,32)}${g.home}</div>
+      <div class="detail-sub">WEEK ${g.week}, ${g.season}${formatGameDateTime(g) ? ' &middot; ' + formatGameDateTime(g) : ''}</div>
+      <div class="empty-note" style="padding:20px 0;">No market line found yet for this game -- the odds pull didn't return a book match. Check back once one's available.</div>`;
+    showView('detail');
+    return;
+  }
 
   // model/market here are stored as "market"/"model" = home team's line in the SAME
   // sign convention as the rest of this file (negative displayed value = home favored,
@@ -2177,7 +2193,7 @@ function setPickemPick(week, gameId, team){
       return;
     }
     const g = GAMES.find(x => x.id === gameId);
-    const lineAtPick = g ? (team === g.home ? g.market : -g.market) : null;
+    const lineAtPick = (g && g.market != null) ? (team === g.home ? g.market : -g.market) : null;
     weekPicks[gameId] = {team, lineAtPick};
   }
   hist[week] = weekPicks;
@@ -2261,7 +2277,11 @@ function renderPickemHelper(){
   const weekPicks = getPickemWeekPicks(currentWeek);
   const pickedCount = Object.keys(weekPicks).length;
   const splashLines = getSplashLines();
-  const rows = GAMES.map(g => {
+  // Games with no market line (g.market null -- no book match found) can't be ranked by
+  // market favorite size or given a real edge, so they're excluded from the board entirely
+  // rather than showing a fabricated "favorite by 0.0".
+  const noMarketCount = GAMES.filter(g => g.market == null).length;
+  const rows = GAMES.filter(g => g.market != null).map(g => {
     const modelHomeFavored = -g.model, marketHomeFavored = -g.market;
     const es = edgeSignal(modelHomeFavored, marketHomeFavored);
     const pickTeam = es.side==='home' ? g.home : g.away;
@@ -2350,6 +2370,7 @@ function renderPickemHelper(){
       automatically and get graded once that game's closing result comes in -- check the Results tab for your
       running record.
     </div>
+    ${noMarketCount>0 ? `<div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">${noMarketCount} game(s) this week have no market line yet and aren't shown here -- check back once one's available.</div>` : ''}
     <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
       Splash Sports has no public data feed, so type in the line it locked you into (per game, once you're picking that
       week) and this will track how far the live market has moved since -- classic closing-line-value read: a line that
@@ -2727,14 +2748,21 @@ function renderSurvivor(){
   const rows = [];
   GAMES.forEach(g => {
     const awayFavoredModel = g.model, homeFavoredModel = -g.model;
-    const awayFavoredMarket = g.market, homeFavoredMarket = -g.market;
+    // g.market null -> -g.market is -0, NOT null, which would slip past a `!= null` check
+    // downstream and fabricate a market read. Keep both explicitly null when there's no line.
+    const awayFavoredMarket = g.market == null ? null : g.market;
+    const homeFavoredMarket = g.market == null ? null : -g.market;
     [
       {team:g.away, opp:g.home, atOrVs:'@', modelFav:awayFavoredModel, marketFav:awayFavoredMarket},
       {team:g.home, opp:g.away, atOrVs:'vs', modelFav:homeFavoredModel, marketFav:homeFavoredMarket},
     ].forEach(t => {
       if(used.includes(t.team)) return;
       const ourWP = empiricalWinProb(t.modelFav);
-      const marketWP = empiricalWinProb(t.marketFav);
+      // t.marketFav is null when this game has no market line -- don't feed null into the
+      // lookup (it silently coerces to 0 and fabricates a "market favors nobody" read).
+      // Doesn't block the pick itself: survivor only needs a real winner, not a spread, and
+      // leverage below is computed from ourWP + pool/national pick%, not marketWP.
+      const marketWP = t.marketFav != null ? empiricalWinProb(t.marketFav) : null;
       const p = pickPct[t.team];
       const pool = poolStats[t.team]; // real read from your own pool's pasted picks, if any this week
       // Prefer your actual pool's number over the generic national one when you have it --
@@ -2769,7 +2797,7 @@ function renderSurvivor(){
           <td>${logoImg(r.team,20)}${r.team}</td>
           <td style="color:var(--sage);">${r.atOrVs} ${r.opp}</td>
           <td>${(r.ourWP*100).toFixed(0)}%</td>
-          <td style="color:var(--sage);">${(r.marketWP*100).toFixed(0)}%</td>
+          <td style="color:var(--sage);">${r.marketWP!=null ? (r.marketWP*100).toFixed(0)+'%' : '&mdash;'}</td>
           <td>${r.pool ? `<b>${r.pool.count}</b> <span style="color:var(--sage);">(${r.pool.pct.toFixed(0)}%)</span>` : '<span style="color:var(--sage);">no data</span>'}</td>
           <td><input type="number" min="0" max="100" step="1" value="${r.p!=null?r.p:''}" placeholder="--" style="width:60px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--chalk);padding:4px 6px;" onchange="setSurvivorPickPct('${r.team}', this.value)"></td>
           <td>${r.leverage!=null ? `<b style="color:${r.leverage>=0?'var(--good)':'var(--alert)'};">${r.leverage>=0?'+':''}${(r.leverage*100).toFixed(0)}</b> <span style="color:var(--sage);font-size:10.5px;">(${r.leverageSource==='pool'?'your pool':'national'})</span>` : '&mdash;'}</td>
@@ -2984,6 +3012,7 @@ function renderSplashMovement(){
   const rows = GAMES.map(g => {
     const splashVal = splashLines[g.id];
     if(splashVal === undefined || isNaN(splashVal)) return null;
+    if(g.market == null) return null; // no current market line -- nothing real to compare against
     const homeFavoredNow = -g.market, homeFavoredAtLock = -splashVal;
     const moveTowardHome = homeFavoredNow - homeFavoredAtLock; // positive = moved toward home
     if(Math.abs(moveTowardHome) < 0.05) return null; // no real movement to show
