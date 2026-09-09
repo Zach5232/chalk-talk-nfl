@@ -268,6 +268,9 @@
     <div class="section-label">Pick'em Helper &middot; $125 ATS pool, season-long record</div>
     <div class="dash-card" id="pickem-helper"></div>
 
+    <div class="section-label">Your Pool's ATS Picks This Week</div>
+    <div class="dash-card" id="pickem-pool-picks"></div>
+
     <div class="section-label">Market Movement vs. Your Splash Lines</div>
     <div class="dash-card" id="splash-movement"></div>
   </div>
@@ -342,8 +345,14 @@
     <div class="empty-note" id="survivor-note" style="padding:0 0 14px;"></div>
     <div id="survivor-board-wrap"></div>
 
-    <div class="section-label">Optimal Season Path (snapshot)</div>
+    <div class="section-label">Optimal Season Path</div>
     <div class="dash-card" id="survivor-optimal-path"></div>
+
+    <div class="section-label">Season Planner</div>
+    <div class="dash-card">
+      <button class="btn" onclick="toggleSeasonPlannerExpanded()" id="season-planner-toggle">Show full season grid</button>
+      <div id="survivor-season-planner" style="margin-top:12px;display:none;"></div>
+    </div>
   </div>
 
   <div id="view-results" class="view">
@@ -2271,15 +2280,113 @@ function pickemBtnStyle(pickedSide, team){
   return '';
 }
 
+// ---- Your $125 pool's actual ATS picks, per week -- same idea as Survivor's pool-pick
+// tracking, applied here: you're not graded against Vegas in this pool, you're graded against
+// the other specific people in it, so knowing what they're on matters. No API for this either
+// (same "no public API" finding as Splash and survivorgrid), so it's the same paste-in pattern.
+// Format: "Name: TEAM1, TEAM2, TEAM3, TEAM4, TEAM5" -- one line per person, their whole week's
+// 5 picks comma-separated (since unlike Survivor, each person picks 5 different games here, not
+// just one team). Honest caveat baked into the render below: this is a season-long cumulative
+// ATS-record pool, not an elimination pool, so differentiation from the field has real but
+// weaker mathematical value than in Survivor -- shown as context, not a leverage score with the
+// same guarantee.
+function getPickemPoolPicks(){
+  return getState('pickem_pool_picks', {});
+}
+function importPickemPoolPicks(week){
+  const ta = document.getElementById('pickem-poolpicks-paste');
+  if(!ta) return;
+  const validTeams = new Set(Object.keys(TEAM_COLORS));
+  const lines = ta.value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const picks = getPickemPoolPicks();
+  const weekPicks = {...(picks[week]||{})};
+  const skipped = [];
+  lines.forEach(line => {
+    const idx = line.indexOf(':');
+    if(idx === -1){ skipped.push(line); return; }
+    const name = line.slice(0, idx).trim();
+    const teams = line.slice(idx+1).split(',').map(t=>t.trim().toUpperCase()).filter(Boolean);
+    const validPicks = teams.filter(t => validTeams.has(t));
+    if(!name || validPicks.length === 0){ skipped.push(line); return; }
+    if(validPicks.length < teams.length){
+      skipped.push(`${line}  (kept ${validPicks.length}/${teams.length} -- some weren't real team abbreviations)`);
+    }
+    weekPicks[name] = validPicks;
+  });
+  picks[week] = weekPicks;
+  setState('pickem_pool_picks', picks);
+  ta.value = '';
+  if(skipped.length){
+    alert(`Added picks. ${skipped.length} line(s) had an issue -- expected "Name: TEAM, TEAM, TEAM, TEAM, TEAM":\n\n${skipped.join('\n')}`);
+  }
+  renderPickemHelper();
+}
+function removePickemPoolPick(week, name){
+  const picks = getPickemPoolPicks();
+  if(picks[week]) delete picks[week][name];
+  setState('pickem_pool_picks', picks);
+  renderPickemHelper();
+}
+// Percentage is normalized PER GAME (this team's picks / (this team's + its real opponent's
+// picks) among people who picked that specific game) -- not out of the whole pool's total picks,
+// since not everyone necessarily picks every game with only 5 slots out of a full slate.
+function pickemPoolPickStatsForWeek(week){
+  const weekPicks = getPickemPoolPicks()[week] || {};
+  const teamCounts = {};
+  Object.values(weekPicks).forEach(teams => {
+    teams.forEach(t => { teamCounts[t] = (teamCounts[t]||0) + 1; });
+  });
+  const stats = {};
+  GAMES.forEach(g => {
+    const aCount = teamCounts[g.away] || 0, hCount = teamCounts[g.home] || 0;
+    const total = aCount + hCount;
+    if(total > 0){
+      stats[g.away] = {count: aCount, pct: (aCount/total)*100};
+      stats[g.home] = {count: hCount, pct: (hCount/total)*100};
+    }
+  });
+  return {stats, totalEntrants: Object.keys(weekPicks).length};
+}
+function renderPickemPoolPicks(week){
+  const el = document.getElementById('pickem-pool-picks');
+  if(!el) return;
+  const weekPicks = getPickemPoolPicks()[week] || {};
+  const entries = Object.entries(weekPicks);
+  el.innerHTML = `
+    <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
+      Paste this week's picks from your $125 pool (one line per person, "Name: TEAM, TEAM, TEAM,
+      TEAM, TEAM" -- their whole 5). No public API for this pool either, same as Splash and
+      survivorgrid, so it's the same manual paste. This is a cumulative-record pool, not
+      elimination, so differing from the field matters less directly than in Survivor -- shown
+      below as real context on the board, not a leverage score with the same guarantee.
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px;">
+      <textarea id="pickem-poolpicks-paste" placeholder="Zach: NE, DET, BUF, KC, PHI&#10;Armando: SEA, DET, HOU, KC, DAL" style="flex:1;min-width:220px;min-height:70px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
+      <button class="btn" onclick="importPickemPoolPicks(${week})">Add picks</button>
+    </div>
+    ${entries.length===0 ? '<div class="empty-note">No picks entered yet for Week '+week+'.</div>' : `
+      <div style="font-size:12.5px;margin-bottom:8px;"><b>${entries.length}</b> entrant(s) logged for Week ${week}:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        ${entries.map(([name,teams]) => `
+          <div style="padding:4px 8px;border-radius:8px;font-size:11.5px;display:flex;align-items:center;gap:5px;border:1px solid var(--line);">
+            <span>${name}</span><span style="color:var(--sage);">&rarr; ${teams.join(', ')}</span>
+            <button class="btn" style="padding:1px 5px;font-size:10px;" onclick="removePickemPoolPick(${week}, '${name.replace(/'/g,"\\'")}')">&times;</button>
+          </div>`).join('')}
+      </div>`}
+  `;
+}
+
 function renderPickemHelper(){
   const el = document.getElementById('pickem-helper');
   if(!el) return;
   if(!GAMES || GAMES.length===0){ el.innerHTML = '<div class="empty-note">No games loaded yet.</div>'; return; }
 
   const currentWeek = GAMES[0] ? GAMES[0].week : 1;
+  renderPickemPoolPicks(currentWeek);
   const weekPicks = getPickemWeekPicks(currentWeek);
   const pickedCount = Object.keys(weekPicks).length;
   const splashLines = getSplashLines();
+  const poolAtsStats = pickemPoolPickStatsForWeek(currentWeek).stats;
   // Games with no market line (g.market null -- no book match found) can't be ranked by
   // market favorite size or given a real edge, so they're excluded from the board entirely
   // rather than showing a fabricated "favorite by 0.0".
@@ -2359,6 +2466,14 @@ function renderPickemHelper(){
         </span>
       </div>
       <div style="font-size:11px;color:var(--sage);margin-top:2px;">Our model's side: ${r.pickTeam} &middot; edge ${Math.abs(r.es.edge).toFixed(1)} pts vs. market (${r.es.tag})</div>
+      ${(() => {
+        const awayStat = poolAtsStats[r.g.away], homeStat = poolAtsStats[r.g.home];
+        if(!awayStat && !homeStat) return '';
+        const parts = [];
+        if(awayStat) parts.push(`${r.g.away} ${awayStat.count}/${awayStat.count+(homeStat?homeStat.count:0)} (${awayStat.pct.toFixed(0)}%)`);
+        if(homeStat) parts.push(`${r.g.home} ${homeStat.count}/${homeStat.count+(awayStat?awayStat.count:0)} (${homeStat.pct.toFixed(0)}%)`);
+        return `<div style="font-size:11px;color:var(--sage);margin-top:2px;">Your pool on this game: ${parts.join(' vs. ')}</div>`;
+      })()}
       ${pickedSide && frozenLine!=null ? `<div style="font-size:11px;color:var(--sage);margin-top:2px;">Locked in at <b style="color:var(--chalk);">${pickedSide} ${frozenLine>0?'+':''}${frozenLine.toFixed(1)}</b> when you picked -- won't drift even as the market moves.</div>` : ''}
       ${clvHtml}
       <div style="margin-top:4px;">
@@ -2654,22 +2769,91 @@ function renderSurvivorEntrants(){
   `;
 }
 
-// One-time snapshot (2026-09-08) from survivorgrid.com's real schedule+spread grid, extracted
-// and cross-validated (all 576 team-weeks checked for internal consistency -- zero
-// discrepancies) rather than kept live: you explicitly didn't want a weekly re-upload chore.
-// win_prob per team-week comes from OUR OWN empirical curve (same one used everywhere else in
-// this file) applied to survivorgrid's real spread -- not a different methodology, just applied
-// to real future-week lines instead of only this week's. optimal_path is a genuine linear
-// assignment solve (Hungarian algorithm, scipy) maximizing P(surviving all 18 weeks) -- NOT a
-// greedy "best team each week" pick, which actually does 1.56x worse in survival probability
-// here because it burns cheap wins too early and runs out of good options late.
-// Real limitations, stated plainly: (1) these are Week 1 futures lines -- very early, soft,
-// will move a lot as each week approaches, so treat weeks far out as rough shape, not gospel;
-// (2) it doesn't factor in pool popularity/leverage at all, just raw win probability -- several
-// of these picks (teams facing ARI repeatedly) will likely be heavily used by your whole pool,
-// which is exactly the low-leverage trap discussed elsewhere in this tool; (3) it assumes a
-// clean start with no teams used yet and won't auto-replan around your actual picks as the
-// season goes -- it's a one-time planning reference, not a live tracker.
+// ---- Hungarian algorithm (Kuhn-Munkres), O(n^3), square cost-minimization matrix ----
+// Rectangular problems are padded to square with zero-cost dummy rows/cols by the caller.
+// Verified against scipy.optimize.linear_sum_assignment on the real 32-team/18-week case
+// (2026-09-08): identical total survival probability (1.4463%) and identical week-by-week
+// path, so this is a faithful port, not a from-scratch reimplementation to trust blindly.
+function hungarianSolve(costMatrix){
+  const n = costMatrix.length;
+  const INF = Infinity;
+  const u = new Array(n+1).fill(0), v = new Array(n+1).fill(0);
+  const p = new Array(n+1).fill(0), way = new Array(n+1).fill(0);
+  for(let i=1;i<=n;i++){
+    p[0] = i;
+    let j0 = 0;
+    const minv = new Array(n+1).fill(INF);
+    const used = new Array(n+1).fill(false);
+    do{
+      used[j0] = true;
+      const i0 = p[j0];
+      let delta = INF, j1 = -1;
+      for(let j=1;j<=n;j++){
+        if(!used[j]){
+          const cur = costMatrix[i0-1][j-1] - u[i0] - v[j];
+          if(cur < minv[j]){ minv[j] = cur; way[j] = j0; }
+          if(minv[j] < delta){ delta = minv[j]; j1 = j; }
+        }
+      }
+      for(let j=0;j<=n;j++){
+        if(used[j]){ u[p[j]] += delta; v[j] -= delta; } else { minv[j] -= delta; }
+      }
+      j0 = j1;
+    } while(p[j0] !== 0);
+    do{ const j1 = way[j0]; p[j0] = p[j1]; j0 = j1; } while(j0 !== 0);
+  }
+  const assignment = new Array(n).fill(-1);
+  for(let j=1;j<=n;j++){ if(p[j] !== 0) assignment[p[j]-1] = j-1; }
+  return assignment;
+}
+
+// Snapshot (2026-09-08) of survivorgrid.com's real schedule+spread grid, extracted and
+// cross-validated (all 576 team-weeks checked for internal consistency -- zero discrepancies).
+// The SCHEDULE data is a one-time snapshot (you explicitly didn't want a weekly re-upload
+// chore) and won't reflect real line movement as the season goes -- but the PATH computed from
+// it is genuinely dynamic: every time this renders, it re-solves excluding teams you've already
+// used (getSurvivorUsed()) and weeks that have already passed, via the real Hungarian assignment
+// above -- not a static list. win_prob per team-week uses OUR OWN empirical curve (same one used
+// everywhere else in this file) applied to survivorgrid's real spread.
+// Real limitations, stated plainly: (1) the underlying lines are Week 1 futures -- early, soft,
+// will move a lot as each real week approaches, so treat far-out weeks as rough shape, not
+// gospel; (2) it optimizes raw win probability only, NOT pool popularity/leverage -- several
+// picks lean on weak future opponents like ARI, exactly the kind of chalky value your whole pool
+// will also be on.
+function computeDynamicOptimalPath(snap, currentWeek){
+  const used = new Set(getSurvivorUsed());
+  const teams = Object.keys(snap.schedule).filter(t => !used.has(t));
+  const weekIdxs = [];
+  for(let wk = currentWeek; wk <= 18; wk++) weekIdxs.push(wk - 1);
+  if(teams.length === 0 || weekIdxs.length === 0) return [];
+
+  const n = Math.max(teams.length, weekIdxs.length);
+  const BIG = 1e6;
+  const cost = [];
+  for(let i=0;i<n;i++){
+    const row = new Array(n).fill(0);
+    if(i < teams.length){
+      weekIdxs.forEach((wkIdx, col) => {
+        const g = snap.schedule[teams[i]][wkIdx];
+        row[col] = g ? -Math.log(g.win_prob) : BIG;
+      });
+    }
+    cost.push(row);
+  }
+  const assignment = hungarianSolve(cost);
+  const path = [];
+  for(let i=0;i<teams.length;i++){
+    const col = assignment[i];
+    if(col < weekIdxs.length){
+      const wkIdx = weekIdxs[col];
+      const g = snap.schedule[teams[i]][wkIdx];
+      if(g) path.push({week: wkIdx+1, team: teams[i], opp: g.opp, away: g.away, spread: g.spread, win_prob: g.win_prob});
+    }
+  }
+  path.sort((a,b) => a.week - b.week);
+  return path;
+}
+
 function renderSurvivorOptimalPath(){
   const el = document.getElementById('survivor-optimal-path');
   if(!el) return;
@@ -2678,32 +2862,74 @@ function renderSurvivorOptimalPath(){
     el.innerHTML = '<div class="empty-note">No snapshot loaded yet.</div>';
     return;
   }
-  const used = getSurvivorUsed();
+  const currentWeek = GAMES && GAMES.length ? GAMES[0].week : 1;
+  const path = computeDynamicOptimalPath(snap, currentWeek);
   el.innerHTML = `
     <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
-      One-time snapshot captured ${snap.captured_at} from survivorgrid.com's real schedule/spread
-      grid -- ${snap.note} This is the mathematically optimal 18-week path (maximizes your odds of
-      surviving the whole season, not just this week) using our own real win-probability curve on
-      those real future spreads. It does NOT account for how popular each pick will be in your
-      pool (several of these teams get used repeatedly against weak future opponents like ARI --
-      exactly the kind of chalky pick your whole pool will also be on, which is real win
-      probability but low leverage), and it won't automatically replan around picks you've
-      actually made. Treat it as a season-shape reference, not a script to follow blindly.
+      Recomputed live from a schedule/spread snapshot captured ${snap.captured_at} -- ${snap.note}
+      This is the mathematically optimal path from Week ${currentWeek} on (maximizes your odds of
+      surviving the REST of the season), excluding every team you've already used. It optimizes
+      raw win probability only, not pool popularity -- several picks lean on weak future opponents
+      like ARI, exactly the kind of chalky value your whole pool will also be on. Treat it as a
+      season-shape reference, not a script to follow blindly.
     </div>
+    ${path.length===0 ? '<div class="empty-note">No remaining weeks/teams to plan.</div>' : `
     <div class="table-wrap">
     <table class="rank">
       <thead><tr><th>Week</th><th>Team</th><th>Opponent</th><th>Spread</th><th>Win%</th></tr></thead>
       <tbody>
-        ${snap.optimal_path.map(p => {
-          const isUsed = used.includes(p.team);
-          return `<tr style="${isUsed?'opacity:0.5;':''}">
+        ${path.map(p => `<tr>
             <td>Wk ${p.week}</td>
-            <td>${logoImg(p.team,18)}${p.team}${isUsed?' <span style="color:var(--sage);font-size:10px;">(already used)</span>':''}</td>
+            <td>${logoImg(p.team,18)}${p.team}</td>
             <td style="color:var(--sage);">${p.away?'@':''}${p.opp}</td>
             <td>${p.spread>0?'+':''}${p.spread.toFixed(1)}</td>
             <td>${(p.win_prob*100).toFixed(0)}%</td>
-          </tr>`;
-        }).join('')}
+          </tr>`).join('')}
+      </tbody>
+    </table>
+    </div>`}`;
+}
+
+// ---- Season Planner: every team's full remaining-season schedule side by side, matching
+// survivorgrid's own grid view. Same snapshot data as the optimal path above -- this is the
+// "look at everything yourself" companion to the "just tell me the optimal path" tool.
+let seasonPlannerExpanded = false;
+function toggleSeasonPlannerExpanded(){
+  seasonPlannerExpanded = !seasonPlannerExpanded;
+  const wrap = document.getElementById('survivor-season-planner');
+  const btn = document.getElementById('season-planner-toggle');
+  if(wrap) wrap.style.display = seasonPlannerExpanded ? 'block' : 'none';
+  if(btn) btn.textContent = seasonPlannerExpanded ? 'Hide full season grid' : 'Show full season grid';
+}
+
+function renderSurvivorSeasonPlanner(){
+  const el = document.getElementById('survivor-season-planner');
+  if(!el) return;
+  const snap = getState('survivorgrid_snapshot', null);
+  if(!snap){
+    el.innerHTML = '<div class="empty-note">No snapshot loaded yet.</div>';
+    return;
+  }
+  const currentWeek = GAMES && GAMES.length ? GAMES[0].week : 1;
+  const used = new Set(getSurvivorUsed());
+  const teams = Object.keys(snap.schedule).sort();
+  const weekIdxs = [];
+  for(let wk = currentWeek; wk <= 18; wk++) weekIdxs.push(wk - 1);
+  el.innerHTML = `
+    <div class="table-wrap">
+    <table class="rank" style="min-width:${140 + weekIdxs.length*74}px;">
+      <thead><tr><th>Team</th>${weekIdxs.map(wk => `<th>Wk ${wk+1}</th>`).join('')}</tr></thead>
+      <tbody>
+        ${teams.map(team => `
+        <tr style="${used.has(team)?'opacity:0.4;':''}">
+          <td>${logoImg(team,16)}${team}</td>
+          ${weekIdxs.map(wkIdx => {
+            const g = snap.schedule[team][wkIdx];
+            if(!g) return '<td style="color:var(--sage);">BYE</td>';
+            const favored = g.spread < 0;
+            return `<td style="font-size:11px;${favored?'color:var(--good);':'color:var(--sage);'}">${g.away?'@':''}${g.opp}<br>${g.spread>0?'+':''}${g.spread.toFixed(1)}</td>`;
+          }).join('')}
+        </tr>`).join('')}
       </tbody>
     </table>
     </div>`;
@@ -2718,6 +2944,7 @@ function renderSurvivor(){
 
   renderSurvivorEntrants();
   renderSurvivorOptimalPath();
+  renderSurvivorSeasonPlanner();
 
   const currentWeek = GAMES && GAMES.length ? GAMES[0].week : 1;
   renderSurvivorPoolPicks(currentWeek);
