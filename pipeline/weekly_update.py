@@ -826,6 +826,10 @@ if __name__ == "__main__":
         market_home_favored = -float(book_entry["books"][0]["home_pt"]) if book_entry else None
         games_out.append({
             "id": gid, "away": a, "home": h, "week": week, "season": season,
+            # gameday/gametime come straight from the real nflverse schedule (games.csv) --
+            # gametime is already ET, same as every other time shown in this dashboard.
+            "gameday": str(r.gameday) if pd.notna(r.gameday) else None,
+            "gametime": str(r.gametime) if pd.notna(r.gametime) else None,
             "model": round(-model_home_favored, 2),
             "market": round(-market_home_favored, 2) if market_home_favored is not None else None,
             "ah": None, "aa": None,

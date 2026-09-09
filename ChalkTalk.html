@@ -1232,17 +1232,34 @@ let WEATHER = {};
 // This fills in for real after weekly_update.py's next run, once Week 1 is actually final.
 let CLOSING_RESULTS = {};
 
+// gameday is "YYYY-MM-DD", gametime is 24h "HH:MM" -- both straight from the real nflverse
+// schedule, gametime already in ET (same as every other time in this dashboard). Formats as
+// e.g. "Wed, Sep 9 · 8:20 PM ET"; falls back gracefully if either field is missing (older
+// cached data, bye weeks, etc.) instead of printing "undefined".
+function formatGameDateTime(g){
+  if(!g.gameday) return '';
+  const d = new Date(g.gameday + 'T00:00:00');
+  const dateStr = isNaN(d) ? g.gameday : d.toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'});
+  if(!g.gametime) return dateStr;
+  const [hh, mm] = g.gametime.split(':').map(Number);
+  const ampm = hh >= 12 ? 'PM' : 'AM';
+  const hh12 = ((hh + 11) % 12) + 1;
+  return `${dateStr} &middot; ${hh12}:${String(mm).padStart(2,'0')} ${ampm} ET`;
+}
+
 function renderGamesList(){
   const el = document.getElementById('games-list');
   el.innerHTML = GAMES.map(g=>{
+    const isFinal = g.ah != null && g.aa != null;
     return `
     <div class="game-card" onclick="openGame('${g.id}')">
       <div class="game-card-top">
         <div class="gc-teams">${logoImg(g.away,22)}${g.away}<span class="at">at</span>${logoImg(g.home,22)}${g.home}</div>
         <div class="gc-lines">MARKET ${g.home} ${(g.market>0?'+':'')}${(g.market).toFixed(1)}<br><span class="model">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</span></div>
       </div>
+      ${formatGameDateTime(g) ? `<div class="gc-final" style="margin-top:0;">${formatGameDateTime(g)}</div>` : ''}
       <div class="gc-blurb">${g.blurb}</div>
-      <div class="gc-final">Final: ${g.away} ${g.aa} – ${g.home} ${g.ah}${g.hasDetail?'  <span class="chevron">&middot; full breakdown &rarr;</span>':''}</div>
+      <div class="gc-final">${isFinal ? `Final: ${g.away} ${g.aa} – ${g.home} ${g.ah}` : 'Upcoming'}${g.hasDetail?'  <span class="chevron">&middot; full breakdown &rarr;</span>':''}</div>
     </div>`;
   }).join('');
 }
@@ -1371,10 +1388,16 @@ function openGame(id){
   const marketHomeFavored = -g.market;
   const sig = edgeSignal(modelHomeFavored, marketHomeFavored);
   const sigTeam = sig.side === 'home' ? g.home : g.away;
+  // The actual bettable price for the side we like, in ITS OWN name -- market/model are always
+  // stored as the home team's spread quote (see the comment above), so the away team's price is
+  // just the negation. This is the number you'd actually put in a sportsbook, not a mental-math
+  // exercise starting from the home team's line every time.
+  const sigTeamMarketSpread = sig.side === 'home' ? g.market : -g.market;
 
   const signalHtml = `
     <div class="signal ${sig.cls}">
       <div><span class="tag">${sig.tag}</span> &middot; model favors ${sigTeam} by ${Math.abs(sig.edge).toFixed(1)} pts more than the market does</div>
+      ${sig.cls !== 'pass' ? `<div style="margin-top:6px;font-size:14px;"><b>Our bet: ${sigTeam} ${sigTeamMarketSpread>0?'+':''}${sigTeamMarketSpread.toFixed(1)}</b> <span style="font-weight:400;opacity:.85;">-- the real market price for that side, not the home team's number.</span></div>` : ''}
     </div>`;
 
   const wx = WEATHER[id];
@@ -1487,7 +1510,7 @@ function openGame(id){
     }
 
     el.innerHTML = `<div class="detail-teams">${logoImg(g.away,32)}${g.away}<span class="at">at</span>${logoImg(g.home,32)}${g.home}</div>
-      <div class="detail-sub">WEEK ${g.week}, ${g.season} &middot; ${g.ah!=null && g.aa!=null ? `FINAL: ${g.away} ${g.aa} – ${g.home} ${g.ah}` : 'UPCOMING'}</div>
+      <div class="detail-sub">WEEK ${g.week}, ${g.season}${formatGameDateTime(g) ? ' &middot; ' + formatGameDateTime(g) : ''} &middot; ${g.ah!=null && g.aa!=null ? `FINAL: ${g.away} ${g.aa} – ${g.home} ${g.ah}` : 'UPCOMING'}</div>
       ${signalHtml}
 
       <div class="gauge">
@@ -1496,6 +1519,7 @@ function openGame(id){
           <div class="tick model" style="left:${pos(g.model)}%"><div class="pin"></div><div class="lbl">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</div></div>
         </div>
         <div class="gauge-caption"><span>${g.away}</span><span>${g.home}</span></div>
+        <div style="font-size:10.5px;color:var(--sage);margin-top:4px;">Both numbers are quoted as ${g.home}'s spread (standard convention) so they plot on one line -- it's not a signal to bet both sides. See "Our bet" above for the actual side and price.</div>
       </div>
 
       ${ratingsTableHtml}
@@ -1517,6 +1541,7 @@ function openGame(id){
         <div class="tick model" style="left:${pos(g.model)}%"><div class="pin"></div><div class="lbl">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</div></div>
       </div>
       <div class="gauge-caption"><span>${g.away}</span><span>${g.home}</span></div>
+        <div style="font-size:10.5px;color:var(--sage);margin-top:4px;">Both numbers are quoted as ${g.home}'s spread (standard convention) so they plot on one line -- it's not a signal to bet both sides. See "Our bet" above for the actual side and price.</div>
     </div>
 
     <div class="section-label">Team ratings (points scale)</div>
