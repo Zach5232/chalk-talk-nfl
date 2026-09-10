@@ -33,6 +33,10 @@ service cloud.firestore {
       allow read: if true;
       allow write: if false;
     }
+    match /closing_lines/{gameId} {
+      allow read: if true;
+      allow write: if false;
+    }
     match /weather/{gameId} {
       allow read: if true;
       allow write: if false;

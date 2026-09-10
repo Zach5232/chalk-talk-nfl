@@ -1,0 +1,63 @@
+name: Chalk Talk Closing Line Capture
+
+# Real per-book near-kickoff closing lines for personal-bet CLV tracking (see
+# pipeline/capture_closing_lines.py's docstring for why this is separate from the weekly
+# pipeline's Model Season Record). Fires every 15 min across broad windows around the usual
+# TNF/Sunday/SNF/MNF kickoff slots -- broad on purpose, since the script's own real-time
+# check (America/New_York, DST-aware) decides whether a game is actually imminent, so this
+# schedule doesn't need to be re-tuned when clocks change in November. Almost every firing
+# exits after one free local check with ZERO Odds API calls; only the few firings where a
+# real game is actually about to kick off spend one API call (see the script for the exact
+# cost accounting). Known gap: intentionally doesn't cover Saturday/holiday slates or
+# international early-window games -- add cron lines for those specific weeks if needed.
+on:
+  schedule:
+    - cron: "*/15 23 * * 4"     # Thu 23:00-23:59 UTC -- TNF pregame
+    - cron: "*/15 0-2 * * 5"    # Fri 00:00-02:59 UTC -- TNF kickoff (EDT or EST)
+    - cron: "*/15 16-22 * * 0"  # Sun 16:00-22:59 UTC -- early + late Sunday slate
+    - cron: "*/15 0-2 * * 1"    # Mon 00:00-02:59 UTC -- SNF kickoff
+    - cron: "*/15 23 * * 1"     # Mon 23:00-23:59 UTC -- MNF pregame (incl. early MNF game)
+    - cron: "*/15 0-2 * * 2"    # Tue 00:00-02:59 UTC -- MNF kickoff
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "Season (leave blank to use the file's default)"
+        required: false
+        type: string
+      week:
+        description: "Week (leave blank to use the file's default)"
+        required: false
+        type: string
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r pipeline/requirements.txt
+
+      - name: Write Firebase service account key
+        run: echo "$FIREBASE_SERVICE_ACCOUNT" > /tmp/firebase-key.json
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
+      - name: Capture closing lines (no-op unless a real game is imminent)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          FIREBASE_CREDENTIALS_PATH: /tmp/firebase-key.json
+          CHALKTALK_SEASON: ${{ github.event.inputs.season || '' }}
+          CHALKTALK_WEEK: ${{ github.event.inputs.week || '' }}
+        run: |
+          [ -z "$CHALKTALK_SEASON" ] && unset CHALKTALK_SEASON
+          [ -z "$CHALKTALK_WEEK" ] && unset CHALKTALK_WEEK
+          python pipeline/capture_closing_lines.py
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f /tmp/firebase-key.json

@@ -1,6 +1,10 @@
 [build]
   publish = "."
   command = ""
+  # ChalkTalk.html is the only file actually served -- skip a (credit-costing) deploy
+  # entirely when a push doesn't touch it (e.g. tonight's pipeline-only commits, which
+  # otherwise burned real deploy credits for zero visible change).
+  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- ChalkTalk.html"
 
 [[redirects]]
   from = "/"

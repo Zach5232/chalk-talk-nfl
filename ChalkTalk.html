@@ -1400,6 +1400,12 @@ let WEATHER = {};
 // This fills in for real after weekly_update.py's next run, once Week 1 is actually final.
 let CLOSING_RESULTS = {};
 
+// Real per-book near-kickoff closing lines (best number across every book seen), captured
+// by pipeline/capture_closing_lines.py -- separate from CLOSING_RESULTS' single PFR/nflverse
+// consensus number. Used only for personal-bet CLV (closing-line value): "did I beat the
+// real best-of-market close." Empty until a game's actual capture window has passed.
+let CLOSING_LINES = {};
+
 // gameday is "YYYY-MM-DD", gametime is 24h "HH:MM" -- both straight from the real nflverse
 // schedule, gametime already in ET (same as every other time in this dashboard). Formats as
 // e.g. "Wed, Sep 9 · 8:20 PM ET"; falls back gracefully if either field is missing (older
@@ -3958,6 +3964,32 @@ async function setBetStatus(betId, status){
   renderBets();
 }
 
+function getClosingNumberForSide(gameId, side){
+  // Prefer the real best-of-market number (captured near kickoff); fall back to the
+  // PFR/nflverse consensus close if that capture window was missed for this game.
+  const cl = CLOSING_LINES[gameId];
+  if(cl){
+    const val = side==='home' ? cl.best_home_pt : cl.best_away_pt;
+    if(val!=null && !Object.is(val,-0)) return {value: val, source: 'best of market'};
+  }
+  const cr = CLOSING_RESULTS[gameId];
+  if(cr && cr.close_home!=null){
+    // cr.close_home is nflverse/PFR-style (positive = home favored) -- the OPPOSITE sign
+    // convention from bet.line/best_home_pt (Odds-API style: negative = favored), so this
+    // needs the flip that side==='home' doesn't get anywhere else in this file.
+    return {value: side==='home' ? -cr.close_home : cr.close_home, source: 'consensus'};
+  }
+  return null;
+}
+
+function getClv(bet){
+  // CLV (closing-line value): positive = you got a better number than the real close,
+  // negative = the market moved against you before it closed. Independent of win/loss.
+  const closing = getClosingNumberForSide(bet.gameId, bet.side);
+  if(!closing) return null;
+  return {clv: Math.round((bet.line - closing.value) * 100) / 100, source: closing.source};
+}
+
 function autoSettle(bet, g){
   // check CLOSING_RESULTS for this game; if present, auto-determine win/loss/push
   const cr = CLOSING_RESULTS[bet.gameId];
@@ -3987,6 +4019,7 @@ async function renderBets(){
   }
 
   let wins=0, losses=0, pushes=0, pending=0, staked=0, netUnits=0;
+  let clvSum=0, clvCount=0;
   const statsRows = [];
   const rows = bets.map(bet=>{
     const g = GAMES.find(x=>x.id===bet.gameId) || {away:'?',home:'?'};
@@ -4015,6 +4048,12 @@ async function renderBets(){
     const teamName = bet.team ?? (bet.side==='home' ? homeTeam : awayTeam);
     const closeStr = cr ? `close: ${cr.close_home>0?'+':''}${cr.close_home}` : 'close: pending';
     const resultStr = cr ? `final: ${awayTeam} ${cr.away_score} – ${homeTeam} ${cr.home_score}` : 'result: pending';
+    const clvInfo = getClv(bet);
+    if(clvInfo){ clvSum += clvInfo.clv; clvCount++; }
+    const clvStr = clvInfo
+      ? `CLV: ${clvInfo.clv>0?'+':''}${clvInfo.clv} (${clvInfo.source})`
+      : 'CLV: pending';
+    const clvColor = clvInfo ? (clvInfo.clv>=0 ? 'var(--good)' : 'var(--alert)') : 'inherit';
 
     return `
     <div class="bet-row">
@@ -4028,6 +4067,7 @@ async function renderBets(){
         <span>$${bet.amount}</span>
         <span>${closeStr}</span>
         <span>${resultStr}</span>
+        <span style="color:${clvColor}">${clvStr}</span>
       </div>
       <div class="bet-actions">
         <button onclick="setBetStatus('${bet.id}','win')">Mark Win</button>
@@ -4038,12 +4078,14 @@ async function renderBets(){
     </div>`;
   }).join('');
 
+  const avgClv = clvCount>0 ? Math.round((clvSum/clvCount)*100)/100 : null;
   listEl.innerHTML = rows;
   summaryEl.innerHTML = `
     <span><b>${bets.length}</b> tracked</span>
     <span><b>${wins}-${losses}-${pushes}</b> (${pending} pending)</span>
     <span>Staked: <b>$${staked.toFixed(0)}</b></span>
     <span>Net: <b style="color:${netUnits>=0?'var(--good)':'var(--alert)'}">${netUnits>=0?'+':''}$${netUnits.toFixed(2)}</b></span>
+    <span>Avg CLV: <b style="color:${avgClv==null?'inherit':(avgClv>=0?'var(--good)':'var(--alert)')}">${avgClv==null?'n/a':(avgClv>0?'+':'')+avgClv}</b>${clvCount>0?` (${clvCount}/${bets.length})`:''}</span>
   `;
   document.getElementById('tracker-stats').innerHTML = renderTrackerStats(statsRows);
 }
@@ -4131,7 +4173,7 @@ async function boot(){
 
     const [ratingsSnap, historySnap, gamesSnap, booksSnap, weatherSnap, closingSnap,
            leaderboardsSnap, projSnap, rostersSnap, overridesSnap, stateSnap, underperfSnap,
-           modelRecordSnap] = await Promise.all([
+           modelRecordSnap, closingLinesSnap] = await Promise.all([
       db.collection('ratings').get(),
       db.collection('ratings_history').get(),
       db.collection('games').doc(weekId).get(),
@@ -4145,6 +4187,7 @@ async function boot(){
       db.collection('dashboard_state').get(),
       db.collection('fantasy_underperformance').doc('current').get(),
       db.collection('model_season_record').doc('current').get(),
+      db.collection('closing_lines').get(),
     ]);
 
     RATINGS.push(...ratingsSnap.docs.map(d => d.data()));
@@ -4167,6 +4210,7 @@ async function boot(){
     booksSnap.docs.forEach(d => { BOOKS[d.id] = d.data(); });
     weatherSnap.docs.forEach(d => { WEATHER[d.id] = d.data(); });
     closingSnap.docs.forEach(d => { CLOSING_RESULTS[d.id] = d.data(); });
+    closingLinesSnap.docs.forEach(d => { CLOSING_LINES[d.id] = d.data(); });
 
     if(leaderboardsSnap.exists){
       const lb = leaderboardsSnap.data();
