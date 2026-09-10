@@ -593,6 +593,65 @@ def write_firestore(db, *, season, week, ratings_rows, games, books, closing, we
         print(f"  wrote {w}")
 
 
+def build_model_season_record(db, season):
+    """The model's real ATS record against every real closing line, for every game this
+    season -- not scoped to what you personally picked or bet (that's Pick'em/Survivor/Bets,
+    already tracked separately). Reads back every games/{season}-wk* doc plus every real
+    closing_results entry that already accumulates automatically every week (never
+    overwritten), so this is a real, growing season-long scoreboard with no new data
+    collection needed -- just tying together two things that were already being saved.
+
+    Grading uses the EXACT same convention as gradeATSPick() in ChalkTalk.html (margin =
+    home_score - away_score; diff = margin - close_home; push if diff==0; home covers if
+    diff>0) so this can never silently disagree with what the dashboard shows for an
+    individual pick -- same math, just applied to every game instead of only picked ones.
+    Games with no real market line that week (g['market'] is None) are skipped, not graded
+    with a fabricated side.
+    """
+    games_docs = db.collection("games").stream()
+    closing_docs = {d.id: d.to_dict() for d in db.collection("closing_results").stream()}
+
+    graded, by_week = [], {}
+    for doc in games_docs:
+        gdoc = doc.to_dict() or {}
+        if gdoc.get("season") != season:
+            continue
+        wk = gdoc.get("week")
+        for g in gdoc.get("games", []):
+            cr = closing_docs.get(g.get("id"))
+            if not cr or g.get("market") is None:
+                continue
+            model_home_favored = -g["model"]
+            market_home_favored = -g["market"]
+            edge = model_home_favored - market_home_favored
+            model_side = "home" if edge > 0 else "away"
+            picked_team = g["home"] if model_side == "home" else g["away"]
+
+            margin = cr["home_score"] - cr["away_score"]
+            diff = margin - cr["close_home"]
+            if abs(diff) < 1e-9:
+                grade = "push"
+            else:
+                home_covered = diff > 0
+                grade = "win" if home_covered == (model_side == "home") else "loss"
+
+            row = {"week": wk, "game_id": g["id"], "away": g["away"], "home": g["home"],
+                   "model_side": picked_team, "edge": round(abs(edge), 2), "grade": grade}
+            graded.append(row)
+            by_week.setdefault(wk, {"wins": 0, "losses": 0, "pushes": 0})
+            by_week[wk][{"win": "wins", "loss": "losses", "push": "pushes"}[grade]] += 1
+
+    wins = sum(1 for r in graded if r["grade"] == "win")
+    losses = sum(1 for r in graded if r["grade"] == "loss")
+    pushes = sum(1 for r in graded if r["grade"] == "push")
+    win_pct = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else None
+
+    return {
+        "season": season, "wins": wins, "losses": losses, "pushes": pushes, "win_pct": win_pct,
+        "total_graded": len(graded), "by_week": by_week, "games": graded,
+    }
+
+
 # ---------- Player-level metrics: QB CPOE trend, WR/TE YAC-over-expected, RB rushing EPA ----------
 def build_qb_weekly_history(pbp_paths_and_seasons):
     """Per-passer, per-week CPOE and EPA/dropback -- powers the QB trend chart."""
@@ -1014,6 +1073,18 @@ if __name__ == "__main__":
             qb_history=qb_history_out, team_players=team_players_out,
             fantasy_projections=proj, underperformance_report=underperf,
         )
+
+        # Real season-long model-vs-market record, every game, regardless of what was
+        # actually bet/picked -- reads back what was just written above plus every prior
+        # week's games/closing_results (both already accumulate automatically), so this
+        # naturally grows correctly with zero extra data collection.
+        record = build_model_season_record(fdb, SEASON)
+        fdb.collection("model_season_record").document("current").set({
+            **record, "updated_at": firestore.SERVER_TIMESTAMP,
+        })
+        print(f"\n--- MODEL SEASON RECORD: {record['wins']}-{record['losses']}"
+              f"{'-'+str(record['pushes']) if record['pushes'] else ''} ATS"
+              f" ({record['win_pct']}%) across {record['total_graded']} graded games ---")
     else:
         reason = "firebase-admin not installed" if not _FIREBASE_AVAILABLE else "no credentials configured (FIREBASE_CREDENTIALS_PATH / GOOGLE_APPLICATION_CREDENTIALS)"
         print(f"\n(Skipped Firestore write -- {reason}. Numbers above are still real, just not persisted this run.)")

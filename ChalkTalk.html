@@ -362,6 +362,9 @@
   </div>
 
   <div id="view-results" class="view">
+    <div class="section-label">Model Record &middot; every game, not just your picks</div>
+    <div class="dash-card" id="results-model-record"></div>
+
     <div class="section-label">Pick'em Record</div>
     <div class="dash-card" id="results-pickem"></div>
 
@@ -621,6 +624,11 @@ let FANTASY_PROJECTIONS = {};
 // See build_underperformance_report() in weekly_update.py for exactly what this does and
 // doesn't claim.
 let UNDERPERFORMANCE = {players: [], note: null};
+// Real, refreshed every pipeline run -- the model's ATS record against every real closing
+// line, every game, whether you bet/picked it or not. See build_model_season_record() in
+// weekly_update.py: grades with the exact same convention as gradeATSPick() below, so this
+// can never silently disagree with what an individual game's grade shows.
+let MODEL_SEASON_RECORD = {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []};
 
 
 
@@ -3281,7 +3289,36 @@ function removeFantasyMatchup(leagueId, week){
   renderResults();
 }
 
+function renderModelSeasonRecord(){
+  const el = document.getElementById('results-model-record');
+  if(!el) return;
+  const r = MODEL_SEASON_RECORD;
+  if(!r.total_graded){
+    el.innerHTML = '<div class="empty-note">No games graded yet this season -- populates automatically once real closing lines and final scores come in for a completed week.</div>';
+    return;
+  }
+  const weekRows = Object.keys(r.by_week||{}).map(Number).sort((a,b)=>b-a);
+  el.innerHTML = `
+    <div style="font-size:13px;margin-bottom:10px;">
+      <b>${r.wins}-${r.losses}${r.pushes?`-${r.pushes}`:''} ATS (${r.win_pct}%)</b> across
+      ${r.total_graded} graded games -- every real game with a market line this season, not
+      just ones you picked or bet. Breakeven at standard -110 odds is 52.38%.
+    </div>
+    <div class="table-wrap">
+      <table class="rank">
+        <thead><tr><th>Week</th><th>Record</th></tr></thead>
+        <tbody>
+          ${weekRows.map(wk => {
+            const w = r.by_week[wk];
+            return `<tr><td>Wk ${wk}</td><td>${w.wins}-${w.losses}${w.pushes?`-${w.pushes}`:''}</td></tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
 function renderResults(){
+  renderModelSeasonRecord();
   const pickemEl = document.getElementById('results-pickem');
   const survivorEl = document.getElementById('results-survivor');
   const fantasyEl = document.getElementById('results-fantasy');
@@ -4093,7 +4130,8 @@ async function boot(){
     const weekId = `${meta.season}-wk${meta.week}`;
 
     const [ratingsSnap, historySnap, gamesSnap, booksSnap, weatherSnap, closingSnap,
-           leaderboardsSnap, projSnap, rostersSnap, overridesSnap, stateSnap, underperfSnap] = await Promise.all([
+           leaderboardsSnap, projSnap, rostersSnap, overridesSnap, stateSnap, underperfSnap,
+           modelRecordSnap] = await Promise.all([
       db.collection('ratings').get(),
       db.collection('ratings_history').get(),
       db.collection('games').doc(weekId).get(),
@@ -4106,6 +4144,7 @@ async function boot(){
       db.collection('fantasy_roster_overrides').get(),
       db.collection('dashboard_state').get(),
       db.collection('fantasy_underperformance').doc('current').get(),
+      db.collection('model_season_record').doc('current').get(),
     ]);
 
     RATINGS.push(...ratingsSnap.docs.map(d => d.data()));
@@ -4144,6 +4183,10 @@ async function boot(){
 
     if(underperfSnap.exists){
       Object.assign(UNDERPERFORMANCE, underperfSnap.data() || {});
+    }
+
+    if(modelRecordSnap.exists){
+      Object.assign(MODEL_SEASON_RECORD, modelRecordSnap.data() || {});
     }
 
     FANTASY_ROSTERS.push(...rostersSnap.docs.map(d => ({id: d.id, ...d.data()})));
