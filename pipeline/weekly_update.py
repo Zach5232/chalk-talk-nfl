@@ -642,8 +642,9 @@ def build_model_season_record(db, season):
             row = {"week": wk, "game_id": g["id"], "away": g["away"], "home": g["home"],
                    "model_side": picked_team, "edge": round(abs(edge), 2), "grade": grade}
             graded.append(row)
-            by_week.setdefault(wk, {"wins": 0, "losses": 0, "pushes": 0})
-            by_week[wk][{"win": "wins", "loss": "losses", "push": "pushes"}[grade]] += 1
+            wk_key = str(wk)  # Firestore map keys must be strings -- "week" stays a real int everywhere else
+            by_week.setdefault(wk_key, {"wins": 0, "losses": 0, "pushes": 0})
+            by_week[wk_key][{"win": "wins", "loss": "losses", "push": "pushes"}[grade]] += 1
 
     wins = sum(1 for r in graded if r["grade"] == "win")
     losses = sum(1 for r in graded if r["grade"] == "loss")
