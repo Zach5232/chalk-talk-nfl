@@ -362,9 +362,6 @@
   </div>
 
   <div id="view-results" class="view">
-    <div class="section-label">Model Record &middot; every game, not just your picks</div>
-    <div class="dash-card" id="results-model-record"></div>
-
     <div class="section-label">Pick'em Record</div>
     <div class="dash-card" id="results-pickem"></div>
 
@@ -373,6 +370,9 @@
 
     <div class="section-label">Fantasy Records</div>
     <div id="results-fantasy"></div>
+
+    <div class="section-label">Model Record &middot; every game, not just your picks (running tally, not something you actively bet)</div>
+    <div class="dash-card" id="results-model-record"></div>
 
     <div class="section-label">Export Your Data</div>
     <div class="dash-card">
@@ -428,7 +428,7 @@
   </div>
 
   <footer id="footer-note">
-    Ratings are opponent-adjusted EPA/play converted to points (&asymp;44 pts/EPA unit), recency-weighted, walk-forward through Week 8. Defense: lower is better. Move = rank change vs. previous week. Click any game for the full breakdown.
+    Ratings are opponent-adjusted EPA/play converted to points (&asymp;44 pts/EPA unit), recency-weighted, walk-forward through <span id="footer-week-note">this week</span>. Defense: lower is better. Move = rank change vs. previous week. Click any game for the full breakdown.
   </footer>
 </div>
 
@@ -1429,10 +1429,27 @@ function edgeValueColor(edge){
   return (edge >= 2 && edge < 5) ? 'var(--good)' : 'var(--sage)';
 }
 
+// g.ah/g.aa are always null -- the pipeline writes them as a permanent placeholder (see
+// weekly_update.py's games_out.append comment) and never fills them in. The REAL final score,
+// once a game's closed, lives in CLOSING_RESULTS (populated as soon as that game grades),
+// which this dashboard already loads -- so that's the real source of truth for "is this over."
+function finalScoreFor(g){
+  const cr = CLOSING_RESULTS[g.id];
+  if(cr && cr.away_score!=null && cr.home_score!=null) return {away: cr.away_score, home: cr.home_score};
+  if(g.ah!=null && g.aa!=null) return {away: g.aa, home: g.ah};
+  return null;
+}
+
 function renderGamesList(){
   const el = document.getElementById('games-list');
-  el.innerHTML = GAMES.map(g=>{
-    const isFinal = g.ah != null && g.aa != null;
+  // Spread Zone is for games still to be decided -- once real, a game moves to Results'
+  // Model Record instead rather than sitting here stuck on a stale "Upcoming"/no-line state.
+  const upcoming = GAMES.filter(g => !finalScoreFor(g));
+  if(GAMES.length && upcoming.length===0){
+    el.innerHTML = '<div class="empty-note">All of this week\'s games are final -- see Results for the graded record.</div>';
+    return;
+  }
+  el.innerHTML = upcoming.map(g=>{
     // g.market is null whenever the odds pull found no book match for this game (rare, but
     // real -- late schedule changes, a book not covering a specific game). Guard it rather
     // than crash the whole list or fabricate a fake edge number against a missing line.
@@ -1449,7 +1466,7 @@ function renderGamesList(){
       </div>
       ${formatGameDateTime(g) ? `<div class="gc-final" style="margin-top:0;">${formatGameDateTime(g)}</div>` : ''}
       <div class="gc-blurb">${g.blurb}</div>
-      <div class="gc-final">${isFinal ? `Final: ${g.away} ${g.aa} – ${g.home} ${g.ah}` : 'Upcoming'}${g.hasDetail?'  <span class="chevron">&middot; full breakdown &rarr;</span>':''}</div>
+      <div class="gc-final">Upcoming${g.hasDetail?'  <span class="chevron">&middot; full breakdown &rarr;</span>':''}</div>
     </div>`;
   }).join('');
 }
@@ -1580,9 +1597,13 @@ function openGame(id){
   // comparison, so there's nothing honest to show without a real market line. One early guard
   // here instead of null-checking every downstream computation separately.
   if(g.market == null){
+    const fs = finalScoreFor(g);
+    const note = fs
+      ? `This game's already final (${g.away} ${fs.away} – ${g.home} ${fs.home}) -- the live odds board stops quoting a game once it's started, so there's no market snapshot left to compare. See Results &middot; Model Record for how the model graded it.`
+      : "No market line found yet for this game -- the odds pull didn't return a book match. Check back once one's available.";
     el.innerHTML = `<div class="detail-teams">${logoImg(g.away,32)}${g.away}<span class="at">at</span>${logoImg(g.home,32)}${g.home}</div>
-      <div class="detail-sub">WEEK ${g.week}, ${g.season}${formatGameDateTime(g) ? ' &middot; ' + formatGameDateTime(g) : ''}</div>
-      <div class="empty-note" style="padding:20px 0;">No market line found yet for this game -- the odds pull didn't return a book match. Check back once one's available.</div>`;
+      <div class="detail-sub">WEEK ${g.week}, ${g.season}${formatGameDateTime(g) ? ' &middot; ' + formatGameDateTime(g) : ''}${fs ? ` &middot; FINAL: ${g.away} ${fs.away} – ${g.home} ${fs.home}` : ''}</div>
+      <div class="empty-note" style="padding:20px 0;">${note}</div>`;
     showView('detail');
     return;
   }
@@ -1717,7 +1738,7 @@ function openGame(id){
     }
 
     el.innerHTML = `<div class="detail-teams">${logoImg(g.away,32)}${g.away}<span class="at">at</span>${logoImg(g.home,32)}${g.home}</div>
-      <div class="detail-sub">WEEK ${g.week}, ${g.season}${formatGameDateTime(g) ? ' &middot; ' + formatGameDateTime(g) : ''} &middot; ${g.ah!=null && g.aa!=null ? `FINAL: ${g.away} ${g.aa} – ${g.home} ${g.ah}` : 'UPCOMING'}</div>
+      <div class="detail-sub">WEEK ${g.week}, ${g.season}${formatGameDateTime(g) ? ' &middot; ' + formatGameDateTime(g) : ''} &middot; ${(() => { const fs = finalScoreFor(g); return fs ? `FINAL: ${g.away} ${fs.away} – ${g.home} ${fs.home}` : 'UPCOMING'; })()}</div>
       ${signalHtml}
 
       <div class="gauge">
@@ -3304,23 +3325,39 @@ function renderModelSeasonRecord(){
     return;
   }
   const weekRows = Object.keys(r.by_week||{}).map(Number).sort((a,b)=>b-a);
+  const gamesByWeek = {};
+  (r.games||[]).forEach(g => { (gamesByWeek[g.week] = gamesByWeek[g.week] || []).push(g); });
   el.innerHTML = `
     <div style="font-size:13px;margin-bottom:10px;">
       <b>${r.wins}-${r.losses}${r.pushes?`-${r.pushes}`:''} ATS (${r.win_pct}%)</b> across
       ${r.total_graded} graded games -- every real game with a market line this season, not
       just ones you picked or bet. Breakeven at standard -110 odds is 52.38%.
     </div>
-    <div class="table-wrap">
-      <table class="rank">
-        <thead><tr><th>Week</th><th>Record</th></tr></thead>
-        <tbody>
-          ${weekRows.map(wk => {
-            const w = r.by_week[wk];
-            return `<tr><td>Wk ${wk}</td><td>${w.wins}-${w.losses}${w.pushes?`-${w.pushes}`:''}</td></tr>`;
+    ${weekRows.map(wk => {
+      const w = r.by_week[wk];
+      const games = (gamesByWeek[wk]||[]).slice().sort((a,b)=>a.game_id.localeCompare(b.game_id));
+      return `
+      <details style="border-top:1px solid var(--line);padding:8px 0;">
+        <summary style="cursor:pointer;display:flex;justify-content:space-between;font-size:13px;list-style:none;">
+          <span>Week ${wk} <span style="color:var(--sage);font-weight:400;">(${games.length} game${games.length===1?'':'s'})</span></span>
+          <b>${w.wins}-${w.losses}${w.pushes?`-${w.pushes}`:''}</b>
+        </summary>
+        <div style="margin-top:8px;">
+          ${games.map(g => {
+            // openGame() only knows about the CURRENT week's GAMES array -- a past week's
+            // game_id isn't in it (and there's no historical detail view yet), so only wire
+            // up the click for a game that's actually still live in GAMES right now.
+            const clickable = GAMES.some(x => x.id === g.game_id);
+            return `
+            <div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid var(--line);font-size:12px;${clickable?'cursor:pointer;':''}" ${clickable?`onclick="openGame('${g.game_id}')"`:''}>
+              <span>${logoImg(g.away,16)}${g.away} at ${logoImg(g.home,16)}${g.home}</span>
+              <span style="color:var(--sage);">Model: <b style="color:var(--text);">${g.model_side}</b> (${g.edge>0?'+':''}${g.edge})</span>
+              <span class="status-pill ${g.grade}">${g.grade}</span>
+            </div>`;
           }).join('')}
-        </tbody>
-      </table>
-    </div>`;
+        </div>
+      </details>`;
+    }).join('')}`;
 }
 
 function renderResults(){
@@ -3629,6 +3666,12 @@ function renderTeamSparkGrid(){
           <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
         </svg>
         <div style="font-size:11px;color:var(--sage);margin-top:2px;">${last>0?'+':''}${last.toFixed(1)} pts</div>`;
+      } else if(hist && hist.length === 1){
+        // Only one week processed so far -- not enough points for a trend line, but there IS
+        // a real current rating, so show that instead of lumping it in with "no data at all."
+        const v = hist[0].overall_pts;
+        inner = `<div style="font-size:15px;font-weight:700;color:${v>0?'var(--good)':'var(--alert)'};margin-top:6px;">${v>0?'+':''}${v.toFixed(1)} pts</div>
+        <div style="font-size:10.5px;color:var(--sage);margin-top:2px;">Week ${hist[0].week} &middot; trend needs another week</div>`;
       } else {
         inner = `<div class="empty-note" style="padding:14px 0;font-size:11px;">No history yet</div>`;
       }
@@ -4170,6 +4213,8 @@ async function boot(){
     const metaSnap = await db.collection('meta').doc('current').get();
     const meta = metaSnap.exists ? metaSnap.data() : {season: 2026, week: 1};
     const weekId = `${meta.season}-wk${meta.week}`;
+    const footerWeekEl = document.getElementById('footer-week-note');
+    if(footerWeekEl) footerWeekEl.textContent = `Week ${meta.week}`;
 
     const [ratingsSnap, historySnap, gamesSnap, booksSnap, weatherSnap, closingSnap,
            leaderboardsSnap, projSnap, rostersSnap, overridesSnap, stateSnap, underperfSnap,
