@@ -45,6 +45,10 @@ service cloud.firestore {
       allow read: if true;
       allow write: if false;
     }
+    match /fantasy_underperformance/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
     match /meta/{docId} {
       allow read: if true;
       allow write: if false;

@@ -501,7 +501,7 @@ def get_firestore_client(cred_path):
 
 def write_firestore(db, *, season, week, ratings_rows, games, books, closing, weather,
                      rating_history, qb_leaderboard, wr_leaderboard, rb_leaderboard,
-                     qb_history, team_players, fantasy_projections):
+                     qb_history, team_players, fantasy_projections, underperformance_report=None):
     """One real write per real thing computed this run. Batches where Firestore allows it
     (500-write cap per batch, nowhere close to hit here); ratings_history/leaderboards/
     fantasy_projections/meta are each a single doc, so those are plain sets."""
@@ -571,6 +571,16 @@ def write_firestore(db, *, season, week, ratings_rows, games, books, closing, we
             "projections": fantasy_projections, "updated_at": firestore.SERVER_TIMESTAMP,
         })
         written.append("fantasy_projections/current")
+
+    # fantasy_underperformance/current -- real, refreshed every run this pipeline executes, no
+    # external ranking source needed. Written even when `players` is empty (e.g. before any
+    # current-season games exist) so the dashboard shows the honest "note" instead of stale
+    # data from a prior run, or nothing at all.
+    if underperformance_report is not None:
+        db.collection("fantasy_underperformance").document("current").set({
+            **underperformance_report, "updated_at": firestore.SERVER_TIMESTAMP,
+        })
+        written.append(f"fantasy_underperformance/current ({len(underperformance_report.get('players', []))} players)")
 
     # meta/current -- tells the live site which games/{weekId} doc is "this week"
     db.collection("meta").document("current").set({
@@ -703,6 +713,84 @@ def build_team_top_players(pbp_paths_and_seasons, min_carries=15, min_targets=10
                      "sack_rate": sack_rate, "hit_rate": hit_rate}
     return out
 
+def _fetch_stats_player_reg(yr):
+    """Real per-player season stats file for one season, or None if nflverse hasn't published
+    it yet (true for a season before any games have been played). Shared by
+    build_fantasy_projections and build_underperformance_report so both use the exact same
+    fetch logic, not two copies that could drift."""
+    import urllib.request
+    url = f"https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_reg_{yr}.parquet"
+    try:
+        path = f"/tmp/stats_player_reg_{yr}.parquet"
+        urllib.request.urlretrieve(url, path)
+        df = pd.read_parquet(path)
+        if len(df) == 0:
+            return None
+        return df
+    except Exception:
+        return None
+
+_SURNAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+def _surname_key(full_name):
+    # Token-based suffix stripping (not substring replace) -- a substring approach would
+    # wrongly mangle real surnames that happen to contain "ii"/"sr" as letters within them.
+    tokens = [t.rstrip(".").lower() for t in str(full_name).split()]
+    while tokens and tokens[-1] in _SURNAME_SUFFIXES:
+        tokens.pop()
+    return tokens[-1] if tokens else ""
+
+def build_underperformance_report(season, min_current_games=3):
+    """Flags real players whose CURRENT real season production is meaningfully below their
+    OWN established real baseline (last full real season) -- no external ranking source
+    needed, so this has no staleness problem the way a preseason ranking snapshot would:
+    it's real data, refreshed every time this pipeline runs.
+
+    Deliberately does NOT invent a "significance" threshold for what counts as a real
+    decline (that would be an unvalidated number dressed up as a rule) -- it reports the
+    real baseline ppg, the real current ppg, and the real gap, sorted worst-gap-first, and
+    lets the dashboard show that honestly rather than a fabricated "underperforming: yes/no"
+    verdict. min_current_games guards against a 1-2 game sample looking like a real trend
+    when it's just noise -- returns an empty dict (not a fabricated report) until real games
+    reach that floor.
+    """
+    baseline_df = _fetch_stats_player_reg(season - 1)
+    current_df = _fetch_stats_player_reg(season)
+    if baseline_df is None or current_df is None:
+        missing = ([f"{season-1} baseline"] if baseline_df is None else []) + \
+                  ([f"{season} current-season"] if current_df is None else [])
+        return {"players": [], "baseline_season": season - 1, "current_season": season,
+                "note": f"Not available yet: {' and '.join(missing)} stats."}
+
+    keep_pos = {"QB", "RB", "WR", "TE"}
+    def to_ppg_map(df, min_games):
+        df = df[(df.games >= min_games) & (df.position.isin(keep_pos))].copy()
+        df["half_ppr"] = (df["fantasy_points"] + df["fantasy_points_ppr"]) / 2
+        df["ppg"] = df["half_ppr"] / df["games"]
+        out = {}
+        for _, r in df.iterrows():
+            key = f"{str(r['recent_team']).lower()}|{_surname_key(r['player_display_name'])}"
+            out[key] = {"ppg": round(float(r["ppg"]), 2), "games": int(r["games"]),
+                        "pos": r["position"], "name": r["player_display_name"], "team": r["recent_team"]}
+        return out
+
+    baseline = to_ppg_map(baseline_df, min_games=5)  # need a real, stable prior-season sample
+    current = to_ppg_map(current_df, min_games=min_current_games)
+
+    players = []
+    for key, cur in current.items():
+        base = baseline.get(key)
+        if not base:
+            continue  # no real established baseline to compare against -- skip, don't guess
+        gap = round(cur["ppg"] - base["ppg"], 2)
+        players.append({
+            "name": cur["name"], "pos": cur["pos"], "team": cur["team"],
+            "baseline_ppg": base["ppg"], "baseline_games": base["games"],
+            "current_ppg": cur["ppg"], "current_games": cur["games"],
+            "gap": gap,
+        })
+    players.sort(key=lambda p: p["gap"])  # worst decline first
+    return {"players": players, "baseline_season": season - 1, "current_season": season, "note": None}
+
 def build_fantasy_projections(season):
     """'Our Proj' for every rostered/waiver player: real half-PPR season-average fantasy
     points per game. Uses nflverse's own official fantasy_points (standard) and
@@ -724,23 +812,10 @@ def build_fantasy_projections(season):
     abbreviated) across Sleeper/ESPN/Yahoo -- team+lastname is unique enough in practice for
     an active-roster skill player, with the rare same-team-same-lastname collision an accepted
     known limitation of this approach."""
-    import urllib.request
-    def try_season(yr):
-        url = f"https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_reg_{yr}.parquet"
-        try:
-            path = f"/tmp/stats_player_reg_{yr}.parquet"
-            urllib.request.urlretrieve(url, path)
-            df = pd.read_parquet(path)
-            if len(df) == 0:
-                return None
-            return df
-        except Exception:
-            return None
-
-    df = try_season(season)
+    df = _fetch_stats_player_reg(season)
     used_season = season
     if df is None or len(df) == 0:
-        df = try_season(season - 1)
+        df = _fetch_stats_player_reg(season - 1)
         used_season = season - 1
     if df is None:
         return {}, None
@@ -757,18 +832,9 @@ def build_fantasy_projections(season):
     df["half_ppr"] = (df["fantasy_points"] + df["fantasy_points_ppr"]) / 2
     df["ppg"] = df["half_ppr"] / df["games"]
 
-    SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
-    def surname_key(full_name):
-        # Token-based suffix stripping (not substring replace) -- a substring approach would
-        # wrongly mangle real surnames that happen to contain "ii"/"sr" as letters within them.
-        tokens = [t.rstrip(".").lower() for t in str(full_name).split()]
-        while tokens and tokens[-1] in SUFFIXES:
-            tokens.pop()
-        return tokens[-1] if tokens else ""
-
     out = {}
     for _, r in df.iterrows():
-        last = surname_key(r["player_display_name"])
+        last = _surname_key(r["player_display_name"])
         key = f"{str(r['recent_team']).lower()}|{last}"
         out[key] = {"proj": round(float(r["ppg"]), 2), "games": int(r["games"]), "pos": r["position"]}
     return out, used_season
@@ -924,6 +990,14 @@ if __name__ == "__main__":
     print(f"\n--- FANTASY_PROJECTIONS (real, {proj_season} season average, half-PPR -- paste into const FANTASY_PROJECTIONS = { '{' } ... { '}' }) ---")
     print(json.dumps(proj, indent=1))
 
+    # Real, refreshed every run -- no external ranking source, no staleness problem. Flags
+    # players whose real current-season production is below their own real established
+    # baseline. See build_underperformance_report() docstring for exactly what it does and
+    # doesn't do (no invented "significant" threshold, no fabricated verdict).
+    underperf = build_underperformance_report(SEASON)
+    print(f"\n--- UNDERPERFORMANCE REPORT ({len(underperf['players'])} players flagged"
+          f"{', note: ' + underperf['note'] if underperf['note'] else ''}) ---")
+
     # ---- Write everything real above straight to Firestore -- the actual replacement for
     # the old "paste these JSON blocks into ChalkTalk.html by hand" step. Only runs when
     # credentials are actually configured (the GitHub Actions secret, or a local
@@ -938,7 +1012,7 @@ if __name__ == "__main__":
             books=books, closing=closing, weather=weather, rating_history=history,
             qb_leaderboard=qb_lb_out, wr_leaderboard=wr_lb_out, rb_leaderboard=rb_lb_out,
             qb_history=qb_history_out, team_players=team_players_out,
-            fantasy_projections=proj,
+            fantasy_projections=proj, underperformance_report=underperf,
         )
     else:
         reason = "firebase-admin not installed" if not _FIREBASE_AVAILABLE else "no credentials configured (FIREBASE_CREDENTIALS_PATH / GOOGLE_APPLICATION_CREDENTIALS)"
