@@ -553,7 +553,7 @@ def write_firestore(db, *, season, week, ratings_rows, games, books, closing, we
         for gid, entry in closing.items():
             batch.set(db.collection("closing_results").document(gid), entry)
         batch.commit()
-        written.append(f"closing_results/* ({len(closing)} games, previous week's finals)")
+        written.append(f"closing_results/* ({len(closing)} games, previous week + any current-week finals)")
 
     # leaderboards/current + fantasy_projections/current -- only written when this run
     # actually had real pbp to compute them from (main() passes None otherwise), so an
@@ -907,7 +907,10 @@ if __name__ == "__main__":
 
     odds_data = pull_week_odds(MODE, API_KEY, HIST_DATE)
     books = build_books_for_week(odds_data, ratings["games_this_week"])
-    closing = build_closing_results(ratings["games_prev_week"])
+    # Grade previous week's games (normal weekly cadence) PLUS any game in the CURRENT
+    # week's slate that has already gone final -- e.g. re-running mid-week after a
+    # Thursday/Sunday-night opener finishes, without waiting for the whole week to end.
+    closing = build_closing_results(pd.concat([ratings["games_prev_week"], ratings["games_this_week"]]))
     weather = pull_weather_for_week(ratings["games_this_week"])
 
     # ---- RATINGS array ----
@@ -950,7 +953,7 @@ if __name__ == "__main__":
         book_entry = books.get(gid)
         market_home_favored = -float(book_entry["books"][0]["home_pt"]) if book_entry else None
         games_out.append({
-            "id": gid, "away": a, "home": h, "week": week, "season": season,
+            "id": gid, "away": a, "home": h, "week": WEEK, "season": SEASON,
             # gameday/gametime come straight from the real nflverse schedule (games.csv) --
             # gametime is already ET, same as every other time shown in this dashboard.
             "gameday": str(r.gameday) if pd.notna(r.gameday) else None,
