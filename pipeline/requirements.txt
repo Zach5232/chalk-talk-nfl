@@ -1,7 +1,18 @@
 # Chalk Talk pipeline dependencies -- installed by the GitHub Action before each run.
 # Pin loosely (major-version floors only) so routine patch releases don't break the
 # scheduled run; bump these by hand if a real breaking change shows up.
-pandas>=2.0
+#
+# pandas capped at <3.0 (2026-09-09): a fresh CI install silently picked up pandas 3.0.5 --
+# released very recently, never tested against this pipeline -- and every real run since
+# has died with exit code 1 and NO Python traceback at all (the signature of a hard process
+# kill, not a normal exception), right after the RATINGS print, every single time. Same code
+# ran clean locally under two different environments (including a fresh venv matching this
+# exact requirements.txt), so it's not reproducible outside the actual GitHub runner --
+# consistent with pandas 3.0's new copy-on-write-by-default memory behavior pushing a
+# memory-constrained CI runner over the edge in a way a local machine's extra headroom
+# doesn't hit. This pins back to the 2.x line the pipeline was actually built and backtested
+# against, rather than floating onto an untested major release with no upper bound.
+pandas>=2.0,<3.0
 numpy>=1.24
 pyarrow>=14.0
 firebase-admin>=6.0
