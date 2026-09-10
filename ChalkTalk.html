@@ -4038,12 +4038,18 @@ function autoSettle(bet, g){
   const cr = CLOSING_RESULTS[bet.gameId];
   if(!cr) return null;
   const margin = cr.home_score - cr.away_score; // positive = home won by this much
-  const homeFavored = bet.side === 'home' ? bet.line : -bet.line; // normalize to home-favored convention isn't quite right for away bets; handle directly below
+  // bet.line is stored per-side, in the "your own number" sense (home bettor: negative if
+  // favored; away bettor: positive if getting points) -- so a home bet covers when the real
+  // margin beats the deficit implied by bet.line (margin + bet.line > 0, since bet.line is
+  // negative for a favorite), and an away bet covers when the away side's own adjusted margin
+  // (-margin + bet.line) is positive. This away case was previously subtracting bet.line
+  // instead of adding it, which silently graded a real winning bet (NE +3.5, lost by 3) as a
+  // loss -- caught from a real bet that graded wrong on 2026-09-10.
   let coverMargin;
   if(bet.side === 'home'){
-    coverMargin = margin - (-bet.line); // bet.line stored in odds-API sign (neg=favored) per book convention
+    coverMargin = margin + bet.line;
   } else {
-    coverMargin = -margin - (bet.line);
+    coverMargin = -margin + bet.line;
   }
   if(coverMargin === 0) return 'push';
   return coverMargin > 0 ? 'win' : 'loss';
