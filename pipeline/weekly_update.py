@@ -605,8 +605,12 @@ def build_model_season_record(db, season):
     home_score - away_score; diff = margin - close_home; push if diff==0; home covers if
     diff>0) so this can never silently disagree with what the dashboard shows for an
     individual pick -- same math, just applied to every game instead of only picked ones.
-    Games with no real market line that week (g['market'] is None) are skipped, not graded
-    with a fabricated side.
+    Grading is against the REAL closing line (closing_results['close_home'], straight from
+    nflverse's own spread_line) rather than whatever the live odds board showed at write-time --
+    that live "market" field can go null for a game that's already kicked off or finished by
+    the time a run happens (the odds API stops quoting it), which would otherwise wrongly skip
+    grading a real, already-decided game. Games with no closing_results entry yet (not final)
+    are skipped, not graded with a fabricated side.
     """
     games_docs = db.collection("games").stream()
     closing_docs = {d.id: d.to_dict() for d in db.collection("closing_results").stream()}
@@ -619,10 +623,10 @@ def build_model_season_record(db, season):
         wk = gdoc.get("week")
         for g in gdoc.get("games", []):
             cr = closing_docs.get(g.get("id"))
-            if not cr or g.get("market") is None:
+            if not cr:
                 continue
             model_home_favored = -g["model"]
-            market_home_favored = -g["market"]
+            market_home_favored = cr["close_home"]
             edge = model_home_favored - market_home_favored
             model_side = "home" if edge > 0 else "away"
             picked_team = g["home"] if model_side == "home" else g["away"]
