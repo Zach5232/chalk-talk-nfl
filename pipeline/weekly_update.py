@@ -226,7 +226,12 @@ def _real_teams_for_season(season):
 def run_ratings(season, week, prior_season_pbp_path):
     pbp_path = fetch_pbp(season)
     tg = build_team_games(pbp_path, season)
-    teams = sorted(tg.team.unique()) if len(tg) else _real_teams_for_season(season)
+    # Always the full real 32-team league list, from the schedule -- NOT tg.team.unique(),
+    # which only reflects teams with actual current-season pbp so far. Mid-week (some games
+    # played, most not), that used to silently shrink to just the handful of teams who'd
+    # already played, which then KeyError'd the moment fit_split() tried to index a PRIOR-
+    # season team (e.g. ARI, who just hadn't played yet this week) against that too-small map.
+    teams = _real_teams_for_season(season)
     n = len(teams); tix = {t:i for i,t in enumerate(teams)}
 
     prior_tg = build_team_games(prior_season_pbp_path, season-1)
@@ -434,7 +439,12 @@ def run_rating_history(season, week, prior_season_pbp_path):
     """
     pbp_path = fetch_pbp(season)
     tg = build_team_games(pbp_path, season)
-    teams = sorted(tg.team.unique()) if len(tg) else _real_teams_for_season(season)
+    # Always the full real 32-team league list, from the schedule -- NOT tg.team.unique(),
+    # which only reflects teams with actual current-season pbp so far. Mid-week (some games
+    # played, most not), that used to silently shrink to just the handful of teams who'd
+    # already played, which then KeyError'd the moment fit_split() tried to index a PRIOR-
+    # season team (e.g. ARI, who just hadn't played yet this week) against that too-small map.
+    teams = _real_teams_for_season(season)
     n = len(teams); tix = {t:i for i,t in enumerate(teams)}
 
     prior_tg = build_team_games(prior_season_pbp_path, season-1)
