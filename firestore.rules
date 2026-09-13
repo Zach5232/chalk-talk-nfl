@@ -112,6 +112,22 @@ service cloud.firestore {
       allow read: if true;
       allow write: if false;
     }
+    match /cfb_performance/{year} {
+      allow read: if true;
+      allow write: if false;   // only the weekly pipeline + backfill script (Admin SDK) write these
+    }
+    match /cfb_results/{weekId} {
+      allow read: if true;
+      allow write: if false;   // only the weekly pipeline (Admin SDK) writes these
+    }
+
+    // ---- CFB model: personal bet tracker (public read AND write -- browser writes directly) ----
+    match /cfb_bets/{betId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
+      allow delete: if true;
+    }
 
     // ---- Chalk Talk: PIN config -- never accessible from any client, ever ----
     match /config/{doc} {
