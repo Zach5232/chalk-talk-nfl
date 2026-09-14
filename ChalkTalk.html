@@ -2949,6 +2949,56 @@ function poolPickStatsForWeek(week){
   Object.keys(stats).forEach(t => { stats[t] = {count: stats[t], pct: (stats[t]/names.length)*100}; });
   return {stats, total: names.length};
 }
+// Real result for a given (week, team) pick -- 'win' | 'loss' | 'tie' | 'pending' (game hasn't
+// gone final in CLOSING_RESULTS yet) | null (no such game found at all). Ties don't strike
+// (standard survivor rule: only a loss eliminates), same convention this pool already uses.
+function survivorGameResult(week, team){
+  const live = GAMES.find(g => g.week===week && (g.home===team || g.away===team));
+  const sched = live || FULL_SCHEDULE.find(g => g.week===week && (g.home===team || g.away===team));
+  if(!sched) return null;
+  const gameId = live ? live.id : `${sched.away.toLowerCase()}-${sched.home.toLowerCase()}`;
+  const cr = CLOSING_RESULTS[gameId];
+  if(!cr) return 'pending';
+  const margin = cr.home_score - cr.away_score;
+  if(margin === 0) return 'tie';
+  const teamWon = (sched.home === team) ? margin > 0 : margin < 0;
+  return teamWon ? 'win' : 'loss';
+}
+
+// Auto-applies a strike to any pool entrant whose picked team has actually lost, using the
+// same real closing results as everywhere else in this file -- no more manually clicking
+// "+1 strike" for 40+ people every week. Idempotent: once a (week, name) pick's game is final
+// (win, loss, OR tie), it's marked resolved and never re-processed, so re-running this on every
+// render never double-strikes anyone; a still-pending game just gets rechecked next render.
+function applySurvivorAutoStrikes(){
+  const picksByWeek = getSurvivorPoolPicks();
+  const resolved = getState('survivor_auto_strikes_resolved', {}); // {week: [names already checked]}
+  const entrants = getSurvivorEntrants();
+  const byName = new Map(entrants.map(e => [e.name.toLowerCase(), e]));
+  let entrantsChanged = false, resolvedChanged = false;
+
+  Object.keys(picksByWeek).forEach(weekKey => {
+    const week = Number(weekKey);
+    const weekPicks = picksByWeek[weekKey] || {};
+    const done = new Set(resolved[weekKey] || []);
+    Object.entries(weekPicks).forEach(([name, team]) => {
+      if(done.has(name)) return;
+      const result = survivorGameResult(week, team);
+      if(result == null || result === 'pending') return; // check again once it's final
+      if(result === 'loss'){
+        const entrant = byName.get(name.toLowerCase());
+        if(entrant && entrant.strikes < 2){ entrant.strikes += 1; entrantsChanged = true; }
+      }
+      done.add(name);
+      resolvedChanged = true;
+    });
+    resolved[weekKey] = [...done];
+  });
+
+  if(resolvedChanged) setState('survivor_auto_strikes_resolved', resolved);
+  if(entrantsChanged) setSurvivorEntrants(entrants);
+}
+
 function renderSurvivorPoolPicks(week){
   const el = document.getElementById('survivor-pool-picks');
   if(!el) return;
@@ -2992,9 +3042,11 @@ function renderSurvivorEntrants(){
   const remaining = entrants.length ? entrants.filter(e => e.strikes < 2).length : null;
   el.innerHTML = `
     <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
-      One-time paste of everyone in the pool (newline or comma separated) -- after that, just tap "+1 strike" for
-      whoever busts each week and "remaining" below updates itself instead of you re-counting by hand. This is your
-      own manual roster (Yahoo group 20877 doesn't expose it via API), 2-strike elimination per the pool's real rules.
+      One-time paste of everyone in the pool (newline or comma separated). Strikes now apply themselves: once
+      you've entered a week's picks below and that week's games go final, anyone whose team lost gets a strike
+      added automatically -- no manual clicking needed (the buttons below still work for a manual override/undo).
+      This is your own manual roster (Yahoo group 20877 doesn't expose it via API), 2-strike elimination per the
+      pool's real rules.
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px;">
       <textarea id="survivor-entrants-paste" placeholder="Paste names, one per line (or comma-separated)..." style="flex:1;min-width:220px;min-height:60px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
@@ -3188,6 +3240,7 @@ function renderSurvivor(){
   const noteEl = document.getElementById('survivor-note');
   if(!usedEl || !wrapEl) return;
 
+  applySurvivorAutoStrikes();
   renderSurvivorEntrants();
   renderSurvivorOptimalPath();
   renderSurvivorSeasonPlanner();
