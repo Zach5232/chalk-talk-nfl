@@ -4518,12 +4518,17 @@ async function boot(){
   // Reset every container this function fills in below, so it's safe to call boot() again
   // later (the manual refresh button) without duplicating every array it .push()es into --
   // it used to only ever run once, at page load, so this was never a problem until now.
-  RATINGS = []; GAMES = []; QB_LEADERBOARD = []; WR_LEADERBOARD = []; RB_LEADERBOARD = [];
-  FANTASY_ROSTERS = []; FANTASY_ROSTERS_BASE = [];
-  QB_HISTORY = {}; TEAM_PLAYERS = {}; FANTASY_PROJECTIONS = {};
-  RATING_HISTORY = {}; BOOKS = {}; WEATHER = {}; CLOSING_RESULTS = {}; CLOSING_LINES = {};
-  UNDERPERFORMANCE = {players: [], note: null};
-  MODEL_SEASON_RECORD = {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []};
+  // Cleared IN PLACE (.length=0 / delete each key), NOT reassigned to a new [] or {} -- other
+  // code (POS_CONFIG's {data: QB_LEADERBOARD, ...} et al) captured a direct reference to these
+  // exact array/object instances at page-load time, so a plain reassignment here would leave
+  // that reference pointing at a permanently-empty orphaned copy while the real data landed in
+  // a new object nothing else could see.
+  [RATINGS, GAMES, QB_LEADERBOARD, WR_LEADERBOARD, RB_LEADERBOARD, FANTASY_ROSTERS, FANTASY_ROSTERS_BASE]
+    .forEach(a => { a.length = 0; });
+  [QB_HISTORY, TEAM_PLAYERS, FANTASY_PROJECTIONS, RATING_HISTORY, BOOKS, WEATHER, CLOSING_RESULTS, CLOSING_LINES]
+    .forEach(o => { for(const k of Object.keys(o)) delete o[k]; });
+  UNDERPERFORMANCE.players = []; UNDERPERFORMANCE.note = null;
+  Object.assign(MODEL_SEASON_RECORD, {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []});
   try{
     const metaSnap = await db.collection('meta').doc('current').get();
     const meta = metaSnap.exists ? metaSnap.data() : {season: 2026, week: 1};
