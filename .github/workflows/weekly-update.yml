@@ -1,12 +1,12 @@
 name: Chalk Talk Weekly Update
 
 # Two ways this runs:
-#   1. Scheduled (cron) -- always uses SEASON/WEEK's hardcoded defaults in weekly_update.py,
-#      since a cron trigger can't take inputs. Bump those defaults in the file itself if you
-#      want the unattended run to target a different week.
-#   2. Manual ("Run workflow" button, top right of this workflow in the Actions tab) -- lets
-#      you set season/week right from the GitHub UI, no code edit or push needed. This is the
-#      one to use for an on-demand odds refresh, or to re-run a week that needs fixing.
+#   1. Scheduled (cron) -- WEEK is auto-detected every run from the real schedule (whichever
+#      week still has an unplayed game -- see _detect_current_week() in weekly_update.py), so
+#      this needs zero manual maintenance as the season progresses; nothing to bump by hand.
+#   2. Manual ("Run workflow" button, top right of this workflow in the Actions tab) -- leave
+#      season/week blank for an on-demand odds/results refresh of whatever week it really is
+#      right now, or set week explicitly to re-run/fix an old week.
 on:
   schedule:
     # Tuesday 10:00 ET (14:00 UTC during EDT, 15:00 UTC during EST -- 14:00 UTC covers the

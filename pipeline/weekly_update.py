@@ -25,15 +25,9 @@ try:
 except ImportError:
     _FIREBASE_AVAILABLE = False
 
-# SEASON/WEEK: env-var overridable (CHALKTALK_SEASON / CHALKTALK_WEEK) so the GitHub Actions
-# "Run workflow" button can target a different week with no code edit or push required -- the
-# literals below are just the defaults for a bare local run. The scheduled cron trigger has no
-# way to pass inputs, so it always uses these defaults; bump them here specifically to change
-# what the unattended weekly run targets.
+# SEASON: env-var overridable (CHALKTALK_SEASON), defaults to the real current season. Only
+# needs touching once a year at the actual season boundary.
 SEASON = int(os.environ.get("CHALKTALK_SEASON", 2026))   # real season, kicks off 2026-09-09
-WEEK = int(os.environ.get("CHALKTALK_WEEK", 1))           # Week 1 -- no 2026 games played yet,
-                        # ratings run purely off the carryover-from-2025 prior (see run_ratings:
-                        # hist is empty for week 1, so off/deft = prior_off/prior_def directly)
 
 # API_KEY now comes from config_local.py (gitignored -- never committed) or the ODDS_API_KEY
 # env var, NOT hardcoded here. This file is going into a GitHub repo, and a real key sitting
@@ -102,6 +96,28 @@ def fetch_games_csv():
     if code != "200":
         raise RuntimeError(f"Failed to download games.csv from nflverse (HTTP {code}) after retries.")
     return path
+
+
+def _detect_current_week(season):
+    """The earliest real week this season that still has at least one game without a final
+    result -- i.e. whichever week is upcoming or in progress right now. Once every game in a
+    week goes final (Monday night's over), this naturally advances to the next week on its
+    own -- no more manually typing a week number into the GitHub Actions "Run workflow" form
+    every week, and the unattended Tuesday cron (which has no way to take that input at all)
+    now tracks the real season correctly forever, with zero manual maintenance. Falls back to
+    the season's last real week once the whole season is actually done."""
+    games = pd.read_csv(fetch_games_csv())
+    g = games[(games.season.astype(str) == str(season)) & (games.game_type == "REG")]
+    incomplete = g[g.result.isna()]
+    if len(incomplete):
+        return int(incomplete.week.min())
+    return int(g.week.max())
+
+
+# WEEK: CHALKTALK_WEEK still works as a manual override (e.g. to re-run or fix an old week),
+# but the real default is now auto-detected from the actual schedule above -- see
+# _detect_current_week()'s docstring for why.
+WEEK = int(os.environ["CHALKTALK_WEEK"]) if os.environ.get("CHALKTALK_WEEK") else _detect_current_week(SEASON)
 
 
 # ---------- STEP 1: play-by-play -> team-game EPA splits ----------
