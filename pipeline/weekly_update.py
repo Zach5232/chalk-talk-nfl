@@ -12,7 +12,7 @@ arrays/objects in ChalkTalk.html.
 
 --- CONFIG: edit these each week ---
 """
-import subprocess, json, csv, os
+import subprocess, json, csv, os, time
 import pandas as pd
 import numpy as np
 
@@ -73,6 +73,24 @@ CACHE_DIR = os.path.join(PIPELINE_DIR, "_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 
+def _curl_with_retries(url, path, max_attempts=3, backoff_seconds=3):
+    """Downloads url to path, retrying on transient failures (5xx, connection resets, curl
+    timeouts) with a short backoff -- caught 2026-09-14, when a real GitHub Actions run hit
+    two straight HTTP 504s from nflverse's release CDN on a URL that was verifiably up (curled
+    fine, twice, from an unrelated machine at the same moment) -- a real but transient blip,
+    not an outage. A definitive 404 (the file genuinely doesn't exist -- true for the current
+    season's pbp before it's published) returns immediately; no point retrying that."""
+    code = None
+    for attempt in range(max_attempts):
+        code = subprocess.run(["curl", "-sL", "-o", path, "-w", "%{http_code}", url],
+                               capture_output=True, text=True).stdout.strip()
+        if code in ("200", "404"):
+            return code
+        if attempt < max_attempts - 1:
+            time.sleep(backoff_seconds * (attempt + 1))
+    return code
+
+
 def fetch_games_csv():
     """Real, always-current nflverse schedule/results dataset -- every game ever played, plus
     the full scheduled slate for the current season with real scores filled in as they
@@ -80,10 +98,9 @@ def fetch_games_csv():
     disk already -- same reasoning as fetch_pbp() below."""
     path = os.path.join(CACHE_DIR, "games.csv")
     url = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
-    code = subprocess.run(["curl", "-sL", "-o", path, "-w", "%{http_code}", url],
-                           capture_output=True, text=True).stdout.strip()
+    code = _curl_with_retries(url, path)
     if code != "200":
-        raise RuntimeError(f"Failed to download games.csv from nflverse (HTTP {code}).")
+        raise RuntimeError(f"Failed to download games.csv from nflverse (HTTP {code}) after retries.")
     return path
 
 
@@ -98,10 +115,15 @@ def fetch_pbp(season):
     """
     path = os.path.join(CACHE_DIR, f"pbp_{season}.parquet")
     url = f"https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_{season}.parquet"
-    code = subprocess.run(["curl", "-sL", "-o", path, "-w", "%{http_code}", url],
-                           capture_output=True, text=True).stdout.strip()
+    code = _curl_with_retries(url, path)
+    if code == "404":
+        return None  # genuinely not published yet -- expected, not an error
     if code != "200":
-        return None
+        # A persistent transient failure here must NOT be treated the same as "not published
+        # yet" -- silently returning None would make run_ratings() quietly fall back to a
+        # thinner prior instead of using real, actually-available data, a wrong-output bug
+        # that's worse than just failing loudly.
+        raise RuntimeError(f"Failed to download pbp for {season} from nflverse (HTTP {code}) after retries.")
     return path
 
 # Columns build_team_games/build_havoc_games/build_st_games produce -- reused to hand back
