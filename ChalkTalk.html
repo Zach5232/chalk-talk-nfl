@@ -212,11 +212,14 @@
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <div class="eyebrow">Week 1 &middot; 2026</div>
-    <!-- ✏️ To rename the dashboard, just change the text below. Its color is
-         controlled by --title-color in the customization block at the top of <style>. -->
-    <h1>Chalk Talk</h1>
+  <header style="display:flex;align-items:flex-end;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+    <div>
+      <div class="eyebrow">Week 1 &middot; 2026</div>
+      <!-- ✏️ To rename the dashboard, just change the text below. Its color is
+           controlled by --title-color in the customization block at the top of <style>. -->
+      <h1>Chalk Talk</h1>
+    </div>
+    <button id="refresh-live-data-btn" class="btn" style="font-size:11.5px;padding:6px 10px;" onclick="refreshLiveData()" title="A tab left open across a pipeline run can be showing stale data -- this re-pulls everything fresh.">⟳ Refresh live data</button>
   </header>
 
   <nav>
@@ -3294,6 +3297,10 @@ function renderSurvivor(){
     const remaining = entrantsRemaining != null ? entrantsRemaining : st.remaining;
     const total = entrantsRemaining != null ? entrants.length : st.total;
     const pct = (remaining!=null && total) ? Math.round((remaining/total)*100) : null;
+    const onOneStrike = entrants.filter(e => e.strikes === 1).sort((a,b)=>a.name.localeCompare(b.name));
+    const {stats: pickStats, total: pickTotal} = poolPickStatsForWeek(currentWeek);
+    const pickBreakdown = Object.entries(pickStats).sort((a,b)=>b[1].count-a[1].count)
+      .map(([t,s]) => `<span class="status-pill" style="margin:2px 4px 2px 0;">${logoImg(t,14)} ${t} &middot; ${s.count}/${pickTotal} (${s.pct.toFixed(0)}%)</span>`).join('');
     statusEl.innerHTML = `
       <div style="display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px;">
         ${entrantsRemaining != null ? `
@@ -3311,11 +3318,19 @@ function renderSurvivor(){
         ${pct!=null ? `<div style="font-size:13px;color:var(--sage);">${pct}% of the field still alive -- ${100-pct}% eliminated.</div>` : `<div style="font-size:12px;color:var(--sage);">Check "Members" or "Overview" in the Yahoo app for your live count, or paste your pool list below for an auto-count.</div>`}
         `}
       </div>
-      <div style="font-size:13px;">
+      <div style="font-size:13px;margin-bottom:12px;">
         Your status: ${myStatus.alive
           ? '<b style="color:var(--good);">Still alive</b>'
           : `<b style="color:var(--alert);">Eliminated Week ${myStatus.eliminatedWeek} (${myStatus.eliminatedWith})</b>`}
-      </div>`;
+      </div>
+      ${pickTotal>0 ? `
+      <div style="font-size:12px;color:var(--sage);text-transform:uppercase;font-weight:700;margin-bottom:6px;">Week ${currentWeek} pick breakdown (${pickTotal} entered)</div>
+      <div style="margin-bottom:12px;">${pickBreakdown}</div>` : ''}
+      ${onOneStrike.length>0 ? `
+      <div style="font-size:12px;color:var(--sage);text-transform:uppercase;font-weight:700;margin-bottom:6px;">On 1 strike -- one more loss is out (${onOneStrike.length})</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        ${onOneStrike.map(e => `<span class="status-pill" style="margin:0;">${e.name}</span>`).join('')}
+      </div>` : ''}`;
   }
 
   const used = getSurvivorUsed();
@@ -4373,6 +4388,15 @@ function hideBootBanner(){
 
 async function boot(){
   showBootBanner('Loading live data from Firestore…', false);
+  // Reset every container this function fills in below, so it's safe to call boot() again
+  // later (the manual refresh button) without duplicating every array it .push()es into --
+  // it used to only ever run once, at page load, so this was never a problem until now.
+  RATINGS = []; GAMES = []; QB_LEADERBOARD = []; WR_LEADERBOARD = []; RB_LEADERBOARD = [];
+  FANTASY_ROSTERS = []; FANTASY_ROSTERS_BASE = [];
+  QB_HISTORY = {}; TEAM_PLAYERS = {}; FANTASY_PROJECTIONS = {};
+  RATING_HISTORY = {}; BOOKS = {}; WEATHER = {}; CLOSING_RESULTS = {}; CLOSING_LINES = {};
+  UNDERPERFORMANCE = {players: [], note: null};
+  MODEL_SEASON_RECORD = {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []};
   try{
     const metaSnap = await db.collection('meta').doc('current').get();
     const meta = metaSnap.exists ? metaSnap.data() : {season: 2026, week: 1};
@@ -4470,6 +4494,22 @@ async function boot(){
   renderHavocScatter();
   renderDashboard();
 }
+
+// Re-pulls everything fresh from Firestore and re-renders every tab (not just whichever
+// boot() paints by default) -- for a page/tab left open across a pipeline run, so "the strike
+// didn't apply" or "the line didn't move" can be a stale in-memory copy, not a real bug. boot()
+// itself resets its containers first, so this is safe to call as many times as you like.
+async function refreshLiveData(){
+  const btn = document.getElementById('refresh-live-data-btn');
+  if(btn){ btn.disabled = true; btn.textContent = '⟳ Refreshing…'; }
+  await boot();
+  renderSurvivor();
+  renderResults();
+  await renderBets();
+  renderFantasy();
+  if(btn){ btn.disabled = false; btn.textContent = '⟳ Refresh live data'; }
+}
+
 boot();
 </script>
 </body>
