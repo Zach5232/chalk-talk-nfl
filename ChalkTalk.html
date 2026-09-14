@@ -2400,6 +2400,10 @@ function pickedTeam(entry){ return (entry && typeof entry === 'object') ? entry.
 function pickedLine(entry){ return (entry && typeof entry === 'object') ? entry.lineAtPick : null; }
 
 function setPickemPick(week, gameId, team){
+  if(!Number.isFinite(week)){
+    console.error('setPickemPick called with a non-numeric week -- refusing to write a bad key', week, gameId, team);
+    return;
+  }
   const hist = getPickemHistory();
   const weekPicks = {...(hist[week]||{})};
   if(pickedTeam(weekPicks[gameId]) === team){
@@ -2780,6 +2784,10 @@ function getSurvivorHistory(){
   return getState('survivor_history', {});
 }
 function lockSurvivorPick(week, team){
+  if(!Number.isFinite(week)){
+    console.error('lockSurvivorPick called with a non-numeric week -- refusing to write a bad key', week, team);
+    return;
+  }
   const hist = getSurvivorHistory();
   const prev = hist[week];
   let used = getSurvivorUsed();
@@ -3494,7 +3502,12 @@ function renderResults(){
 
   // ---- Pick'em record ----
   const pickemHist = getPickemHistory();
-  const pickemWeeks = Object.keys(pickemHist).map(Number).sort((a,b)=>a-b);
+  // Only real numeric week keys -- a stray non-numeric key (e.g. "undefined", from a pick made
+  // before GAMES had loaded a real week number) turns into NaN via Number(), and pickemHist[NaN]
+  // finds nothing, so Object.entries(undefined) throws and silently kills this ENTIRE function
+  // (Pick'em record AND everything rendered after it, including Survivor Record) -- exactly
+  // the "results not showing at all" symptom this guard fixes. Caught 2026-09-14.
+  const pickemWeeks = Object.keys(pickemHist).filter(k => /^\d+$/.test(k)).map(Number).sort((a,b)=>a-b);
   let cumW=0, cumL=0, cumP=0;
   const weekRows = pickemWeeks.map(week => {
     const picks = pickemHist[week];
@@ -3545,7 +3558,8 @@ function renderResults(){
 
   // ---- Survivor record ----
   const survivorHist = getSurvivorHistory();
-  const survivorWeeks = Object.keys(survivorHist).map(Number).sort((a,b)=>a-b);
+  // Same guard as pickemWeeks above -- a stray non-numeric key would otherwise crash this too.
+  const survivorWeeks = Object.keys(survivorHist).filter(k => /^\d+$/.test(k)).map(Number).sort((a,b)=>a-b);
   const myStatus = getMySurvivorStatus(currentWeek);
   const entrants = getSurvivorEntrants();
   const entrantsRemaining = entrants.length ? entrants.filter(e=>e.strikes<2).length : null;
