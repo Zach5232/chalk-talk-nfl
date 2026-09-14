@@ -268,6 +268,9 @@
   </div>
 
   <div id="view-pickem" class="view">
+    <div class="section-label">Pool Standings &middot; your place, who's ahead</div>
+    <div class="dash-card" id="pickem-standings"></div>
+
     <div class="section-label">Pick'em Helper &middot; $125 ATS pool, season-long record</div>
     <div class="dash-card" id="pickem-helper"></div>
 
@@ -2591,7 +2594,131 @@ function renderPickemPoolPicks(week){
   `;
 }
 
+// ---- Pick'em pool STANDINGS (place in the pool, who's ahead) -- a totally different shape
+// of data than the per-game picks above: a cumulative win-total leaderboard, not "who picked
+// what." Can't drive per-game leverage (it never says which team anyone picked), but it CAN
+// answer "what place am I in and how many wins do I need to catch up" -- which is what this
+// actually feeds into the strategy note in the Pick'em Helper below. ----
+function getPickemStandings(){ return getState('pickem_standings', null); }
+function setPickemStandingsState(v){ setState('pickem_standings', v); }
+
+// Handles a straight copy-paste of a real pool-site standings page -- messy on purpose
+// (avatar-initial lines, a "You" marker only on your own row, an inconsistent extra
+// "Username · Entry N" line on at least one real row) rather than a clean, guessable format.
+// Anchors on the win-count line (a lone integer) and takes whatever real name line precedes
+// it, so it tolerates that mess instead of assuming a fixed number of lines per entrant.
+function parsePickemStandingsPaste(text){
+  const rawLines = text.split('\n').map(s=>s.trim()).filter(Boolean);
+
+  // "You" appears on its own line right after your real name -- note it before stripping.
+  let selfName = null;
+  for(let i=0;i<rawLines.length;i++){
+    if(/^you$/i.test(rawLines[i])){
+      for(let j=i-1;j>=0;j--){
+        const cand = rawLines[j];
+        if(!/^[a-z]$/i.test(cand) && !/^entry\s*\d+$/i.test(cand) && !/^you$/i.test(cand)){
+          selfName = cand.replace(/\s*[·•]\s*entry\s*\d+$/i, '').trim();
+          break;
+        }
+      }
+    }
+  }
+
+  const isNoise = l =>
+    /^entry$/i.test(l) || /^week\s*\d+/i.test(l) || /^week 1 live$/i.test(l) ||
+    l.toLowerCase().includes('no standing') || /^[a-z]$/i.test(l) ||
+    /^you$/i.test(l) || /^entry \d+$/i.test(l);
+
+  const cleaned = [];
+  for(const l of rawLines){
+    if(isNoise(l)) continue;
+    const m = l.match(/^(.*?)\s*[·•]\s*entry\s*\d+$/i);
+    const val = m ? m[1].trim() : l;
+    if(cleaned[cleaned.length-1] !== val) cleaned.push(val); // drop an immediate exact repeat
+  }
+
+  const standings = [], skipped = [];
+  let i = 0;
+  while(i < cleaned.length){
+    const name = cleaned[i], next = cleaned[i+1];
+    if(next != null && /^\d+$/.test(next)){
+      standings.push({name, wins: parseInt(next, 10)});
+      i += 2;
+    } else {
+      skipped.push(name);
+      i += 1;
+    }
+  }
+  return {standings, skipped, selfName};
+}
+
+function importPickemStandings(){
+  const ta = document.getElementById('pickem-standings-paste');
+  if(!ta) return;
+  const {standings, skipped, selfName} = parsePickemStandingsPaste(ta.value);
+  if(standings.length === 0){
+    alert("Didn't recognize that format -- paste the standings page as-is (names and win totals somewhere in there).");
+    return;
+  }
+  setPickemStandingsState({captured_at: new Date().toISOString(), entries: standings, selfName});
+  ta.value = '';
+  if(skipped.length){
+    alert(`Loaded ${standings.length} entrant(s). Couldn't match a win total for: ${skipped.join(', ')}`);
+  }
+  renderPickemHelper();
+}
+
+function renderPickemStandings(){
+  const el = document.getElementById('pickem-standings');
+  if(!el) return;
+  const data = getPickemStandings();
+  const box = `
+    <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
+      Paste your pool's standings page as-is (win totals, not per-game picks -- this is a
+      different export than the pool ATS picks above). Tells you your real place and who's
+      ahead; refreshed each time you paste a new snapshot.
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px;">
+      <textarea id="pickem-standings-paste" placeholder="Paste the standings page here..." style="flex:1;min-width:220px;min-height:70px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
+      <button class="btn" onclick="importPickemStandings()">Load standings</button>
+    </div>`;
+  if(!data || !data.entries || data.entries.length===0){
+    el.innerHTML = box + '<div class="empty-note">No standings loaded yet.</div>';
+    return;
+  }
+  const sorted = [...data.entries].sort((a,b)=>b.wins-a.wins);
+  const selfIdx = data.selfName ? sorted.findIndex(s => s.name === data.selfName) : -1;
+  const leaderWins = sorted[0].wins;
+  let summary = '';
+  if(selfIdx >= 0){
+    const me = sorted[selfIdx];
+    const ahead = selfIdx; // count of entrants strictly ahead (sorted descending)
+    const gap = leaderWins - me.wins;
+    summary = `
+      <div style="font-size:14px;margin-bottom:6px;"><b>#${selfIdx+1} of ${sorted.length}</b> -- ${ahead} ${ahead===1?'person':'people'} ahead of you, ${gap===0?'tied for the lead':`${gap} win${gap===1?'':'s'} behind 1st`}.</div>
+      <div style="font-size:12px;color:var(--sage);margin-bottom:12px;">
+        ${gap===0
+          ? "You're leading (or tied) -- favor the model's safest, highest-confidence picks to protect your spot."
+          : ahead<=2
+          ? "Close behind -- the model's straight best picks should be enough to catch up without needing to gamble."
+          : "A real gap to make up -- worth favoring a game or two where the model disagrees with the obvious/chalk side, not just playing safe every week."}
+      </div>`;
+  }
+  el.innerHTML = box + summary + `
+    <div class="table-wrap">
+      <table class="rank">
+        <thead><tr><th>#</th><th>Entrant</th><th>Wins</th></tr></thead>
+        <tbody>
+          ${sorted.map((s,idx) => `<tr style="${s.name===data.selfName?'font-weight:700;color:var(--gold);':''}">
+            <td>${idx+1}</td><td>${s.name}${s.name===data.selfName?' (you)':''}</td><td>${s.wins}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
 function renderPickemHelper(){
+  renderPickemStandings();
   const el = document.getElementById('pickem-helper');
   if(!el) return;
   if(!GAMES || GAMES.length===0){ el.innerHTML = '<div class="empty-note">No games loaded yet.</div>'; return; }
