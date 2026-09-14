@@ -3425,10 +3425,15 @@ function renderSurvivor(){
     const total = entrantsRemaining != null ? entrants.length : st.total;
     const pct = (remaining!=null && total) ? Math.round((remaining/total)*100) : null;
     const onOneStrike = entrants.filter(e => e.strikes === 1).sort((a,b)=>a.name.localeCompare(b.name));
+    const strikeCounts = [0,1,2].map(n => ({n, count: entrants.filter(e => e.strikes === n).length}));
     const {stats: pickStats, total: pickTotal} = poolPickStatsForWeek(currentWeek);
     const pickBreakdown = Object.entries(pickStats).sort((a,b)=>b[1].count-a[1].count)
       .map(([t,s]) => `<span class="status-pill" style="margin:2px 4px 2px 0;">${logoImg(t,14)} ${t} &middot; ${s.count}/${pickTotal} (${s.pct.toFixed(0)}%)</span>`).join('');
     statusEl.innerHTML = `
+      ${entrants.length>0 ? `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        ${strikeCounts.map(({n,count}) => `<span class="status-pill" style="margin:0;${n===2?'color:var(--alert);':''}">${count} ${n===0?'at 0 strikes':n===1?'at 1 strike':'eliminated (2)'}</span>`).join('')}
+      </div>` : ''}
       <div style="display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px;">
         ${entrantsRemaining != null ? `
           <div style="font-size:13px;">${pct}% of the field still alive -- ${remaining} / ${total} entrants (from your pasted pool list below).</div>
