@@ -489,6 +489,27 @@ const TEAM_COLORS = {
   SEA:['#002244','#69BE28'], SF:['#AA0000','#B3995D'], TB:['#A71930','#322F2B'],
   TEN:['#4495D2','#D50A0A'], WAS:['#5A1414','#FFB612'],
 };
+// Full team name -> abbreviation, for parsing pool-site exports (Yahoo/Splash/etc. list the
+// full name, not the abbreviation) straight into the survivor/pick'em pool-picks importers.
+const TEAM_FULL_NAME_TO_ABBR = {
+  'arizona cardinals':'ARI', 'atlanta falcons':'ATL', 'baltimore ravens':'BAL',
+  'buffalo bills':'BUF', 'carolina panthers':'CAR', 'chicago bears':'CHI',
+  'cincinnati bengals':'CIN', 'cleveland browns':'CLE', 'dallas cowboys':'DAL',
+  'denver broncos':'DEN', 'detroit lions':'DET', 'green bay packers':'GB',
+  'houston texans':'HOU', 'indianapolis colts':'IND', 'jacksonville jaguars':'JAX',
+  'kansas city chiefs':'KC', 'los angeles rams':'LA', 'los angeles chargers':'LAC',
+  'las vegas raiders':'LV', 'miami dolphins':'MIA', 'minnesota vikings':'MIN',
+  'new england patriots':'NE', 'new orleans saints':'NO', 'new york giants':'NYG',
+  'new york jets':'NYJ', 'philadelphia eagles':'PHI', 'pittsburgh steelers':'PIT',
+  'seattle seahawks':'SEA', 'san francisco 49ers':'SF', 'tampa bay buccaneers':'TB',
+  'tennessee titans':'TEN', 'washington commanders':'WAS', 'washington football team':'WAS',
+};
+function teamAbbrFromAnyName(s){
+  const t = (s||'').trim();
+  if(TEAM_COLORS[t.toUpperCase()]) return t.toUpperCase();
+  return TEAM_FULL_NAME_TO_ABBR[t.toLowerCase()] || null;
+}
+
 function logoImg(abbr, size){
   const c = TEAM_COLORS[abbr];
   if(!c) return '';
@@ -2839,22 +2860,58 @@ function removeSurvivorEntrant(name){
 function getSurvivorPoolPicks(){
   return getState('survivor_pool_picks', {});
 }
+// Parses either format pasted into the box:
+//  1. Manual: one line per entrant, "Name: TEAM" (abbreviation).
+//  2. Straight copy-paste of a pool site's picks table (Name / Full Team Name / "NN.NN%" /
+//     [Strikes], each its own line after copy-paste flattens the table) -- detected by scanning
+//     for a line that looks like a percentage and reading the two lines before it as team+name.
+//     Column order can vary by site, so both [name, team, pct] and [team, name, pct] are tried.
+function parseSurvivorPoolPasteText(text){
+  const rawLines = text.split('\n').map(s=>s.trim()).filter(Boolean);
+  const picks = {}; // name -> abbr
+  const skipped = [];
+  const hasPctLine = rawLines.some(l => /^\d+(\.\d+)?%$/.test(l));
+
+  if(!hasPctLine){
+    // Manual "Name: TEAM" format.
+    rawLines.forEach(line => {
+      const idx = line.indexOf(':');
+      if(idx === -1){ skipped.push(line); return; }
+      const name = line.slice(0, idx).trim();
+      const team = teamAbbrFromAnyName(line.slice(idx+1));
+      if(!name || !team){ skipped.push(line); return; }
+      picks[name] = team;
+    });
+    return {picks, skipped};
+  }
+
+  // Pool-site table paste: skip a header row, then anchor on each percentage line and read
+  // the two lines immediately before it (in whichever order is name-then-team or team-then-name).
+  const lines = rawLines.filter(l => !/^pick set\b/i.test(l) && !/%\s*users\s*picked/i.test(l));
+  for(let i=0;i<lines.length;i++){
+    if(!/^\d+(\.\d+)?%$/.test(lines[i])) continue;
+    const a = lines[i-2], b = lines[i-1];
+    if(a==null || b==null) continue;
+    const teamFromB = teamAbbrFromAnyName(b), teamFromA = teamAbbrFromAnyName(a);
+    let name, team;
+    if(teamFromB){ name = a; team = teamFromB; }
+    else if(teamFromA){ name = b; team = teamFromA; }
+    else { skipped.push(`${a} / ${b} / ${lines[i]}`); continue; }
+    if(!name || TEAM_COLORS[name.toUpperCase()]){ skipped.push(`${a} / ${b} / ${lines[i]}`); continue; }
+    picks[name] = team;
+  }
+  return {picks, skipped};
+}
+
 function importSurvivorPoolPicks(week){
   const ta = document.getElementById('survivor-poolpicks-paste');
   if(!ta) return;
-  const validTeams = new Set(Object.keys(TEAM_COLORS));
-  const lines = ta.value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const {picks: parsed, skipped} = parseSurvivorPoolPasteText(ta.value);
   const picks = getSurvivorPoolPicks();
   const weekPicks = {...(picks[week]||{})};
   const entrants = getSurvivorEntrants();
   const existingNames = new Set(entrants.map(e=>e.name.toLowerCase()));
-  const skipped = [];
-  lines.forEach(line => {
-    const idx = line.indexOf(':');
-    if(idx === -1){ skipped.push(line); return; }
-    const name = line.slice(0, idx).trim();
-    const team = line.slice(idx+1).trim().toUpperCase();
-    if(!name || !validTeams.has(team)){ skipped.push(line); return; }
+  Object.entries(parsed).forEach(([name, team]) => {
     weekPicks[name] = team;
     if(!existingNames.has(name.toLowerCase())){
       entrants.push({name, strikes:0});
@@ -2865,8 +2922,11 @@ function importSurvivorPoolPicks(week){
   setState('survivor_pool_picks', picks);
   setSurvivorEntrants(entrants);
   ta.value = '';
+  const added = Object.keys(parsed).length;
   if(skipped.length){
-    alert(`Added ${lines.length-skipped.length} pick(s). Skipped ${skipped.length} line(s) -- expected "Name: TEAM" with a real team abbreviation:\n\n${skipped.join('\n')}`);
+    alert(`Added ${added} pick(s). Skipped ${skipped.length} line(s) -- couldn't match a real team:\n\n${skipped.join('\n')}`);
+  } else if(added === 0){
+    alert("Didn't recognize that format -- expected either \"Name: TEAM\" per line, or a straight copy-paste of a pool site's picks table (name, full team name, and a percentage).");
   }
   renderSurvivor();
 }
@@ -2899,10 +2959,11 @@ function renderSurvivorPoolPicks(week){
     .map(([t,s]) => `<span class="status-pill" style="margin:2px 4px 2px 0;">${logoImg(t,14)} ${t} &middot; ${s.count}/${total} (${s.pct.toFixed(0)}%)</span>`).join('');
   el.innerHTML = `
     <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
-      Paste this week's picks from your pool (one per line, "Name: TEAM" -- read straight off a Yahoo screenshot).
-      Matches against your entrant list above by name, adding anyone new automatically. This drives the "Your Pool %"
-      column and leverage read on the board below -- a real 43-person read beats a generic national percentage for
-      deciding whether to pivot off the crowd.
+      Paste this week's picks from your pool -- either a straight copy-paste of your pool site's picks table
+      (name, full team name, and a percentage, however that flattens when copied) or, manually, one line per
+      entrant as "Name: TEAM". Matches against your entrant list above by name, adding anyone new automatically.
+      This drives the "Your Pool %" column and leverage read on the board below -- a real pool-specific read
+      beats a generic national percentage for deciding whether to pivot off the crowd.
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px;">
       <textarea id="survivor-poolpicks-paste" placeholder="$$$D-Love's Picks$$$: KC&#10;Armando's Picks: PHI&#10;Benton's: DAL" style="flex:1;min-width:220px;min-height:70px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
