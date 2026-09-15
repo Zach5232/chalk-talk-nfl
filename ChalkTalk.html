@@ -2249,6 +2249,10 @@ function openTeamDetail(team){
     <div class="weather-box">
       <span class="wx-item"><b style="color:${r.overall_pts>0?'var(--gold)':'var(--alert)'}">${r.overall_pts>0?'+':''}${r.overall_pts}</b> pts vs. league average</span>
     </div>
+    ${(TEAM_PLAYERS[team] && TEAM_PLAYERS[team].qb_change) ? `
+    <div class="empty-note" style="border:1px solid var(--alert);color:var(--alert);padding:8px 10px;border-radius:8px;margin-top:8px;font-size:12px;">
+      &#9888; QB change: started ${TEAM_PLAYERS[team].prior_qb} last season, now starting ${TEAM_PLAYERS[team].qb}. This rating is a team-level stat with no concept of "who's the QB" -- it's still largely running on last season's carryover prior this early, so it may understate a real personnel downgrade (or overstate an upgrade) until more real games with the new starter accumulate.
+    </div>` : ''}
 
     <div class="section-label">What goes into it</div>
     <table class="compare-table">

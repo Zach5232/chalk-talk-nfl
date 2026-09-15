@@ -796,6 +796,20 @@ def build_team_top_players(pbp_paths_and_seasons, min_carries=5, min_targets=3):
 
         qb_pool = tp[(tp.play_type == "pass") & tp.passer.notna()]
         qb = qb_pool.passer.value_counts().idxmax() if len(qb_pool) else None
+
+        # Real QB-change flag: compares this season's real starter against the prior real
+        # season's -- e.g. Seattle's team RATING doesn't know Darnold->Lock happened (it's a
+        # team-level stat with no player identity at all, and it's still mostly running on last
+        # season's carryover prior this early), so this is a cheap, honest way to flag "the
+        # rating above may be stale for personnel reasons" using data already loaded here,
+        # rather than pretending the model itself accounts for it.
+        prior_seasons = tp_all[tp_all.season < latest_season].season
+        prior_qb = None
+        if len(prior_seasons):
+            prior_season = prior_seasons.max()
+            prior_pool = tp_all[(tp_all.season == prior_season) & (tp_all.play_type == "pass") & tp_all.passer.notna()]
+            prior_qb = prior_pool.passer.value_counts().idxmax() if len(prior_pool) else None
+        qb_change = bool(qb and prior_qb and qb != prior_qb)
         # Every real passer this team has used this season -- excluded from "top rusher"/"top
         # receiver" below. Without this, a QB's scramble EPA (small sample, often garbage-time/
         # broken-play) can look like an elite rushing season and wrongly surface as the team's
@@ -827,7 +841,8 @@ def build_team_top_players(pbp_paths_and_seasons, min_carries=5, min_targets=3):
         hit_rate = round(float(pass_pool.qb_hit.sum()) / n_pass, 3) if n_pass else None
 
         out[team] = {"qb": qb, "top_rusher": top_rusher, "top_receiver": top_receiver,
-                     "sack_rate": sack_rate, "hit_rate": hit_rate}
+                     "sack_rate": sack_rate, "hit_rate": hit_rate,
+                     "qb_change": qb_change, "prior_qb": prior_qb}
     return out
 
 def _fetch_stats_player_reg(yr):
