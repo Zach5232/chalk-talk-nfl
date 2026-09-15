@@ -766,14 +766,18 @@ def build_rusher_epa(pbp_paths_and_seasons, min_carries=30):
     weekly = allp.groupby(["rusher","season","week"]).agg(rush_epa=("epa","mean"), carries=("epa","size")).reset_index()
     return lb, weekly
 
-def build_team_top_players(pbp_paths_and_seasons, min_carries=15, min_targets=10):
-    """Per-team snapshot: current-ish starting QB (most pass attempts for that team in the
-    MOST RECENT season present in pbp_paths_and_seasons -- a real but imperfect proxy; it
-    reflects who started last, not necessarily who's QB1 today if there's been an offseason
-    change nflverse pbp can't see yet), top rusher by rush EPA/play, top receiver by YAC-over-
-    expected, and team pass-block context (sack rate, QB-hit rate, both as a fraction of real
-    dropbacks). All real, all from real play-by-play -- no fabricated numbers, but every field
-    here is a season-to-date/last-season snapshot, not a live depth chart."""
+def build_team_top_players(pbp_paths_and_seasons, min_carries=5, min_targets=3):
+    """Per-team snapshot: current-ish starting QB, top rusher by rush EPA/play, top receiver by
+    YAC-over-expected, and team pass-block context (sack rate, QB-hit rate, both as a fraction
+    of real dropbacks) -- ALL of it restricted to the most recent real season present in
+    pbp_paths_and_seasons, not blended across multiple seasons. That used to only be true for
+    the QB pick; rusher/receiver/sack-rate pooled every season in the window together, which
+    meant a full prior season's real production could keep crediting a player to a team he'd
+    since been traded away from, since a whole season's sample usually beats a handful of real
+    games for whoever actually has the job now (caught for real: a just-traded RB still shown
+    as his old team's top receiver after a big Week 1 for his new one). min_carries/min_targets
+    are deliberately modest (not scaled to a full season) so a real Week 1 alone already
+    produces a real, current answer instead of coming back empty until enough weeks pile up."""
     cols = ["posteam","passer","rusher","receiver","epa","yards_after_catch","xyac_mean_yardage",
             "play_type","season_type","complete_pass","sack","qb_hit"]
     frames = []
@@ -786,16 +790,17 @@ def build_team_top_players(pbp_paths_and_seasons, min_carries=15, min_targets=10
 
     out = {}
     for team in sorted(allp.posteam.dropna().unique()):
-        tp = allp[allp.posteam == team]
-        latest_season = tp.season.max()
+        tp_all = allp[allp.posteam == team]
+        latest_season = tp_all.season.max()
+        tp = tp_all[tp_all.season == latest_season]  # current season only, no prior-season blend
 
-        qb_pool = tp[(tp.season == latest_season) & (tp.play_type == "pass") & tp.passer.notna()]
+        qb_pool = tp[(tp.play_type == "pass") & tp.passer.notna()]
         qb = qb_pool.passer.value_counts().idxmax() if len(qb_pool) else None
-        # Every real passer this team has used, across all seasons in the window -- excluded
-        # from "top rusher"/"top receiver" below. Without this, a QB's scramble EPA (small
-        # sample, often garbage-time/broken-play) can look like an elite rushing season and
-        # wrongly surface as the team's top rusher (caught this for real: J.Flacco was coming
-        # back as CIN's "top rusher" off a handful of scrambles before this filter).
+        # Every real passer this team has used this season -- excluded from "top rusher"/"top
+        # receiver" below. Without this, a QB's scramble EPA (small sample, often garbage-time/
+        # broken-play) can look like an elite rushing season and wrongly surface as the team's
+        # top rusher (caught this for real: J.Flacco was coming back as CIN's "top rusher" off
+        # a handful of scrambles before this filter).
         team_passers = set(tp[tp.play_type == "pass"].passer.dropna().unique())
 
         rush_pool = tp[(tp.play_type == "run") & tp.rusher.notna() & ~tp.rusher.isin(team_passers)]
