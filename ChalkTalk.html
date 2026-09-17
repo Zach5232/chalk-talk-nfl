@@ -244,17 +244,14 @@
     <div class="section-label">Offense vs. Defense Landscape</div>
     <div class="dash-card" id="dash-quadrant"></div>
 
-    <div class="section-label">Rating Trend</div>
+    <div class="section-label">Team Movement &middot; season so far</div>
     <div class="dash-card">
-      <select class="dash-chart-select" id="dash-team-select" onchange="renderTrendChart(this.value, document.getElementById('dash-component-select').value)"></select>
-      <select class="dash-chart-select" id="dash-component-select" onchange="renderTrendChart(document.getElementById('dash-team-select').value, this.value)">
-        <option value="overall_pts">Overall</option>
-        <option value="off_pts">Offense</option>
-        <option value="def_pts">Defense</option>
-        <option value="st_pts">Special Teams</option>
-        <option value="havoc_pts">Havoc Rate</option>
-      </select>
-      <div id="dash-chart"></div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;">
+        <input type="range" id="movement-week-slider" min="1" max="1" value="1" step="1" style="flex:1;min-width:140px;" oninput="renderMovementChart(this.value)">
+        <b id="movement-week-label" style="font-size:13px;min-width:56px;text-align:right;">Week 1</b>
+      </div>
+      <div style="font-size:11px;color:var(--sage);margin-bottom:12px;">Drag to see every team's overall rating move week by week. The scale is fixed for the whole season, so a slide left or right means the same thing no matter which week you're on.</div>
+      <div id="movement-chart"></div>
     </div>
 
     <div class="section-label">All Teams at a Glance</div>
@@ -4083,7 +4080,7 @@ function renderLineChart(targetId, points, opts){
 function renderDashboard(){
   renderDashNotable();
   renderDashQuadrant();
-  populateTrendSelect();
+  initMovementChart();
   renderTeamSparkGrid();
 }
 
@@ -4217,27 +4214,67 @@ function renderHavocScatter(){
   });
 }
 
-function populateTrendSelect(){
-  const sel = document.getElementById('dash-team-select');
-  const teamsWithHistory = Object.keys(RATING_HISTORY);
-  if(teamsWithHistory.length === 0){
-    sel.innerHTML = '<option>No history yet</option>';
-    document.getElementById('dash-chart').innerHTML = '<div class="empty-note">Week-by-week trend data will appear here once the weekly pipeline has run across a real season.</div>';
-    return;
-  }
-  sel.innerHTML = teamsWithHistory.map(t => `<option value="${t}">${t}</option>`).join('');
-  renderTrendChart(teamsWithHistory[0]);
+// ---- Team Movement: every team's overall rating, week by week, as a scrubbable slider
+// instead of one team at a time. Position = overall_pts on a FIXED scale (computed once from
+// every team's every real week so far) so a slide left/right at Week 3 means the exact same
+// magnitude as one at Week 15 -- not rescaled per-week, which would make movement misleading.
+// Row order is fixed to each team's latest real standing so rows don't reshuffle while you
+// scrub; only each team's horizontal position (and its logo marker) actually moves. ----
+function initMovementChart(){
+  const teams = Object.keys(RATING_HISTORY).filter(t => RATING_HISTORY[t] && RATING_HISTORY[t].length);
+  const slider = document.getElementById('movement-week-slider');
+  if(!slider) return;
+  const maxWeek = teams.length ? Math.max(...teams.map(t => Math.max(...RATING_HISTORY[t].map(p=>p.week)))) : 1;
+  slider.min = 1; slider.max = Math.max(maxWeek,1); slider.value = maxWeek;
+  slider.disabled = maxWeek <= 1;
+  renderMovementChart(maxWeek);
 }
 
-function renderTrendChart(team, component){
-  component = component || 'overall_pts';
-  const hist = RATING_HISTORY[team];
-  const el = document.getElementById('dash-chart');
-  if(!hist || hist.length === 0){ el.innerHTML = '<div class="empty-note">No history for this team yet.</div>'; return; }
-  el.innerHTML = '<div id="dash-chart-inner"></div><div style="text-align:center;font-size:12px;color:var(--sage);margin-top:4px;" id="dash-chart-caption"></div>';
-  renderLineChart('dash-chart-inner', hist.map(p => ({x: p.week, y: p[component]})), {xLabel:'W', color:'#5B9BF5'});
-  const labels = {overall_pts:'Overall rating', off_pts:'Offense', def_pts:'Defense', st_pts:'Special teams', havoc_pts:'Havoc rate'};
-  document.getElementById('dash-chart-caption').textContent = `${labels[component]} (points), by week`;
+function renderMovementChart(weekStr){
+  const week = parseInt(weekStr, 10);
+  const label = document.getElementById('movement-week-label');
+  if(label) label.textContent = `Week ${week}`;
+  const el = document.getElementById('movement-chart');
+  if(!el) return;
+
+  const teams = Object.keys(RATING_HISTORY).filter(t => RATING_HISTORY[t] && RATING_HISTORY[t].length);
+  if(teams.length === 0){
+    el.innerHTML = '<div class="empty-note">Week-by-week movement will appear here once the weekly pipeline has run across more of the season.</div>';
+    return;
+  }
+
+  let allVals = [];
+  teams.forEach(t => RATING_HISTORY[t].forEach(p => allVals.push(p.overall_pts)));
+  const min = Math.min(...allVals, 0), max = Math.max(...allVals, 0);
+  const range = (max - min) || 1;
+  const pctFor = v => Math.max(0, Math.min(100, ((v - min) / range) * 100));
+
+  const sortedTeams = [...teams].sort((a,b) => {
+    const ha = RATING_HISTORY[a], hb = RATING_HISTORY[b];
+    return hb[hb.length-1].overall_pts - ha[ha.length-1].overall_pts;
+  });
+
+  el.innerHTML = sortedTeams.map(t => {
+    const hist = RATING_HISTORY[t];
+    const atWeek = hist.find(p => p.week === week) || hist[hist.length-1];
+    const prevPoint = hist.find(p => p.week === week-1);
+    const val = atWeek.overall_pts;
+    const pct = pctFor(val);
+    const delta = prevPoint ? Math.round((val - prevPoint.overall_pts)*10)/10 : null;
+    const deltaStr = delta==null ? '' : (delta>0?'+':'') + delta.toFixed(1);
+    const deltaColor = delta==null ? 'var(--sage)' : delta>0.05 ? 'var(--good)' : delta<-0.05 ? 'var(--alert)' : 'var(--sage)';
+    return `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+      <div style="flex:0 0 58px;font-size:11px;font-weight:700;">${t}</div>
+      <div style="position:relative;flex:1;height:22px;background:var(--panel2);border-radius:11px;">
+        <div style="position:absolute;top:50%;left:${pct}%;transform:translate(-50%,-50%);transition:left 0.4s ease;">
+          ${logoImg(t,20)}
+        </div>
+      </div>
+      <div style="flex:0 0 42px;text-align:right;font-size:11.5px;font-weight:700;color:${val>=0?'var(--good)':'var(--alert)'};">${val>0?'+':''}${val.toFixed(1)}</div>
+      <div style="flex:0 0 38px;text-align:right;font-size:10.5px;color:${deltaColor};">${deltaStr}</div>
+    </div>`;
+  }).join('');
 }
 
 
