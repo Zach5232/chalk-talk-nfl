@@ -2860,10 +2860,12 @@ function renderPickemHelper(){
 // What we can honestly bring over vs. not:
 // - W%: we don't need to borrow this at all -- we already HAVE a real, backtested win
 //   probability table (the same EMPIRICAL_WIN_PROB curve used for cover probability
-//   elsewhere in this dashboard), and we can compute it from OUR OWN model's projected
-//   margin, not just the market's. Market win prob is shown alongside as the "outside"
-//   comparison, same pattern as ESPN's PPR ranks in Player Watch -- our number is the
-//   trusted baseline, market is the second opinion.
+//   elsewhere in this dashboard). UPDATED 2026-09-17: the real market line (when one
+//   exists for this week's game) is now the PRIMARY read, not our own model's -- since
+//   this session's own backtesting found no real edge for our model over the market, the
+//   market's number is the more trustworthy one for "real win probability" purposes.
+//   Our model's projection is kept only as the season-long fallback for future weeks,
+//   where no real market line exists yet to use instead.
 // - P%: this is real aggregated crowd data from many actual survivor pools -- we have no
 //   way to generate that ourselves, and scraping survivorgrid isn't something to build
 //   against. Instead: a manual input field per team, so you punch in that week's P% from
@@ -3275,34 +3277,47 @@ function hungarianSolve(costMatrix){
   return assignment;
 }
 
-// Snapshot (2026-09-08) of survivorgrid.com's real schedule+spread grid, extracted and
-// cross-validated (all 576 team-weeks checked for internal consistency -- zero discrepancies).
-// The SCHEDULE data is a one-time snapshot (you explicitly didn't want a weekly re-upload
-// chore) and won't reflect real line movement as the season goes -- but the PATH computed from
-// it is genuinely dynamic: every time this renders, it re-solves excluding teams you've already
-// used (getSurvivorUsed()) and weeks that have already passed, via the real Hungarian assignment
-// above -- not a static list. win_prob per team-week uses OUR OWN empirical curve (same one used
-// everywhere else in this file) applied to survivorgrid's real spread.
-// Real limitations, stated plainly: (1) the underlying lines are Week 1 futures -- early, soft,
-// will move a lot as each real week approaches, so treat far-out weeks as rough shape, not
-// gospel; (2) it optimizes raw win probability only, NOT pool popularity/leverage -- several
-// picks lean on weak future opponents like ARI, exactly the kind of chalky value your whole pool
-// will also be on.
-function computeDynamicOptimalPath(snap, currentWeek){
-  const used = new Set(getSurvivorUsed());
-  const teams = Object.keys(snap.schedule).filter(t => !used.has(t));
-  const weekIdxs = [];
-  for(let wk = currentWeek; wk <= 18; wk++) weekIdxs.push(wk - 1);
-  if(teams.length === 0 || weekIdxs.length === 0) return [];
+// ---- Live, continuously-updating full-season schedule/win-prob for one team -- replaces the
+// old one-time survivorgrid.com paste entirely. Same math as bestRemainingWeek() elsewhere in
+// this file (our own current ratings projected against the real 2026 schedule, run through the
+// same backtested empirical win-probability curve), so Optimal Path/Season Planner never again
+// need a manual weekly re-paste to stay current -- they move automatically as ratings update.
+function liveTeamSeasonSchedule(team){
+  function ratingFor(t){ return RATINGS.find(r=>r.team===t); }
+  function projectHomeFavoredPts(home, away){
+    const h = ratingFor(home), a = ratingFor(away);
+    if(!h || !a) return null;
+    return (h.off_pts - a.def_pts) - (a.off_pts - h.def_pts);
+  }
+  const byWeek = {};
+  FULL_SCHEDULE.filter(g => g.home===team || g.away===team).forEach(g => {
+    const isHome = g.home === team;
+    const opp = isHome ? g.away : g.home;
+    const homeFavored = projectHomeFavoredPts(g.home, g.away);
+    if(homeFavored == null) return;
+    const spread = isHome ? -homeFavored : homeFavored; // team's own spread, negative = favored
+    const win_prob = empiricalWinProb(isHome ? homeFavored : -homeFavored);
+    byWeek[g.week] = {opp, away: !isHome, spread, win_prob, neutral: !!g.neutral};
+  });
+  return byWeek; // {weekNumber: {...}}; a real BYE week is simply absent, same as before
+}
 
-  const n = Math.max(teams.length, weekIdxs.length);
+function computeLiveOptimalPath(currentWeek){
+  const used = new Set(getSurvivorUsed());
+  const teams = RATINGS.map(r=>r.team).filter(t => !used.has(t));
+  const schedules = {}; teams.forEach(t => { schedules[t] = liveTeamSeasonSchedule(t); });
+  const weeks = [];
+  for(let wk = currentWeek; wk <= 18; wk++) weeks.push(wk);
+  if(teams.length === 0 || weeks.length === 0) return [];
+
+  const n = Math.max(teams.length, weeks.length);
   const BIG = 1e6;
   const cost = [];
   for(let i=0;i<n;i++){
     const row = new Array(n).fill(0);
     if(i < teams.length){
-      weekIdxs.forEach((wkIdx, col) => {
-        const g = snap.schedule[teams[i]][wkIdx];
+      weeks.forEach((wk, col) => {
+        const g = schedules[teams[i]][wk];
         row[col] = g ? -Math.log(g.win_prob) : BIG;
       });
     }
@@ -3312,10 +3327,10 @@ function computeDynamicOptimalPath(snap, currentWeek){
   const path = [];
   for(let i=0;i<teams.length;i++){
     const col = assignment[i];
-    if(col < weekIdxs.length){
-      const wkIdx = weekIdxs[col];
-      const g = snap.schedule[teams[i]][wkIdx];
-      if(g) path.push({week: wkIdx+1, team: teams[i], opp: g.opp, away: g.away, spread: g.spread, win_prob: g.win_prob});
+    if(col < weeks.length){
+      const wk = weeks[col];
+      const g = schedules[teams[i]][wk];
+      if(g) path.push({week: wk, team: teams[i], opp: g.opp, away: g.away, spread: g.spread, win_prob: g.win_prob});
     }
   }
   path.sort((a,b) => a.week - b.week);
@@ -3325,21 +3340,18 @@ function computeDynamicOptimalPath(snap, currentWeek){
 function renderSurvivorOptimalPath(){
   const el = document.getElementById('survivor-optimal-path');
   if(!el) return;
-  const snap = getState('survivorgrid_snapshot', null);
-  if(!snap){
-    el.innerHTML = '<div class="empty-note">No snapshot loaded yet.</div>';
-    return;
-  }
   const currentWeek = GAMES && GAMES.length ? GAMES[0].week : 1;
-  const path = computeDynamicOptimalPath(snap, currentWeek);
+  const path = computeLiveOptimalPath(currentWeek);
   el.innerHTML = `
     <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
-      Recomputed live from a schedule/spread snapshot captured ${snap.captured_at} -- ${snap.note}
-      This is the mathematically optimal path from Week ${currentWeek} on (maximizes your odds of
-      surviving the REST of the season), excluding every team you've already used. It optimizes
-      raw win probability only, not pool popularity -- several picks lean on weak future opponents
-      like ARI, exactly the kind of chalky value your whole pool will also be on. Treat it as a
-      season-shape reference, not a script to follow blindly.
+      Computed live from our own current ratings against the real 2026 schedule -- no manual
+      snapshot to keep re-pasting, this updates on its own as ratings change. This is the
+      mathematically optimal path from Week ${currentWeek} on (maximizes your odds of surviving
+      the REST of the season), excluding every team you've already used. It optimizes raw win
+      probability only, not pool popularity -- several picks may lean on weak future opponents,
+      exactly the kind of chalky value your whole pool will also be on. Treat it as a
+      season-shape reference, not a script to follow blindly -- ratings are still early-season
+      and will sharpen as more real games accumulate.
     </div>
     ${path.length===0 ? '<div class="empty-note">No remaining weeks/teams to plan.</div>' : `
     <div class="table-wrap">
@@ -3358,9 +3370,9 @@ function renderSurvivorOptimalPath(){
     </div>`}`;
 }
 
-// ---- Season Planner: every team's full remaining-season schedule side by side, matching
-// survivorgrid's own grid view. Same snapshot data as the optimal path above -- this is the
-// "look at everything yourself" companion to the "just tell me the optimal path" tool.
+// ---- Season Planner: every team's full remaining-season schedule side by side. Same live
+// data as the optimal path above -- the "look at everything yourself" companion to the "just
+// tell me the optimal path" tool.
 let seasonPlannerExpanded = false;
 function toggleSeasonPlannerExpanded(){
   seasonPlannerExpanded = !seasonPlannerExpanded;
@@ -3373,31 +3385,29 @@ function toggleSeasonPlannerExpanded(){
 function renderSurvivorSeasonPlanner(){
   const el = document.getElementById('survivor-season-planner');
   if(!el) return;
-  const snap = getState('survivorgrid_snapshot', null);
-  if(!snap){
-    el.innerHTML = '<div class="empty-note">No snapshot loaded yet.</div>';
-    return;
-  }
   const currentWeek = GAMES && GAMES.length ? GAMES[0].week : 1;
   const used = new Set(getSurvivorUsed());
-  const teams = Object.keys(snap.schedule).sort();
+  const teams = RATINGS.map(r=>r.team).sort();
   const weekIdxs = [];
-  for(let wk = currentWeek; wk <= 18; wk++) weekIdxs.push(wk - 1);
+  for(let wk = currentWeek; wk <= 18; wk++) weekIdxs.push(wk);
   el.innerHTML = `
     <div class="table-wrap">
     <table class="rank" style="min-width:${140 + weekIdxs.length*74}px;">
-      <thead><tr><th>Team</th>${weekIdxs.map(wk => `<th>Wk ${wk+1}</th>`).join('')}</tr></thead>
+      <thead><tr><th>Team</th>${weekIdxs.map(wk => `<th>Wk ${wk}</th>`).join('')}</tr></thead>
       <tbody>
-        ${teams.map(team => `
+        ${teams.map(team => {
+          const sched = liveTeamSeasonSchedule(team);
+          return `
         <tr style="${used.has(team)?'opacity:0.4;':''}">
           <td>${logoImg(team,16)}${team}</td>
-          ${weekIdxs.map(wkIdx => {
-            const g = snap.schedule[team][wkIdx];
+          ${weekIdxs.map(wk => {
+            const g = sched[wk];
             if(!g) return '<td style="color:var(--sage);">BYE</td>';
             const favored = g.spread < 0;
             return `<td style="font-size:11px;${favored?'color:var(--good);':'color:var(--sage);'}">${g.away?'@':''}${g.opp}<br>${g.spread>0?'+':''}${g.spread.toFixed(1)}</td>`;
           }).join('')}
-        </tr>`).join('')}
+        </tr>`;
+        }).join('')}
       </tbody>
     </table>
     </div>`;
@@ -3495,7 +3505,7 @@ function renderSurvivor(){
     return;
   }
 
-  noteEl.innerHTML = "<b>Leverage is your EV% read</b> -- our own win probability minus your pool's real pick%, both real inputs (not simulated): W% is our backtested model+market win-probability curve, and \"Your Pool %\" comes straight from what you paste in above (screenshots of your actual ~43-person pool's picks) -- no national survivorgrid.com number anymore, since that required manual upkeep every week and was never kept current. Leverage only shows once you've pasted that week's pool picks. A team with high win probability that few in YOUR pool are on is exactly the leveraged spot survivor strategy is built around: if the crowd's team loses, most of your pool goes with it, and being the one who pivoted is worth more than just riding the statistically-best team. \"Future Look\" answers \"should I save this team\" -- it's entirely our own computation (not from survivorgrid or anywhere else): it projects every remaining game on the real 2026 schedule using CURRENT ratings held flat (not a full week-by-week re-simulation), so treat it as a rough guide that sharpens as the season updates ratings, not a certainty.";
+  noteEl.innerHTML = "<b>Leverage is your EV% read</b> -- real win probability minus your pool's real pick%, both real inputs (not simulated). Win probability prefers <b>Market Win%</b> whenever a real line exists for this week's game (the actual live spread run through our backtested empirical win-probability curve -- the market itself is the best real read we have, not our own model's opinion of it), falling back to Model Win% only when no line has posted yet. \"Your Pool %\" comes straight from what you paste in above (screenshots of your actual pool's picks) -- no national survivorgrid.com number anymore, since that required manual upkeep every week and was never kept current. Leverage only shows once you've pasted that week's pool picks. A team with high win probability that few in YOUR pool are on is exactly the leveraged spot survivor strategy is built around: if the crowd's team loses, most of your pool goes with it, and being the one who pivoted is worth more than just riding the statistically-best team. \"Future Look\" and \"Optimal Season Path\" below answer \"should I save this team\" -- entirely our own live computation (no survivorgrid dependency anywhere anymore): they project every remaining game on the real 2026 schedule using CURRENT ratings held flat (not a full week-by-week re-simulation, and no real market line exists that far out anyway), so treat them as a rough guide that sharpens as the season updates ratings, not a certainty.";
 
   function ratingFor(team){ return RATINGS.find(r=>r.team===team); }
   function projectHomeFavoredPts(home, away){
@@ -3535,24 +3545,30 @@ function renderSurvivor(){
       // Doesn't block the pick itself: survivor only needs a real winner, not a spread, and
       // leverage below is computed from ourWP + pool/national pick%, not marketWP.
       const marketWP = t.marketFav != null ? empiricalWinProb(t.marketFav) : null;
+      // Real market odds beat our own model's projection when a line actually exists --
+      // that's the whole reason a "Market Win%" column exists at all. bestWP is what actually
+      // drives leverage/sorting; ourWP is kept only as the season-long fallback (Future
+      // Look/Optimal Path already use it exclusively, since no market line exists yet for a
+      // future week).
+      const bestWP = marketWP != null ? marketWP : ourWP;
       const pool = poolStats[t.team]; // real read from your own pool's pasted picks, if any this week
       // Leverage is now pool-only -- the survivorgrid.com national P% required manual entry
       // every week (never actually kept up), and survivorgrid has no public API to pull it
       // automatically, so it's gone rather than sit there unused. Your own pool's real pasted
       // picks (poolStats) is the one real crowd-pick number available here.
-      const leverage = pool ? ourWP - (pool.pct/100) : null;
+      const leverage = pool ? bestWP - (pool.pct/100) : null;
       const future = bestRemainingWeek(t.team);
-      rows.push({...t, ourWP, marketWP, pool, leverage, future});
+      rows.push({...t, ourWP, marketWP, bestWP, pool, leverage, future});
     });
   });
-  rows.sort((a,b) => (b.leverage ?? b.ourWP) - (a.leverage ?? a.ourWP));
+  rows.sort((a,b) => (b.leverage ?? b.bestWP) - (a.leverage ?? a.bestWP));
 
   wrapEl.innerHTML = `
     <div class="dash-card">
     ${lockedTeam ? `<div style="font-size:12.5px;margin-bottom:10px;">Currently locked for Week ${currentWeek}: <b>${logoImg(lockedTeam,16)}${lockedTeam}</b> <button class="btn" style="padding:3px 8px;font-size:10.5px;margin-left:6px;" onclick="unlockSurvivorPick(${currentWeek})">Unlock</button></div>` : ''}
     <div class="table-wrap">
     <table class="rank">
-      <thead><tr><th>Team</th><th>Matchup</th><th>Our Win%</th><th>Market Win%</th><th>Your Pool %</th><th>Leverage (EV%)</th><th>Future Look</th><th></th></tr></thead>
+      <thead><tr><th>Team</th><th>Matchup</th><th>Market Win%</th><th>Model Win%</th><th>Your Pool %</th><th>Leverage (EV%)</th><th>Future Look</th><th></th></tr></thead>
       <tbody>
         ${rows.map(r => {
           let futureCell = '&mdash;';
@@ -3567,8 +3583,8 @@ function renderSurvivor(){
         <tr>
           <td>${logoImg(r.team,20)}${r.team}</td>
           <td style="color:var(--sage);">${r.atOrVs} ${r.opp}</td>
-          <td>${(r.ourWP*100).toFixed(0)}%</td>
-          <td style="color:var(--sage);">${r.marketWP!=null ? (r.marketWP*100).toFixed(0)+'%' : '&mdash;'}</td>
+          <td>${r.marketWP!=null ? `<b>${(r.marketWP*100).toFixed(0)}%</b>` : '<span style="color:var(--sage);">no line yet</span>'}</td>
+          <td style="color:var(--sage);">${(r.ourWP*100).toFixed(0)}%</td>
           <td>${r.pool ? `<b>${r.pool.count}</b> <span style="color:var(--sage);">(${r.pool.pct.toFixed(0)}%)</span>` : '<span style="color:var(--sage);">no data</span>'}</td>
           <td>${r.leverage!=null ? `<b style="color:${r.leverage>=0?'var(--good)':'var(--alert)'};">${r.leverage>=0?'+':''}${(r.leverage*100).toFixed(0)}</b>` : '&mdash;'}</td>
           <td style="font-size:11.5px;">${futureCell}</td>
