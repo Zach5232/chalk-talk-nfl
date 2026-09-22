@@ -260,7 +260,7 @@
   </div>
 
   <div id="view-week" class="view">
-    <div class="section-label">Spread Zone &middot; Week 1, 2026</div>
+    <div class="section-label" id="spread-zone-label">Spread Zone &middot; Week 1, 2026</div>
     <div id="games-list"></div>
   </div>
 
@@ -284,7 +284,7 @@
   </div>
 
   <div id="view-ranks" class="view">
-    <div class="section-label">The Margin &middot; heading into Week 1</div>
+    <div class="section-label" id="margin-heading-label">The Margin &middot; heading into Week 1</div>
     <div class="table-wrap">
       <table class="rank">
         <thead><tr><th>#</th><th>Team</th><th>Move</th><th>Overall</th><th>Off</th><th>Def</th><th>ST</th><th>Havoc</th></tr></thead>
@@ -4597,6 +4597,13 @@ async function boot(){
     const weekId = `${meta.season}-wk${meta.week}`;
     const footerWeekEl = document.getElementById('footer-week-note');
     if(footerWeekEl) footerWeekEl.textContent = `Week ${meta.week}`;
+    // These two were hardcoded "Week 1, 2026" in the markup from the initial preseason build
+    // and never got wired to the live week -- Spread Zone kept showing "Week 1" all season even
+    // though the games list underneath (and everything else) was already on the real live week.
+    const spreadZoneLabelEl = document.getElementById('spread-zone-label');
+    if(spreadZoneLabelEl) spreadZoneLabelEl.textContent = `Spread Zone · Week ${meta.week}, ${meta.season}`;
+    const marginLabelEl = document.getElementById('margin-heading-label');
+    if(marginLabelEl) marginLabelEl.textContent = `The Margin · heading into Week ${meta.week}`;
 
     const [ratingsSnap, historySnap, gamesSnap, booksSnap, weatherSnap, closingSnap,
            leaderboardsSnap, projSnap, rostersSnap, overridesSnap, stateSnap, underperfSnap,
