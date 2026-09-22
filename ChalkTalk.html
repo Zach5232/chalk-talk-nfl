@@ -2603,52 +2603,58 @@ function renderPickemPoolPicks(week){
 function getPickemStandings(){ return getState('pickem_standings', null); }
 function setPickemStandingsState(v){ setState('pickem_standings', v); }
 
-// Handles a straight copy-paste of a real pool-site standings page -- messy on purpose
-// (avatar-initial lines, a "You" marker only on your own row, an inconsistent extra
-// "Username · Entry N" line on at least one real row) rather than a clean, guessable format.
-// Anchors on the win-count line (a lone integer) and takes whatever real name line precedes
-// it, so it tolerates that mess instead of assuming a fixed number of lines per entrant.
+// Handles a straight copy-paste of the pool site's Standings -> Full Season page: a fixed,
+// regular 6-line group per entrant -- rank ("1", "T2", ...), a single-letter avatar initial,
+// the entrant handle (yours has " You" appended inline), a subtitle ("Entry #N", a real name,
+// or a repeat of the handle), PTS, and a W-L-T record -- separated by blank lines, with a
+// "RANK / ENTRANT / PTS / W-L-T" header up front. This already carries the season-to-date
+// total, so there's no addition to do here -- each paste just replaces the prior snapshot.
 function parsePickemStandingsPaste(text){
   const rawLines = text.split('\n').map(s=>s.trim()).filter(Boolean);
-
-  // "You" appears on its own line right after your real name -- note it before stripping.
-  let selfName = null;
-  for(let i=0;i<rawLines.length;i++){
-    if(/^you$/i.test(rawLines[i])){
-      for(let j=i-1;j>=0;j--){
-        const cand = rawLines[j];
-        if(!/^[a-z]$/i.test(cand) && !/^entry\s*\d+$/i.test(cand) && !/^you$/i.test(cand)){
-          selfName = cand.replace(/\s*[·•]\s*entry\s*\d+$/i, '').trim();
-          break;
-        }
-      }
-    }
-  }
-
-  const isNoise = l =>
-    /^entry$/i.test(l) || /^week\s*\d+/i.test(l) || /^week 1 live$/i.test(l) ||
-    l.toLowerCase().includes('no standing') || /^[a-z]$/i.test(l) ||
-    /^you$/i.test(l) || /^entry \d+$/i.test(l);
-
-  const cleaned = [];
-  for(const l of rawLines){
-    if(isNoise(l)) continue;
-    const m = l.match(/^(.*?)\s*[·•]\s*entry\s*\d+$/i);
-    const val = m ? m[1].trim() : l;
-    if(cleaned[cleaned.length-1] !== val) cleaned.push(val); // drop an immediate exact repeat
-  }
+  const norm = l => l.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const HEADER_TOKENS = new Set(['rank', 'entrant', 'pts', 'wlt']);
+  const lines = rawLines.filter(l => !HEADER_TOKENS.has(norm(l)));
 
   const standings = [], skipped = [];
+  let selfName = null;
   let i = 0;
-  while(i < cleaned.length){
-    const name = cleaned[i], next = cleaned[i+1];
-    if(next != null && /^\d+$/.test(next)){
-      standings.push({name, wins: parseInt(next, 10)});
-      i += 2;
-    } else {
-      skipped.push(name);
+  while(i < lines.length){
+    const rankLine = lines[i];
+    if(!/^t?\d+$/i.test(rankLine)){
+      // Not a rank line where one was expected -- skip just this one stray line rather than
+      // desyncing every entrant after it.
+      skipped.push(rankLine);
       i += 1;
+      continue;
     }
+    let j = i + 1;
+    if(j < lines.length && /^[a-z0-9]$/i.test(lines[j])) j += 1; // avatar-initial line, if present
+    const nameLine = lines[j];
+    const subtitleLine = lines[j+1];
+    const ptsLine = lines[j+2];
+    const wltLine = lines[j+3];
+    if(nameLine == null || ptsLine == null || !/^\d+$/.test(ptsLine)){
+      skipped.push(rankLine);
+      i += 1;
+      continue;
+    }
+    const isSelf = /\byou\b/i.test(nameLine);
+    const name = nameLine.replace(/\s*\byou\s*$/i, '').trim();
+    if(isSelf) selfName = name;
+    const wltMatch = wltLine && wltLine.match(/^(\d+)-(\d+)(?:-(\d+))?$/);
+    const realName = (subtitleLine && !/^entry\s*#?\d+$/i.test(subtitleLine) && subtitleLine !== name)
+      ? subtitleLine : null;
+    standings.push({
+      rank: parseInt(rankLine.replace(/^t/i, ''), 10),
+      rankLabel: rankLine,
+      name,
+      realName,
+      pts: parseInt(ptsLine, 10),
+      wins: wltMatch ? parseInt(wltMatch[1], 10) : parseInt(ptsLine, 10),
+      losses: wltMatch ? parseInt(wltMatch[2], 10) : null,
+      ties: (wltMatch && wltMatch[3]) ? parseInt(wltMatch[3], 10) : 0,
+    });
+    i = j + 4;
   }
   return {standings, skipped, selfName};
 }
@@ -2675,9 +2681,9 @@ function renderPickemStandings(){
   const data = getPickemStandings();
   const box = `
     <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
-      Paste your pool's standings page as-is (win totals, not per-game picks -- this is a
-      different export than the pool ATS picks above). Tells you your real place and who's
-      ahead; refreshed each time you paste a new snapshot.
+      Paste the pool's <b>Standings &rarr; Full Season</b> page as-is (rank, entrant, PTS, W-L-T)
+      -- it already carries the season-to-date total, so just re-paste it fresh each week rather
+      than the per-week Weekly Results tab; nothing needs to be added up on this end.
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px;">
       <textarea id="pickem-standings-paste" placeholder="Paste the standings page here..." style="flex:1;min-width:220px;min-height:70px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
@@ -2687,16 +2693,16 @@ function renderPickemStandings(){
     el.innerHTML = box + '<div class="empty-note">No standings loaded yet.</div>';
     return;
   }
-  const sorted = [...data.entries].sort((a,b)=>b.wins-a.wins);
+  const sorted = [...data.entries].sort((a,b)=>a.rank-b.rank);
   const selfIdx = data.selfName ? sorted.findIndex(s => s.name === data.selfName) : -1;
-  const leaderWins = sorted[0].wins;
+  const leaderPts = sorted[0].pts;
   let summary = '';
   if(selfIdx >= 0){
     const me = sorted[selfIdx];
-    const ahead = selfIdx; // count of entrants strictly ahead (sorted descending)
-    const gap = leaderWins - me.wins;
+    const ahead = sorted.filter(s => s.rank < me.rank).length; // handles ties correctly (T2, T4, ...)
+    const gap = leaderPts - me.pts;
     summary = `
-      <div style="font-size:14px;margin-bottom:6px;"><b>#${selfIdx+1} of ${sorted.length}</b> -- ${ahead} ${ahead===1?'person':'people'} ahead of you, ${gap===0?'tied for the lead':`${gap} win${gap===1?'':'s'} behind 1st`}.</div>
+      <div style="font-size:14px;margin-bottom:6px;"><b>${me.rankLabel} of ${sorted.length}</b> -- ${ahead} ${ahead===1?'person':'people'} ahead of you, ${gap===0?'tied for the lead':`${gap} point${gap===1?'':'s'} behind 1st`}.</div>
       <div style="font-size:12px;color:var(--sage);margin-bottom:12px;">
         ${gap===0
           ? "You're leading (or tied) -- favor the model's safest, highest-confidence picks to protect your spot."
@@ -2708,10 +2714,13 @@ function renderPickemStandings(){
   el.innerHTML = box + summary + `
     <div class="table-wrap">
       <table class="rank">
-        <thead><tr><th>#</th><th>Entrant</th><th>Wins</th></tr></thead>
+        <thead><tr><th>#</th><th>Entrant</th><th>PTS</th><th>W-L-T</th></tr></thead>
         <tbody>
-          ${sorted.map((s,idx) => `<tr style="${s.name===data.selfName?'font-weight:700;color:var(--gold);':''}">
-            <td>${idx+1}</td><td>${s.name}${s.name===data.selfName?' (you)':''}</td><td>${s.wins}</td>
+          ${sorted.map(s => `<tr style="${s.name===data.selfName?'font-weight:700;color:var(--gold);':''}">
+            <td>${s.rankLabel}</td>
+            <td>${s.name}${s.name===data.selfName?' (you)':''}${s.realName?` <span style="color:var(--sage);font-weight:400;">&middot; ${s.realName}</span>`:''}</td>
+            <td>${s.pts}</td>
+            <td>${s.losses!=null ? `${s.wins}-${s.losses}${s.ties?`-${s.ties}`:''}` : '&mdash;'}</td>
           </tr>`).join('')}
         </tbody>
       </table>
