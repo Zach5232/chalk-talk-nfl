@@ -3062,10 +3062,90 @@ function parseSurvivorPoolPasteText(text){
 function isSurvivorRosterLocked(){ return getState('survivor_roster_locked', true); }
 function setSurvivorRosterLocked(v){ setState('survivor_roster_locked', v); renderSurvivor(); }
 
+// A straight copy-paste of the pool site's "Group Picks" grid (a "Pick Set" header row, tab-
+// separated, then one row per entrant with a team abbreviation per week picked so far, "-" or
+// a genuinely blank cell for a week not yet reached) -- unlike the two formats above, this one
+// carries EVERY week's picks in a single paste, not just the current one, so it's detected and
+// routed separately: importing it fills in the whole season's picks-by-week at once.
+function parseSurvivorGroupPicksPaste(text){
+  const lines = text.split('\n').map(l => l.replace(/\r$/, ''));
+  const byWeek = {};
+  const skipped = [];
+  let sawHeader = false;
+  for(const line of lines){
+    if(!line.trim()) continue;
+    const cells = line.split('\t').map(c => c.trim());
+    if(cells.length < 2) continue;
+    if(/^pick set$/i.test(cells[0])){ sawHeader = true; continue; }
+    const name = cells[0];
+    if(!name || /^group picks$/i.test(name)) continue;
+    for(let w = 1; w < cells.length; w++){
+      const cell = cells[w];
+      if(!cell || cell === '-') continue; // no pick recorded for this week yet
+      const abbr = teamAbbrFromAnyName(cell);
+      if(!abbr){ skipped.push(`${name} wk${w}: "${cell}"`); continue; }
+      if(!byWeek[w]) byWeek[w] = {};
+      byWeek[w][name] = abbr;
+    }
+  }
+  return {byWeek, skipped, sawHeader};
+}
+function isSurvivorGroupPicksPaste(text){
+  return text.split('\n').some(l => {
+    const cells = l.split('\t');
+    return cells.length > 1 && /^pick set$/i.test(cells[0].trim());
+  });
+}
+
+function importSurvivorGroupPicks(text, ta){
+  const {byWeek, skipped, sawHeader} = parseSurvivorGroupPicksPaste(text);
+  const weeksFound = Object.keys(byWeek).map(Number).sort((a,b)=>a-b);
+  if(!sawHeader || weeksFound.length === 0){
+    alert("Didn't recognize the Group Picks grid -- expected a \"Pick Set\" header row followed by one tab-separated row per entrant.");
+    return;
+  }
+  const picks = getSurvivorPoolPicks();
+  const entrants = getSurvivorEntrants();
+  const existingNames = new Set(entrants.map(e=>e.name.toLowerCase()));
+  const locked = isSurvivorRosterLocked();
+  const unmatched = new Set();
+  let added = 0;
+  weeksFound.forEach(wk => {
+    const weekPicks = {...(picks[wk]||{})};
+    Object.entries(byWeek[wk]).forEach(([name, team]) => {
+      const isKnown = existingNames.has(name.toLowerCase());
+      if(!isKnown && locked){ unmatched.add(name); return; }
+      weekPicks[name] = team;
+      added++;
+      if(!isKnown){
+        entrants.push({name, strikes:0});
+        existingNames.add(name.toLowerCase());
+      }
+    });
+    picks[wk] = weekPicks;
+  });
+  setState('survivor_pool_picks', picks);
+  setSurvivorEntrants(entrants);
+  ta.value = '';
+  const notes = [];
+  if(skipped.length){
+    const shown = skipped.slice(0, 10).join('\n');
+    notes.push(`Skipped ${skipped.length} cell(s) -- couldn't match a real team:\n${shown}${skipped.length>10?`\n...and ${skipped.length-10} more`:''}`);
+  }
+  if(unmatched.size) notes.push(`Roster is locked, so ${unmatched.size} name(s) that don't match anyone already in the pool were NOT added (unlock below in Pool Entrants if one of these is a real new entrant):\n${[...unmatched].join(', ')}`);
+  alert(`Loaded ${added} pick(s) across Week${weeksFound.length===1?'':'s'} ${weeksFound.join(', ')}.` + (notes.length ? `\n\n${notes.join('\n\n')}` : ''));
+  renderSurvivor();
+}
+
 function importSurvivorPoolPicks(week){
   const ta = document.getElementById('survivor-poolpicks-paste');
   if(!ta) return;
-  const {picks: parsed, skipped} = parseSurvivorPoolPasteText(ta.value);
+  const text = ta.value;
+  if(isSurvivorGroupPicksPaste(text)){
+    importSurvivorGroupPicks(text, ta);
+    return;
+  }
+  const {picks: parsed, skipped} = parseSurvivorPoolPasteText(text);
   const picks = getSurvivorPoolPicks();
   const weekPicks = {...(picks[week]||{})};
   const entrants = getSurvivorEntrants();
@@ -3094,7 +3174,7 @@ function importSurvivorPoolPicks(week){
   if(skipped.length) notes.push(`Skipped ${skipped.length} line(s) -- couldn't match a real team:\n${skipped.join('\n')}`);
   if(unmatched.length) notes.push(`Roster is locked, so ${unmatched.length} name(s) that don't match anyone already in the pool were NOT added (unlock below in Pool Entrants if one of these is a real new entrant):\n${unmatched.join('\n')}`);
   if(added === 0 && notes.length === 0){
-    alert("Didn't recognize that format -- expected either \"Name: TEAM\" per line, or a straight copy-paste of a pool site's picks table (name, full team name, and a percentage).");
+    alert("Didn't recognize that format -- expected either \"Name: TEAM\" per line, a straight copy-paste of a pool site's picks table (name, full team name, and a percentage), or the Group Picks grid (a \"Pick Set\" header row with one tab-separated row per entrant).");
   } else if(notes.length){
     alert(`Added/updated ${added} pick(s).\n\n${notes.join('\n\n')}`);
   }
@@ -3179,11 +3259,13 @@ function renderSurvivorPoolPicks(week){
     .map(([t,s]) => `<span class="status-pill" style="margin:2px 4px 2px 0;">${logoImg(t,14)} ${t} &middot; ${s.count}/${total} (${s.pct.toFixed(0)}%)</span>`).join('');
   el.innerHTML = `
     <div style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
-      Paste this week's picks from your pool -- either a straight copy-paste of your pool site's picks table
-      (name, full team name, and a percentage, however that flattens when copied) or, manually, one line per
-      entrant as "Name: TEAM". Matches against your entrant list above by name, adding anyone new automatically.
-      This drives the "Your Pool %" column and leverage read on the board below -- a real pool-specific read
-      beats a generic national percentage for deciding whether to pivot off the crowd.
+      Paste your pool's picks -- the <b>Group Picks grid</b> (one row per entrant, a column per week) is the
+      best option if your site has it: it carries every week's picks at once, so re-pasting it each week keeps
+      the whole season filled in with no per-week copying. Also accepts a straight copy-paste of a single
+      week's picks table (name, full team name, and a percentage, however that flattens when copied), or,
+      manually, one line per entrant as "Name: TEAM". Matches against your entrant list above by name, adding
+      anyone new automatically. This drives the "Your Pool %" column and leverage read on the board below --
+      a real pool-specific read beats a generic national percentage for deciding whether to pivot off the crowd.
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px;">
       <textarea id="survivor-poolpicks-paste" placeholder="$$$D-Love's Picks$$$: KC&#10;Armando's Picks: PHI&#10;Benton's: DAL" style="flex:1;min-width:220px;min-height:70px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
