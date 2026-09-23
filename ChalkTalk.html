@@ -261,6 +261,7 @@
 
   <div id="view-week" class="view">
     <div class="section-label" id="spread-zone-label">Spread Zone &middot; Week 1, 2026</div>
+    <div id="qb-watch" style="margin-bottom:16px;"></div>
     <div id="games-list"></div>
   </div>
 
@@ -1466,7 +1467,72 @@ function finalScoreFor(g){
   return null;
 }
 
+// ---- QB status overrides: manual "this team's real starter changed and the season-long
+// rating doesn't have real snaps of it yet" flags. The pipeline reads this SAME Firestore doc
+// (public-read, no credentials needed) and applies an empirical backup-QB EPA penalty to that
+// team's game projection for the CURRENT week ONLY -- never written back into the team's
+// off_pts/overall_pts, so it can't leak into the season-long rating. Once the new starter has
+// a real game or two of their own snaps, the rating catches up on its own and the entry here
+// should be switched off (deactivate rather than delete, so the history of why stays visible).
+function getQbStatusOverrides(){ return getState('qb_status_overrides', {}); }
+function setQbStatusOverrides(v){ setState('qb_status_overrides', v); renderQbWatch(); }
+function toggleQbStatusOverride(team){
+  const data = {...getQbStatusOverrides()};
+  if(!data[team]) return;
+  data[team] = {...data[team], active: !data[team].active};
+  setQbStatusOverrides(data);
+}
+function removeQbStatusOverride(team){
+  const data = {...getQbStatusOverrides()};
+  delete data[team];
+  setQbStatusOverrides(data);
+}
+function addQbStatusOverride(){
+  const teamEl = document.getElementById('qbwatch-team');
+  const noteEl = document.getElementById('qbwatch-note');
+  const team = teamAbbrFromAnyName(teamEl.value);
+  if(!team){ alert(`Didn't recognize "${teamEl.value}" as a real team.`); return; }
+  const data = {...getQbStatusOverrides()};
+  data[team] = {active: true, penalty_epa: -0.123, note: noteEl.value.trim(), set_at: new Date().toISOString()};
+  setQbStatusOverrides(data);
+  teamEl.value = ''; noteEl.value = '';
+}
+function renderQbWatch(){
+  const el = document.getElementById('qb-watch');
+  if(!el) return;
+  const data = getQbStatusOverrides();
+  const entries = Object.entries(data);
+  const rows = entries.map(([team, e]) => `
+    <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);">
+      <div style="flex-shrink:0;">${logoImg(team,20)}</div>
+      <div style="flex:1;font-size:12px;">
+        <b style="color:${e.active?'var(--gold)':'var(--sage)'};">${team}${e.active?' -- ACTIVE (penalty applied this week)':' -- inactive'}</b><br>
+        <span style="color:var(--sage);">${e.note||''}</span>
+      </div>
+      <button class="btn" style="padding:3px 8px;font-size:10.5px;" onclick="toggleQbStatusOverride('${team}')">${e.active?'Deactivate':'Activate'}</button>
+      <button class="btn" style="padding:3px 8px;font-size:10.5px;" onclick="removeQbStatusOverride('${team}')">Remove</button>
+    </div>`).join('');
+  el.innerHTML = `
+    <details ${entries.some(([,e])=>e.active) ? 'open' : ''}>
+      <summary class="section-label" style="cursor:pointer;">QB Watch ${entries.filter(([,e])=>e.active).length ? `&middot; ${entries.filter(([,e])=>e.active).length} active` : ''}</summary>
+      <div style="font-size:11.5px;color:var(--sage);margin:8px 0 10px;">
+        A team's rating only reflects a new starter once it has real games of their snaps to learn from -- this flags a starter
+        change happening THIS week (before that), applying a real empirical backup-QB penalty (~-0.12 EPA/play, from real
+        2023-2025 league-wide data) to just that one game's projection. It never touches the team's season-long rating.
+        Only flag someone truly new to the sample -- if a backup's already started a game or two and played fine, the rating
+        already knows that for real, and adding this on top would double-count it.
+      </div>
+      ${rows || '<div class="empty-note">No QB status flags right now.</div>'}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-top:10px;">
+        <input id="qbwatch-team" placeholder="Team (e.g. NYG)" style="width:110px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
+        <input id="qbwatch-note" placeholder="Note (who's out, who's in, why)" style="flex:1;min-width:220px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
+        <button class="btn" onclick="addQbStatusOverride()">Add</button>
+      </div>
+    </details>`;
+}
+
 function renderGamesList(){
+  renderQbWatch();
   const el = document.getElementById('games-list');
   // Spread Zone is for games still to be decided -- once real, a game moves to Results'
   // Model Record instead rather than sitting here stuck on a stale "Upcoming"/no-line state.
