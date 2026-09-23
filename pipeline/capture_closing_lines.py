@@ -33,9 +33,16 @@ from weekly_update import (
 if _FIREBASE_AVAILABLE:
     from weekly_update import firestore
 
-CAPTURE_WINDOW_MINUTES = 25  # capture if kickoff is this soon or has *just* happened
-GRACE_MINUTES_AFTER_KICKOFF = 10  # still worth capturing a couple minutes late; the book
-                                   # usually keeps quoting for a few minutes into the game
+CAPTURE_WINDOW_MINUTES = 45  # capture if kickoff is this soon or has *just* happened
+GRACE_MINUTES_AFTER_KICKOFF = 25  # widened from 10 after a real audit found EVERY single
+                                   # capture this season had missed -- GitHub Actions cron is
+                                   # documented to run late under load, and NFL Sunday is
+                                   # exactly the kind of shared high-load window that causes
+                                   # it (a 15-min-interval cron delayed by only ~10-15 min,
+                                   # which is common, blows straight through the old 10-min
+                                   # grace). The book still quotes a frozen pre-game number
+                                   # for a while after kickoff in practice, so this is a real
+                                   # safety margin, not a meaningfully staler number.
 EASTERN = ZoneInfo("America/New_York")
 
 
