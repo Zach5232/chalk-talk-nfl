@@ -304,6 +304,86 @@ def _real_teams_for_season(season):
     g = games[games.season.astype(str) == str(season)]
     return sorted(set(g.home_team) | set(g.away_team))
 
+
+# ---------- QB-aware offensive prior: fixes a real, structural (not just this-week) bias ----------
+# prior_off blends in last season's real team performance so the ridge fit isn't flailing on 2-3
+# games of current-season noise early on -- but for a team with a genuinely NEW starter this
+# season (trade, free agency, a rookie taking over -- an OFFSEASON change, not this week's
+# injury), that prior was earned by a different quarterback entirely. QB Watch (see the games_out
+# loop below) only patches a known injury for the CURRENT week; it does nothing for a team whose
+# whole rating leans on a stale, wrong-personnel prior every single week until enough real
+# current-season games accumulate to outweigh it.
+#
+# Real, verified as of 2026 week 3: 9 teams have a different real primary passer this season than
+# last -- ATL, CLE, LV, MIA, MIN, NYJ, SEA, SF, WAS. This detects that automatically (comparing
+# each team's real most-frequent passer last season vs their real most-frequent passer so far
+# THIS season -- so it only ever fires once real current-season snaps exist to detect a change
+# from, same limitation QB Watch has for a pre-kickoff Week 1) and shifts prior_off by the real,
+# empirical difference between the two QBs' own personal EPA/play (each vs their own season's
+# real league-average, same method as the QB Watch penalty -- see fetch_qb_status_overrides()),
+# instead of leaving the team's offensive prior anchored to whoever isn't playing anymore.
+def _passer_epa_vs_league(pbp_df, passer_name, min_attempts):
+    pass_plays = pbp_df[(pbp_df.play_type == "pass") & pbp_df.epa.notna()]
+    league_avg = pass_plays.epa.mean()
+    p = pass_plays[pass_plays.passer_player_name == passer_name]
+    if len(p) < min_attempts:
+        return None
+    return p.epa.mean() - league_avg
+
+def _primary_passer_by_team(pbp_df):
+    pass_plays = pbp_df[(pbp_df.play_type == "pass") & pbp_df.epa.notna() & pbp_df.passer_player_name.notna()]
+    counts = pass_plays.groupby(["posteam", "passer_player_name"]).size().reset_index(name="att")
+    if len(counts) == 0:
+        return {}
+    primary = counts.loc[counts.groupby("posteam")["att"].idxmax()]
+    return dict(zip(primary["posteam"], primary["passer_player_name"]))
+
+def qb_prior_adjustment(teams, prior_season_pbp_path, current_season_pbp_path):
+    if prior_season_pbp_path is None:
+        return {t: 0.0 for t in teams}
+    cols = ["play_type", "epa", "posteam", "passer_player_name"]
+    prior_pbp = pd.read_parquet(prior_season_pbp_path, columns=cols)
+    cur_pbp = pd.read_parquet(current_season_pbp_path, columns=cols) if current_season_pbp_path else None
+
+    prior_primary = _primary_passer_by_team(prior_pbp)
+    cur_primary = _primary_passer_by_team(cur_pbp) if cur_pbp is not None else {}
+
+    adjustments = {}
+    for t in teams:
+        old_qb, new_qb = prior_primary.get(t), cur_primary.get(t)
+        # No real current-season snaps yet (pre-kickoff), or no real change detected -- nothing
+        # to correct for. This intentionally does NOT fire on a same-season injury replacement
+        # (that's what QB Watch is for, applied per-game instead of baked into the whole-season
+        # prior) -- it only compares each team's season-opening/last-season primary passer.
+        if not old_qb or not new_qb or old_qb == new_qb:
+            adjustments[t] = 0.0
+            continue
+        old_est = _passer_epa_vs_league(prior_pbp, old_qb, min_attempts=30) or 0.0
+        # New QB's own real history: prefer this season's real snaps (same team, same real
+        # context) once there are enough of them; a prior-season sample of theirs (e.g. they
+        # were a backup or started elsewhere) is used at half weight if this season's sample
+        # is still thin, and this whole adjustment is a no-op if there's truly no real data on
+        # them anywhere -- never fabricate a number for someone with zero track record.
+        new_cur = (cur_pbp[(cur_pbp.play_type == "pass") & cur_pbp.epa.notna() &
+                            (cur_pbp.passer_player_name == new_qb)]) if cur_pbp is not None else pd.DataFrame()
+        new_prior = prior_pbp[(prior_pbp.play_type == "pass") & prior_pbp.epa.notna() &
+                               (prior_pbp.passer_player_name == new_qb)]
+        parts = []
+        if len(new_prior) >= 30:
+            est = _passer_epa_vs_league(prior_pbp, new_qb, min_attempts=30)
+            if est is not None: parts.append((est, len(new_prior), 0.5))
+        if len(new_cur) >= 10:
+            est = _passer_epa_vs_league(cur_pbp, new_qb, min_attempts=10)
+            if est is not None: parts.append((est, len(new_cur), 1.0))
+        if not parts:
+            adjustments[t] = 0.0
+            continue
+        total_w = sum(n * w for _, n, w in parts)
+        new_est = sum(v * n * w for v, n, w in parts) / total_w
+        adjustments[t] = new_est - old_est
+    return adjustments
+
+
 def run_ratings(season, week, prior_season_pbp_path):
     pbp_path = fetch_pbp(season)
     tg = build_team_games(pbp_path, season)
@@ -319,6 +399,12 @@ def run_ratings(season, week, prior_season_pbp_path):
     off_prior_final, def_prior_final, hfa_prior = fit_split(prior_tg, teams, tix, n, lam=3.0, halflife=6.0)
     prior_off = (off_prior_final * 0.51).to_dict()
     prior_def = (def_prior_final * 0.05).to_dict()
+    # Real, per-team correction for a genuinely new-this-season starter (see qb_prior_adjustment
+    # docstring above) -- a no-op for the other ~23 teams whose primary passer didn't change.
+    qb_adj = qb_prior_adjustment(teams, prior_season_pbp_path, pbp_path)
+    for t in teams:
+        if qb_adj.get(t):
+            prior_off[t] = prior_off.get(t, 0.0) + qb_adj[t]
 
     # fit pts_per_epa using ALL completed games so far this season
     games = pd.read_csv(fetch_games_csv())
@@ -532,6 +618,14 @@ def run_rating_history(season, week, prior_season_pbp_path):
     off_prior_final, def_prior_final, _ = fit_split(prior_tg, teams, tix, n, lam=3.0, halflife=6.0)
     prior_off = (off_prior_final * 0.51).to_dict()
     prior_def = (def_prior_final * 0.05).to_dict()
+    # See qb_prior_adjustment() in run_ratings() above -- same real per-team correction for a
+    # genuinely new-this-season starter, applied consistently across this whole history loop
+    # (prior_off/prior_def themselves are also computed once above, not re-fit per week, so this
+    # matches the existing precedent here rather than introducing a new one).
+    qb_adj = qb_prior_adjustment(teams, prior_season_pbp_path, pbp_path)
+    for t in teams:
+        if qb_adj.get(t):
+            prior_off[t] = prior_off.get(t, 0.0) + qb_adj[t]
 
     havoc_games = build_havoc_games(pbp_path)
     st_games = build_st_games(pbp_path)
