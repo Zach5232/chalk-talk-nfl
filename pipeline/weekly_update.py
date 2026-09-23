@@ -187,6 +187,49 @@ def get_neutral_game_ids():
     return _NEUTRAL_IDS_CACHE
 
 
+# ---------- QB status overrides: known-this-week starter changes the season-long rating ----------
+# The walk-forward rating above already handles a new starter correctly ONCE it has real snaps
+# to learn from -- the problem is the game happening THIS week, before any of those snaps exist.
+# A backup/new starter with real in-sample games already (e.g. someone who's started the last
+# two weeks and performed fine) needs no help; the rating already reflects their real play. This
+# only matters for a starter making their first real start this week.
+#
+# BACKUP_QB_EPA_PENALTY is the real, empirical league-average gap: across 2023-2025 real
+# play-by-play (1305 starter-games vs 327 backup-games, league-wide), a team's offensive EPA/play
+# drops by about 0.123 when someone other than their season-long primary passer is under center
+# (0.016 EPA/play with the primary starter vs -0.104 with a backup). It's a rough, generic
+# average, not a QB-specific quality read -- some backups (a real starter-caliber name in a
+# temporary role) will outperform it, some far worse -- which is exactly why this is a manual
+# per-team flag (dashboard_state/qb_status_overrides, editable from the dashboard) rather than
+# something auto-applied off a raw "different QB than last week" detection: that alone can't tell
+# a fresh, no-snaps-yet backup from someone who's already proven themselves over real games this
+# same season (Firestore is public-read, so this is a plain unauthenticated GET, no credentials
+# needed -- consistent with every other dashboard_state read/write in this app).
+BACKUP_QB_EPA_PENALTY = -0.123
+
+def fetch_qb_status_overrides():
+    import urllib.request
+    url = "https://firestore.googleapis.com/v1/projects/stock-model-42fb2/databases/(default)/documents/dashboard_state/qb_status_overrides"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            doc = json.loads(resp.read())
+    except Exception as e:
+        print(f"  (qb_status_overrides: couldn't fetch, skipping -- {e})")
+        return {}
+    fields = doc.get("fields", {}).get("value", {}).get("mapValue", {}).get("fields", {})
+    out = {}
+    for team, entry in fields.items():
+        f = entry.get("mapValue", {}).get("fields", {})
+        active = f.get("active", {}).get("booleanValue", False)
+        if not active:
+            continue
+        penalty = f.get("penalty_epa", {}).get("doubleValue")
+        out[team] = float(penalty) if penalty is not None else BACKUP_QB_EPA_PENALTY
+        note = f.get("note", {}).get("stringValue", "")
+        print(f"  QB status override active: {team} ({penalty if penalty is not None else BACKUP_QB_EPA_PENALTY} EPA/play) -- {note}")
+    return out
+
+
 # ---------- STEP 2: ridge power rating fit (walk-forward, no lookahead) ----------
 def fit_split(hist, teams, tix, n, lam=3.0, halflife=6.0, prior_off=None, prior_def=None, value_col="off_epa"):
     maxwk = hist.week.max()
@@ -1027,13 +1070,21 @@ if __name__ == "__main__":
     print(f"home field advantage (epa): {round(ratings['hfa'],4)}")
 
     # ---- GAMES array (this week, model line vs market consensus) ----
+    qb_overrides = fetch_qb_status_overrides()
     games_out = []
     for _, r in ratings["games_this_week"].iterrows():
         h, a = r.home_team, r.away_team
         if h not in ratings["off"].index or a not in ratings["off"].index:
             continue
-        home_net = ratings["off"][h] - ratings["deft"][a]
-        away_net = ratings["off"][a] - ratings["deft"][h]
+        # A per-GAME adjustment only -- deliberately NOT written back into ratings["off"], so it
+        # doesn't leak into off_pts/overall_pts or next week's walk-forward fit. Once the new
+        # starter has real snaps of their own, the rating picks them up on its own and this
+        # override should be turned off (stale entries just do nothing once real data catches up
+        # and someone remembers to flip `active` back off -- worth checking occasionally).
+        home_off = ratings["off"][h] + qb_overrides.get(h, 0.0)
+        away_off = ratings["off"][a] + qb_overrides.get(a, 0.0)
+        home_net = home_off - ratings["deft"][a]
+        away_net = away_off - ratings["deft"][h]
         model_home_favored = (home_net - away_net + ratings["hfa"]) * ratings["pts_per_epa"]
         gid = f"{a.lower()}-{h.lower()}"
         book_entry = books.get(gid)
