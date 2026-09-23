@@ -323,12 +323,15 @@ def _real_teams_for_season(season):
 # real league-average, same method as the QB Watch penalty -- see fetch_qb_status_overrides()),
 # instead of leaving the team's offensive prior anchored to whoever isn't playing anymore.
 def _passer_epa_vs_league(pbp_df, passer_name, min_attempts):
+    """Returns (raw_epa_vs_league_avg, n_attempts), or None below min_attempts. The raw value is
+    NOT shrunk here -- callers apply _shrink() themselves, since how much shrinkage is right
+    depends on how the result gets used (see qb_prior_adjustment)."""
     pass_plays = pbp_df[(pbp_df.play_type == "pass") & pbp_df.epa.notna()]
     league_avg = pass_plays.epa.mean()
     p = pass_plays[pass_plays.passer_player_name == passer_name]
     if len(p) < min_attempts:
         return None
-    return p.epa.mean() - league_avg
+    return p.epa.mean() - league_avg, len(p)
 
 def _primary_passer_by_team(pbp_df):
     pass_plays = pbp_df[(pbp_df.play_type == "pass") & pbp_df.epa.notna() & pbp_df.passer_player_name.notna()]
@@ -337,6 +340,17 @@ def _primary_passer_by_team(pbp_df):
         return {}
     primary = counts.loc[counts.groupby("posteam")["att"].idxmax()]
     return dict(zip(primary["posteam"], primary["passer_player_name"]))
+
+# Real, per-play EPA over a SHORT stretch is extremely noisy -- a couple of pick-sixes or
+# strip-sacks in a 40-attempt sample can swing it by half a point per play, which is a bigger
+# swing than the gap between the best and worst team in the league. Shrink every personal
+# estimate toward 0 by its own sample size (standard n/(n+k) empirical-Bayes shrinkage) before
+# it ever gets combined into anything else -- a real, first-attempt version of this WITHOUT
+# shrinkage produced an actual -24-point ATL rating off a 44-attempt Cooper Rush sample, which
+# is exactly the failure mode this exists to prevent.
+_QB_SHRINKAGE_K = 150  # attempts for ~50% trust; 44 attempts -> ~23% trust, 300 -> ~67%
+def _shrink(raw, n):
+    return raw * n / (n + _QB_SHRINKAGE_K)
 
 def qb_prior_adjustment(teams, prior_season_pbp_path, current_season_pbp_path):
     if prior_season_pbp_path is None:
@@ -358,29 +372,34 @@ def qb_prior_adjustment(teams, prior_season_pbp_path, current_season_pbp_path):
         if not old_qb or not new_qb or old_qb == new_qb:
             adjustments[t] = 0.0
             continue
-        old_est = _passer_epa_vs_league(prior_pbp, old_qb, min_attempts=30) or 0.0
+        old_raw = _passer_epa_vs_league(prior_pbp, old_qb, min_attempts=30)
+        old_est = _shrink(*old_raw) if old_raw else 0.0
         # New QB's own real history: prefer this season's real snaps (same team, same real
         # context) once there are enough of them; a prior-season sample of theirs (e.g. they
         # were a backup or started elsewhere) is used at half weight if this season's sample
         # is still thin, and this whole adjustment is a no-op if there's truly no real data on
-        # them anywhere -- never fabricate a number for someone with zero track record.
-        new_cur = (cur_pbp[(cur_pbp.play_type == "pass") & cur_pbp.epa.notna() &
-                            (cur_pbp.passer_player_name == new_qb)]) if cur_pbp is not None else pd.DataFrame()
-        new_prior = prior_pbp[(prior_pbp.play_type == "pass") & prior_pbp.epa.notna() &
-                               (prior_pbp.passer_player_name == new_qb)]
+        # them anywhere -- never fabricate a number for someone with zero track record. Each
+        # raw value is shrunk by ITS OWN sample size before being blended, not after -- a thin
+        # 44-attempt sample should barely move the needle even inside a blend.
+        new_cur_raw = _passer_epa_vs_league(cur_pbp, new_qb, min_attempts=10) if cur_pbp is not None else None
+        new_prior_raw = _passer_epa_vs_league(prior_pbp, new_qb, min_attempts=30)
         parts = []
-        if len(new_prior) >= 30:
-            est = _passer_epa_vs_league(prior_pbp, new_qb, min_attempts=30)
-            if est is not None: parts.append((est, len(new_prior), 0.5))
-        if len(new_cur) >= 10:
-            est = _passer_epa_vs_league(cur_pbp, new_qb, min_attempts=10)
-            if est is not None: parts.append((est, len(new_cur), 1.0))
+        if new_prior_raw:
+            raw, n = new_prior_raw
+            parts.append((_shrink(raw, n), n, 0.5))
+        if new_cur_raw:
+            raw, n = new_cur_raw
+            parts.append((_shrink(raw, n), n, 1.0))
         if not parts:
             adjustments[t] = 0.0
             continue
         total_w = sum(n * w for _, n, w in parts)
         new_est = sum(v * n * w for v, n, w in parts) / total_w
-        adjustments[t] = new_est - old_est
+        # Hard sanity cap regardless of the shrinkage math above -- defense in depth against any
+        # future edge case producing an outlier this can't yet anticipate. +-0.25 EPA/play is
+        # already a bigger single-factor swing than all but the most extreme real team-quality
+        # gaps in the league.
+        adjustments[t] = max(-0.25, min(0.25, new_est - old_est))
     return adjustments
 
 
