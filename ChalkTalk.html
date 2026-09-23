@@ -286,6 +286,7 @@
 
   <div id="view-ranks" class="view">
     <div class="section-label" id="margin-heading-label">The Margin &middot; heading into Week 1</div>
+    <div id="margin-qb-watch"></div>
     <div class="table-wrap">
       <table class="rank">
         <thead><tr><th>#</th><th>Team</th><th>Move</th><th>Overall</th><th>Off</th><th>Def</th><th>ST</th><th>Havoc</th></tr></thead>
@@ -2216,7 +2217,31 @@ function renderFantasyDupes(){
   </div>`;
 }
 
+// Read-only summary of QB Watch (see renderQbWatch() in Spread Zone for the full editable
+// version) -- this is real teams' Overall rating not yet reflecting a starter change that just
+// happened, so it belongs right next to the power rankings too, not just the individual game
+// cards. Only surfaces ACTIVE flags -- an inactive/watch-only entry (unconfirmed, or already
+// proven over real snaps) doesn't need a banner here.
+function renderMarginQbWatch(){
+  const el = document.getElementById('margin-qb-watch');
+  if(!el) return;
+  const active = Object.entries(getQbStatusOverrides()).filter(([,e]) => e.active);
+  if(!active.length){ el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="dash-card" style="margin-bottom:14px;border-color:var(--gold);">
+      <div style="font-size:12px;font-weight:700;color:var(--gold);margin-bottom:6px;">
+        &#9888; ${active.length} team${active.length===1?'':'s'} below playing with a QB change the rating doesn't have real snaps of yet
+      </div>
+      ${active.map(([team,e]) => `
+        <div style="font-size:12px;margin-top:4px;display:flex;align-items:flex-start;gap:6px;">
+          ${logoImg(team,16)}<span><b>${team}</b> -- ${e.note||''} (this week's game projection carries a real backup-QB penalty; Overall below does not)</span>
+        </div>`).join('')}
+      <div style="font-size:11px;color:var(--sage);margin-top:6px;">Manage these in Spread Zone &middot; QB Watch.</div>
+    </div>`;
+}
+
 function renderRankings(){
+  renderMarginQbWatch();
   const sorted = [...RATINGS].sort((a,b)=>b.overall_pts-a.overall_pts);
   const el = document.getElementById('ranks-body');
   el.innerHTML = sorted.map((r,i)=>{
