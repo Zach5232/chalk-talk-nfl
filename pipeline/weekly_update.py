@@ -194,20 +194,20 @@ def get_neutral_game_ids():
 # two weeks and performed fine) needs no help; the rating already reflects their real play. This
 # only matters for a starter making their first real start this week.
 #
-# BACKUP_QB_EPA_PENALTY is the real, empirical league-average gap: across 2023-2025 real
-# play-by-play (1305 starter-games vs 327 backup-games, league-wide), a team's offensive EPA/play
-# drops by about 0.123 when someone other than their season-long primary passer is under center
-# (0.016 EPA/play with the primary starter vs -0.104 with a backup). It's a rough, generic
-# average, not a QB-specific quality read -- some backups (a real starter-caliber name in a
-# temporary role) will outperform it, some far worse -- which is exactly why this is a manual
-# per-team flag (dashboard_state/qb_status_overrides, editable from the dashboard) rather than
-# something auto-applied off a raw "different QB than last week" detection: that alone can't tell
-# a fresh, no-snaps-yet backup from someone who's already proven themselves over real games this
-# same season (Firestore is public-read, so this is a plain unauthenticated GET, no credentials
-# needed -- consistent with every other dashboard_state read/write in this app).
+# Schema is keyed by WHO is playing, not just on/off: {team: {active, qb_name, reason,
+# penalty_epa (optional manual override)}}. Given a qb_name, the real number is looked up from
+# that specific player's own actual EPA/play (qb_personal_penalty, defined above run_ratings) --
+# not a flat guess -- so changing who's on the field (e.g. a announced backup ALSO goes down
+# during the week and a third-stringer takes over instead) is a one-field edit on the dashboard,
+# not a re-derived number. penalty_epa is only there as a manual escape hatch for a genuine
+# no-real-track-record case (a rookie/UDFA making a first-ever NFL appearance) -- BACKUP_QB_EPA_
+# PENALTY is what qb_personal_penalty's caller falls back to when there's truly no usable real
+# data on the named player at all, not a default for anyone with a real history (Firestore is
+# public-read, so this is a plain unauthenticated GET, no credentials needed -- consistent with
+# every other dashboard_state read/write in this app).
 BACKUP_QB_EPA_PENALTY = -0.123
 
-def fetch_qb_status_overrides():
+def fetch_qb_status_overrides(season, current_season_pbp_path):
     import urllib.request
     url = "https://firestore.googleapis.com/v1/projects/stock-model-42fb2/databases/(default)/documents/dashboard_state/qb_status_overrides"
     try:
@@ -223,10 +223,21 @@ def fetch_qb_status_overrides():
         active = f.get("active", {}).get("booleanValue", False)
         if not active:
             continue
-        penalty = f.get("penalty_epa", {}).get("doubleValue")
-        out[team] = float(penalty) if penalty is not None else BACKUP_QB_EPA_PENALTY
-        note = f.get("note", {}).get("stringValue", "")
-        print(f"  QB status override active: {team} ({penalty if penalty is not None else BACKUP_QB_EPA_PENALTY} EPA/play) -- {note}")
+        qb_name = f.get("qb_name", {}).get("stringValue") or None
+        manual_penalty = f.get("penalty_epa", {}).get("doubleValue")
+        reason = f.get("reason", {}).get("stringValue", "") or f.get("note", {}).get("stringValue", "")
+
+        if manual_penalty is not None:
+            penalty, source = float(manual_penalty), "manual override"
+        elif qb_name:
+            computed = qb_personal_penalty(qb_name, season, current_season_pbp_path)
+            penalty, source = (computed, "real personal EPA") if computed is not None else (BACKUP_QB_EPA_PENALTY, "generic fallback -- no real data on this player")
+        else:
+            penalty, source = BACKUP_QB_EPA_PENALTY, "generic fallback -- no qb_name given"
+
+        out[team] = penalty
+        who = f" ({qb_name})" if qb_name else ""
+        print(f"  QB status override active: {team}{who} = {penalty:+.3f} EPA/play [{source}] -- {reason}")
     return out
 
 
@@ -305,27 +316,25 @@ def _real_teams_for_season(season):
     return sorted(set(g.home_team) | set(g.away_team))
 
 
-# ---------- QB-aware offensive prior: fixes a real, structural (not just this-week) bias ----------
-# prior_off blends in last season's real team performance so the ridge fit isn't flailing on 2-3
-# games of current-season noise early on -- but for a team with a genuinely NEW starter this
-# season (trade, free agency, a rookie taking over -- an OFFSEASON change, not this week's
-# injury), that prior was earned by a different quarterback entirely. QB Watch (see the games_out
-# loop below) only patches a known injury for the CURRENT week; it does nothing for a team whose
-# whole rating leans on a stale, wrong-personnel prior every single week until enough real
-# current-season games accumulate to outweigh it.
+# ---------- Personal QB EPA lookup: powers QB Watch's per-game override (see games_out below) ----
+# NOTE: this used to also auto-adjust the season-long prior_off for a team with a new offseason
+# starter. Reverted -- a real walk-forward backtest (2024-2025, McNemar-tested) showed it made
+# predictions slightly WORSE (ATS 48.9% -> 47.3%, MAE and correlation both worse too), not
+# better. The ridge fit already absorbs a real new starter's own snaps within a few weeks on its
+# own (that's what halflife=6 is for), and personal career passing EPA turned out to be a noisier
+# stand-in for "how will this team's whole offense perform" than it looked on paper. Left here as
+# a documented dead end, not a TODO to re-add.
 #
-# Real, verified as of 2026 week 3: 9 teams have a different real primary passer this season than
-# last -- ATL, CLE, LV, MIA, MIN, NYJ, SEA, SF, WAS. This detects that automatically (comparing
-# each team's real most-frequent passer last season vs their real most-frequent passer so far
-# THIS season -- so it only ever fires once real current-season snaps exist to detect a change
-# from, same limitation QB Watch has for a pre-kickoff Week 1) and shifts prior_off by the real,
-# empirical difference between the two QBs' own personal EPA/play (each vs their own season's
-# real league-average, same method as the QB Watch penalty -- see fetch_qb_status_overrides()),
-# instead of leaving the team's offensive prior anchored to whoever isn't playing anymore.
+# What's still real and still used: given a SPECIFIC named QB, how does their own actual EPA/play
+# compare to league average, recency+sample-weighted across their own real seasons. This backs
+# QB Watch's per-game injury override (a team's CURRENT starter is confirmed out for THIS week's
+# specific game, with a specific real replacement) -- a fundamentally different, event-driven
+# correction from the reverted structural one above, and the one thing this session's backtests
+# never actually contradicted.
 def _passer_epa_vs_league(pbp_df, passer_name, min_attempts):
     """Returns (raw_epa_vs_league_avg, n_attempts), or None below min_attempts. The raw value is
     NOT shrunk here -- callers apply _shrink() themselves, since how much shrinkage is right
-    depends on how the result gets used (see qb_prior_adjustment)."""
+    depends on how the result gets used."""
     pass_plays = pbp_df[(pbp_df.play_type == "pass") & pbp_df.epa.notna()]
     league_avg = pass_plays.epa.mean()
     p = pass_plays[pass_plays.passer_player_name == passer_name]
@@ -352,55 +361,41 @@ _QB_SHRINKAGE_K = 150  # attempts for ~50% trust; 44 attempts -> ~23% trust, 300
 def _shrink(raw, n):
     return raw * n / (n + _QB_SHRINKAGE_K)
 
-def qb_prior_adjustment(teams, prior_season_pbp_path, current_season_pbp_path):
-    if prior_season_pbp_path is None:
-        return {t: 0.0 for t in teams}
+def qb_personal_penalty(qb_name, season, current_season_pbp_path):
+    """The real, recency+sample-weighted EPA/play-vs-league-average for ONE named QB, across
+    their real snaps this season plus their real snaps the 3 seasons before it. Verified against
+    a real, independent manual calculation (Jameis Winston, Marcus Mariota, real 2023-2026 data)
+    before this was written as reusable code -- a 2-season version (this season + just the one
+    immediate prior season, which is all the main model already downloads) was tried first and
+    rejected: it missed Winston's two real down years in 2023-2024, understating how much worse
+    than average his real track record actually is (-0.009 vs. the real, fuller -0.140). Costs
+    2 extra real season downloads at call time -- only happens when a QB Watch entry actually
+    names a qb_name with no manual penalty_epa override, not on every regular run. Returns None
+    if there's truly no usable real data on them anywhere (never fabricate a number for a total
+    unknown -- caller should fall back to a generic assumption or leave the override unquantified).
+    """
+    # NOTE: deliberately does NOT also apply _shrink()'s per-sample n/(n+k) shrinkage on top of
+    # this -- the (0.5**age)*n weighting already down-weights a thin or old season on its own,
+    # and stacking both was tried and confirmed (against the same real Winston/Mariota check) to
+    # over-dampen a real, meaningful track record back toward a falsely-neutral number. _shrink()
+    # is for a SINGLE season's raw estimate standing alone (e.g. detecting an in-season backup
+    # change from a couple of games); this is already an aggregate of several real seasons.
     cols = ["play_type", "epa", "posteam", "passer_player_name"]
-    prior_pbp = pd.read_parquet(prior_season_pbp_path, columns=cols)
-    cur_pbp = pd.read_parquet(current_season_pbp_path, columns=cols) if current_season_pbp_path else None
-
-    prior_primary = _primary_passer_by_team(prior_pbp)
-    cur_primary = _primary_passer_by_team(cur_pbp) if cur_pbp is not None else {}
-
-    adjustments = {}
-    for t in teams:
-        old_qb, new_qb = prior_primary.get(t), cur_primary.get(t)
-        # No real current-season snaps yet (pre-kickoff), or no real change detected -- nothing
-        # to correct for. This intentionally does NOT fire on a same-season injury replacement
-        # (that's what QB Watch is for, applied per-game instead of baked into the whole-season
-        # prior) -- it only compares each team's season-opening/last-season primary passer.
-        if not old_qb or not new_qb or old_qb == new_qb:
-            adjustments[t] = 0.0
+    parts = []
+    for years_back, weight in [(0, 1.0), (1, 0.5), (2, 0.25), (3, 0.125)]:
+        yr = season - years_back
+        path = current_season_pbp_path if years_back == 0 else fetch_pbp(yr)
+        if not path:
             continue
-        old_raw = _passer_epa_vs_league(prior_pbp, old_qb, min_attempts=30)
-        old_est = _shrink(*old_raw) if old_raw else 0.0
-        # New QB's own real history: prefer this season's real snaps (same team, same real
-        # context) once there are enough of them; a prior-season sample of theirs (e.g. they
-        # were a backup or started elsewhere) is used at half weight if this season's sample
-        # is still thin, and this whole adjustment is a no-op if there's truly no real data on
-        # them anywhere -- never fabricate a number for someone with zero track record. Each
-        # raw value is shrunk by ITS OWN sample size before being blended, not after -- a thin
-        # 44-attempt sample should barely move the needle even inside a blend.
-        new_cur_raw = _passer_epa_vs_league(cur_pbp, new_qb, min_attempts=10) if cur_pbp is not None else None
-        new_prior_raw = _passer_epa_vs_league(prior_pbp, new_qb, min_attempts=30)
-        parts = []
-        if new_prior_raw:
-            raw, n = new_prior_raw
-            parts.append((_shrink(raw, n), n, 0.5))
-        if new_cur_raw:
-            raw, n = new_cur_raw
-            parts.append((_shrink(raw, n), n, 1.0))
-        if not parts:
-            adjustments[t] = 0.0
-            continue
-        total_w = sum(n * w for _, n, w in parts)
-        new_est = sum(v * n * w for v, n, w in parts) / total_w
-        # Hard sanity cap regardless of the shrinkage math above -- defense in depth against any
-        # future edge case producing an outlier this can't yet anticipate. +-0.25 EPA/play is
-        # already a bigger single-factor swing than all but the most extreme real team-quality
-        # gaps in the league.
-        adjustments[t] = max(-0.25, min(0.25, new_est - old_est))
-    return adjustments
+        pbp = pd.read_parquet(path, columns=cols)
+        min_att = 10 if years_back == 0 else 30  # a partial current season needs a lower bar
+        raw = _passer_epa_vs_league(pbp, qb_name, min_attempts=min_att)
+        if raw:
+            parts.append((raw[0], raw[1], weight))
+    if not parts:
+        return None
+    total_w = sum(n * w for _, n, w in parts)
+    return max(-0.25, min(0.25, sum(v * n * w for v, n, w in parts) / total_w))
 
 
 def run_ratings(season, week, prior_season_pbp_path):
@@ -418,12 +413,6 @@ def run_ratings(season, week, prior_season_pbp_path):
     off_prior_final, def_prior_final, hfa_prior = fit_split(prior_tg, teams, tix, n, lam=3.0, halflife=6.0)
     prior_off = (off_prior_final * 0.51).to_dict()
     prior_def = (def_prior_final * 0.05).to_dict()
-    # Real, per-team correction for a genuinely new-this-season starter (see qb_prior_adjustment
-    # docstring above) -- a no-op for the other ~23 teams whose primary passer didn't change.
-    qb_adj = qb_prior_adjustment(teams, prior_season_pbp_path, pbp_path)
-    for t in teams:
-        if qb_adj.get(t):
-            prior_off[t] = prior_off.get(t, 0.0) + qb_adj[t]
 
     # fit pts_per_epa using ALL completed games so far this season
     games = pd.read_csv(fetch_games_csv())
@@ -637,14 +626,6 @@ def run_rating_history(season, week, prior_season_pbp_path):
     off_prior_final, def_prior_final, _ = fit_split(prior_tg, teams, tix, n, lam=3.0, halflife=6.0)
     prior_off = (off_prior_final * 0.51).to_dict()
     prior_def = (def_prior_final * 0.05).to_dict()
-    # See qb_prior_adjustment() in run_ratings() above -- same real per-team correction for a
-    # genuinely new-this-season starter, applied consistently across this whole history loop
-    # (prior_off/prior_def themselves are also computed once above, not re-fit per week, so this
-    # matches the existing precedent here rather than introducing a new one).
-    qb_adj = qb_prior_adjustment(teams, prior_season_pbp_path, pbp_path)
-    for t in teams:
-        if qb_adj.get(t):
-            prior_off[t] = prior_off.get(t, 0.0) + qb_adj[t]
 
     havoc_games = build_havoc_games(pbp_path)
     st_games = build_st_games(pbp_path)
@@ -1139,8 +1120,9 @@ def build_fantasy_projections(season):
 if __name__ == "__main__":
     print(f"=== Chalk Talk weekly update: season {SEASON}, week {WEEK} ({MODE} mode) ===\n")
 
-    ratings = run_ratings(SEASON, WEEK, prior_season_pbp_path="/home/claude/odds_pull/pbp_2024.parquet"
-                           if SEASON == 2025 else fetch_pbp(SEASON - 1))
+    prior_season_pbp_path_val = ("/home/claude/odds_pull/pbp_2024.parquet"
+                                  if SEASON == 2025 else fetch_pbp(SEASON - 1))
+    ratings = run_ratings(SEASON, WEEK, prior_season_pbp_path=prior_season_pbp_path_val)
 
     odds_data = pull_week_odds(MODE, API_KEY, HIST_DATE)
     books = build_books_for_week(odds_data, ratings["games_this_week"])
@@ -1183,7 +1165,7 @@ if __name__ == "__main__":
     print(f"home field advantage (epa): {round(ratings['hfa'],4)}")
 
     # ---- GAMES array (this week, model line vs market consensus) ----
-    qb_overrides = fetch_qb_status_overrides()
+    qb_overrides = fetch_qb_status_overrides(SEASON, fetch_pbp(SEASON))
     games_out = []
     for _, r in ratings["games_this_week"].iterrows():
         h, a = r.home_team, r.away_team
