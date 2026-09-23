@@ -218,6 +218,7 @@ def fetch_qb_status_overrides(season, current_season_pbp_path):
         return {}
     fields = doc.get("fields", {}).get("value", {}).get("mapValue", {}).get("fields", {})
     out = {}
+    changed = False
     for team, entry in fields.items():
         f = entry.get("mapValue", {}).get("fields", {})
         active = f.get("active", {}).get("booleanValue", False)
@@ -238,6 +239,22 @@ def fetch_qb_status_overrides(season, current_season_pbp_path):
         out[team] = penalty
         who = f" ({qb_name})" if qb_name else ""
         print(f"  QB status override active: {team}{who} = {penalty:+.3f} EPA/play [{source}] -- {reason}")
+
+        # Write the real computed number back onto the doc (informational only -- never read
+        # back in as an input) so the dashboard can show what was actually used, instead of
+        # the person having to trust a number they can't see.
+        f["computed_penalty_epa"] = {"doubleValue": round(penalty, 4)}
+        f["computed_source"] = {"stringValue": source}
+        changed = True
+
+    if changed:
+        try:
+            import urllib.request as _ur
+            body = json.dumps({"fields": {"value": {"mapValue": {"fields": fields}}}}).encode()
+            req = _ur.Request(url, data=body, method="PATCH", headers={"Content-Type": "application/json"})
+            _ur.urlopen(req, timeout=15)
+        except Exception as e:
+            print(f"  (qb_status_overrides: couldn't write computed values back, non-fatal -- {e})")
     return out
 
 
