@@ -525,7 +525,15 @@ def run_rating_history(season, week, prior_season_pbp_path):
                      if len(st_hist) > 0 else pd.Series(0.0, index=teams))
 
         for t in teams:
-            off_pts = round(off[t]*pts_per_epa, 1); def_pts = round(deft[t]*pts_per_epa, 1)
+            off_pts = round(off[t]*pts_per_epa, 1)
+            # deft[t] is fit so that a HIGHER value means "suppresses the opponent's offense
+            # more" (see fit_split: predicted off_epa = off[team] - deft[opp]) -- i.e. a higher
+            # deft is a BETTER defense. def_pts is meant to read as "EPA/play allowed relative
+            # to average, lower is better" (that's what every label/color/chart downstream of
+            # this already assumes), so it has to be the negation of deft, not deft itself --
+            # storing it un-negated was the actual bug behind a good defense (e.g. a real
+            # top-5 defense by raw EPA allowed) scoring as one of the worst in the league.
+            def_pts = round(-deft[t]*pts_per_epa, 1)
             history[t].append({
                 "week": wk, "overall_pts": round(off_pts-def_pts, 1),
                 "off_pts": off_pts, "def_pts": def_pts,
@@ -990,10 +998,15 @@ if __name__ == "__main__":
     rows = []
     for t in ratings["teams"]:
         off_pts = round(ratings["off"][t] * ratings["pts_per_epa"], 1)
-        def_pts = round(ratings["deft"][t] * ratings["pts_per_epa"], 1)
+        # See the matching comment in run_rating_history() -- def_pts has to be the negation
+        # of the raw deft coefficient (a higher deft = a better defense) so that it reads as
+        # "EPA/play allowed, lower is better" the way every label/color downstream expects.
+        # NOTE: the game-by-game model spread below uses ratings["deft"] directly (un-negated,
+        # correctly) -- that math was never affected by this, only this display/ranking value.
+        def_pts = round(-ratings["deft"][t] * ratings["pts_per_epa"], 1)
         overall = round(off_pts - def_pts, 1)
         off_prev_pts = ratings["off_prev"][t] * ratings["pts_per_epa"]
-        def_prev_pts = ratings["deft_prev"][t] * ratings["pts_per_epa"]
+        def_prev_pts = -ratings["deft_prev"][t] * ratings["pts_per_epa"]
         overall_prev = off_prev_pts - def_prev_pts
         st_pts = round(ratings["st_rating"][t] * ratings["pts_per_epa"], 1)          # same units as off/def: pts
         havoc_pts = round(ratings["havoc_rating"][t] * 100, 1)                        # percentage-point deviation from average havoc rate, NOT the points scale
