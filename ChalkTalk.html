@@ -1470,11 +1470,24 @@ function finalScoreFor(g){
 
 // ---- QB status overrides: manual "this team's real starter changed and the season-long
 // rating doesn't have real snaps of it yet" flags. The pipeline reads this SAME Firestore doc
-// (public-read, no credentials needed) and applies an empirical backup-QB EPA penalty to that
-// team's game projection for the CURRENT week ONLY -- never written back into the team's
-// off_pts/overall_pts, so it can't leak into the season-long rating. Once the new starter has
-// a real game or two of their own snaps, the rating catches up on its own and the entry here
-// should be switched off (deactivate rather than delete, so the history of why stays visible).
+// (public-read, no credentials needed) and applies penalty_epa to that team's game projection
+// for the CURRENT week ONLY -- never written back into off_pts/overall_pts, so it can't leak
+// into the season-long rating. Once the new starter has a real game or two of their own snaps,
+// the rating catches up on its own and the entry here should be switched off (deactivate rather
+// than delete, so the history of why stays visible).
+//
+// penalty_epa should be QB-SPECIFIC whenever the backup has a real track record, NOT a flat
+// number applied to everyone the same -- an experienced veteran stepping in (e.g. someone who's
+// started plenty of real NFL games elsewhere) is not the same situation as a true no-history
+// emergency arm, and treating them identically overstates the damage for the former. The right
+// way to get a real per-QB number: pull that QB's own real EPA/play per season from nflverse
+// play-by-play, express it relative to that season's real league-average EPA/play (seasons
+// differ), then combine recency+sample-weighted across their real seasons (a QB with one wild
+// small-sample season shouldn't swing the estimate as much as one with a full season of snaps).
+// -0.123 is ONLY the generic league-wide average across ALL real backup-QB games 2023-2025 --
+// use it solely as a fallback when the specific backup truly has no usable real track record
+// (e.g. a rookie UDFA making their first ever NFL appearance), not as the default for everyone.
+const GENERIC_BACKUP_QB_PENALTY_EPA = -0.123;
 function getQbStatusOverrides(){ return getState('qb_status_overrides', {}); }
 function setQbStatusOverrides(v){ setState('qb_status_overrides', v); renderQbWatch(); }
 function toggleQbStatusOverride(team){
@@ -1491,12 +1504,18 @@ function removeQbStatusOverride(team){
 function addQbStatusOverride(){
   const teamEl = document.getElementById('qbwatch-team');
   const noteEl = document.getElementById('qbwatch-note');
+  const penaltyEl = document.getElementById('qbwatch-penalty');
   const team = teamAbbrFromAnyName(teamEl.value);
   if(!team){ alert(`Didn't recognize "${teamEl.value}" as a real team.`); return; }
+  const typed = penaltyEl.value.trim();
+  const usingGeneric = typed === '';
+  const penalty_epa = usingGeneric ? GENERIC_BACKUP_QB_PENALTY_EPA : parseFloat(typed);
+  if(isNaN(penalty_epa)){ alert('EPA/play adjustment has to be a number (negative for worse, e.g. -0.12; positive for better, e.g. +0.05).'); return; }
+  if(usingGeneric && !confirm(`No specific EPA/play number entered -- this will use the GENERIC league-wide backup penalty (${GENERIC_BACKUP_QB_PENALTY_EPA}), which assumes an unknown/no-track-record replacement. If this backup has real NFL starting experience, look up their own real EPA/play history instead (see the comment in code / ask Claude to pull it) rather than defaulting to the generic number. Continue with the generic value anyway?`)) return;
   const data = {...getQbStatusOverrides()};
-  data[team] = {active: true, penalty_epa: -0.123, note: noteEl.value.trim(), set_at: new Date().toISOString()};
+  data[team] = {active: true, penalty_epa, note: noteEl.value.trim(), set_at: new Date().toISOString()};
   setQbStatusOverrides(data);
-  teamEl.value = ''; noteEl.value = '';
+  teamEl.value = ''; noteEl.value = ''; penaltyEl.value = '';
 }
 function renderQbWatch(){
   const el = document.getElementById('qb-watch');
@@ -1507,7 +1526,7 @@ function renderQbWatch(){
     <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);">
       <div style="flex-shrink:0;">${logoImg(team,20)}</div>
       <div style="flex:1;font-size:12px;">
-        <b style="color:${e.active?'var(--gold)':'var(--sage)'};">${team}${e.active?' -- ACTIVE (penalty applied this week)':' -- inactive'}</b><br>
+        <b style="color:${e.active?'var(--gold)':'var(--sage)'};">${team}${e.active?` -- ACTIVE (${e.penalty_epa>0?'+':''}${e.penalty_epa} EPA/play this week)`:' -- inactive'}</b><br>
         <span style="color:var(--sage);">${e.note||''}</span>
       </div>
       <button class="btn" style="padding:3px 8px;font-size:10.5px;" onclick="toggleQbStatusOverride('${team}')">${e.active?'Deactivate':'Activate'}</button>
@@ -1518,14 +1537,18 @@ function renderQbWatch(){
       <summary class="section-label" style="cursor:pointer;">QB Watch ${entries.filter(([,e])=>e.active).length ? `&middot; ${entries.filter(([,e])=>e.active).length} active` : ''}</summary>
       <div style="font-size:11.5px;color:var(--sage);margin:8px 0 10px;">
         A team's rating only reflects a new starter once it has real games of their snaps to learn from -- this flags a starter
-        change happening THIS week (before that), applying a real empirical backup-QB penalty (~-0.12 EPA/play, from real
-        2023-2025 league-wide data) to just that one game's projection. It never touches the team's season-long rating.
-        Only flag someone truly new to the sample -- if a backup's already started a game or two and played fine, the rating
-        already knows that for real, and adding this on top would double-count it.
+        change happening THIS week (before that), applying an EPA/play adjustment to just that one game's projection. It never
+        touches the team's season-long rating. Only flag someone truly new to the sample -- if a backup's already started a
+        game or two and played fine, the rating already knows that for real, and adding this on top would double-count it.
+        <b>The EPA/play number should be that specific QB's own real track record, not a generic guess</b> -- an experienced
+        veteran (started real NFL games elsewhere) isn't the same situation as a true unknown, and a flat number treats them
+        the same. Leave it blank only for a genuine no-track-record emergency arm, which falls back to the generic league-wide
+        backup average (${GENERIC_BACKUP_QB_PENALTY_EPA}).
       </div>
       ${rows || '<div class="empty-note">No QB status flags right now.</div>'}
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-top:10px;">
-        <input id="qbwatch-team" placeholder="Team (e.g. NYG)" style="width:110px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
+        <input id="qbwatch-team" placeholder="Team (e.g. NYG)" style="width:100px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
+        <input id="qbwatch-penalty" placeholder="EPA/play (e.g. -0.14)" style="width:130px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
         <input id="qbwatch-note" placeholder="Note (who's out, who's in, why)" style="flex:1;min-width:220px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
         <button class="btn" onclick="addQbStatusOverride()">Add</button>
       </div>
