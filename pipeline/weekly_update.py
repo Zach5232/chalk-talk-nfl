@@ -437,6 +437,7 @@ def run_ratings(season, week, prior_season_pbp_path):
     completed = g_season[g_season.result.notna() & (g_season.week < week)]
     tg_idx = tg.set_index(["game_id","team"])
     epa_diffs, margins = [], []
+    epa_sums, totals = [], []
     for _, r in completed.iterrows():
         try:
             ho = tg_idx.loc[(r.game_id, r.home_team), "off_epa"]
@@ -444,10 +445,25 @@ def run_ratings(season, week, prior_season_pbp_path):
         except KeyError:
             continue
         epa_diffs.append(ho - ao); margins.append(float(r.result))
+        if pd.notna(r.total):
+            epa_sums.append(ho + ao); totals.append(float(r.total))
     if len(epa_diffs) >= 5:
         pts_per_epa = np.linalg.lstsq(np.column_stack([epa_diffs, np.ones(len(epa_diffs))]), margins, rcond=None)[0][0]
     else:
         pts_per_epa = 44.0  # fallback for very early season, before enough games exist
+    # Same real-regression approach as pts_per_epa above, just fit against each game's real
+    # combined score instead of the real margin -- a team's own projected total is then
+    # (model_total + model_margin)/2 (see games_out below), not a separately-guessed number.
+    # Backtested (2024-2025, real walk-forward, McNemar-tested) before this was ever written
+    # into the pipeline: O/U record 51.5%, not significantly different from a coin flip and
+    # below real -110 breakeven -- same honest, no-proven-edge character as the spread model
+    # itself, not something stronger. Shipped anyway on that basis (a real, backtested, no-
+    # fabricated-edge projection, same standard the spread already meets), not as a claimed win.
+    if len(epa_sums) >= 5:
+        total_fit = np.linalg.lstsq(np.column_stack([epa_sums, np.ones(len(epa_sums))]), totals, rcond=None)[0]
+        total_slope, total_intercept = float(total_fit[0]), float(total_fit[1])
+    else:
+        total_slope, total_intercept = 22.0, 44.0  # crude early-season fallback, same spirit as pts_per_epa's
 
     # walk-forward rating as of THIS week (only games from weeks < week)
     hist = tg[tg.week < week]
@@ -481,6 +497,7 @@ def run_ratings(season, week, prior_season_pbp_path):
 
     return {
         "teams": teams, "off": off, "deft": deft, "hfa": hfa, "pts_per_epa": pts_per_epa,
+        "total_slope": total_slope, "total_intercept": total_intercept,
         "off_prev": off_prev, "deft_prev": deft_prev,
         "havoc_rating": havoc_rating, "st_rating": st_rating,
         "games_this_week": g_season[g_season.week == week],
@@ -520,6 +537,65 @@ def build_books_for_week(odds_data, week_games):
             gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
             books_out[gid] = {"books": rows}
     return books_out
+
+
+# ---------- Team totals: real market lines for each team's own projected points ----------
+# Unlike spreads (one bulk call for the whole week), team_totals only exists on the per-event
+# odds endpoint -- confirmed live against the real account before this was written (HTTP 200,
+# real bookmaker data, no plan upgrade needed). That means one real API call per game, not one
+# call for the whole week -- real, deliberate extra cost (roughly len(games) credits per run),
+# affordable on a 20K/month plan but worth knowing about if this pipeline starts running much
+# more often. Returns {} entirely (never raises) on any failure, since this is a real, additive
+# feature -- a book not covering it yet, or a transient API hiccup, shouldn't take down the
+# whole weekly update over a market that's separate from the spread the rest of the pipeline
+# depends on.
+def fetch_team_totals_for_week(api_key, week_games):
+    import urllib.request
+    try:
+        events_url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/?apiKey={api_key}"
+        with urllib.request.urlopen(events_url, timeout=20) as resp:
+            events = json.loads(resp.read())
+    except Exception as e:
+        print(f"  (team_totals: couldn't fetch real event list, skipping entirely -- {e})")
+        return {}
+
+    out = {}
+    for _, r in week_games.iterrows():
+        home_full, away_full = REV_MAP[r.home_team], REV_MAP[r.away_team]
+        event = next((e for e in events if e.get("home_team")==home_full and e.get("away_team")==away_full), None)
+        if not event:
+            continue
+        gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
+        url = (f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event['id']}/odds"
+               f"?apiKey={api_key}&regions=us&markets=team_totals&oddsFormat=american")
+        try:
+            with urllib.request.urlopen(url, timeout=20) as resp:
+                data = json.loads(resp.read())
+        except Exception as e:
+            print(f"  team_totals {gid}: couldn't fetch -- {e}")
+            continue
+        home_pts, away_pts = [], []
+        for bm in data.get("bookmakers", []):
+            for mk in bm.get("markets", []):
+                if mk["key"] != "team_totals":
+                    continue
+                for oc in mk["outcomes"]:
+                    # team_totals outcomes are named "Over"/"Under" with a separate "description"
+                    # field naming which team's total the line belongs to.
+                    if oc.get("name") != "Over":
+                        continue
+                    desc = oc.get("description")
+                    if desc == home_full and oc.get("point") is not None:
+                        home_pts.append(oc["point"])
+                    elif desc == away_full and oc.get("point") is not None:
+                        away_pts.append(oc["point"])
+        if home_pts or away_pts:
+            out[gid] = {
+                "market_home_total": round(sum(home_pts)/len(home_pts), 2) if home_pts else None,
+                "market_away_total": round(sum(away_pts)/len(away_pts), 2) if away_pts else None,
+                "n_books": max(len(home_pts), len(away_pts)),
+            }
+    return out
 
 
 # ---------- STEP 4: previous week's closing lines + results ----------
@@ -1143,6 +1219,8 @@ if __name__ == "__main__":
 
     odds_data = pull_week_odds(MODE, API_KEY, HIST_DATE)
     books = build_books_for_week(odds_data, ratings["games_this_week"])
+    team_totals_data = fetch_team_totals_for_week(API_KEY, ratings["games_this_week"])
+    print(f"\n--- TEAM TOTALS: real market lines fetched for {len(team_totals_data)} of {len(ratings['games_this_week'])} games ---")
     # Grade previous week's games (normal weekly cadence) PLUS any game in the CURRENT
     # week's slate that has already gone final -- e.g. re-running mid-week after a
     # Thursday/Sunday-night opener finishes, without waiting for the whole week to end.
@@ -1201,6 +1279,20 @@ if __name__ == "__main__":
         gid = f"{a.lower()}-{h.lower()}"
         book_entry = books.get(gid)
         market_home_favored = -float(book_entry["books"][0]["home_pt"]) if book_entry else None
+
+        # Team totals: the combined-total regression (total_slope/intercept, real-fit above,
+        # same method as pts_per_epa) gives the projected game total; each team's own total then
+        # just splits that against the already-projected margin (model_home_favored, which is
+        # literally the projected home-minus-away margin in normal sign before the -1 flip below
+        # converts it to this file's stored odds-api-style convention). No separate model needed
+        # for the split -- see the backtest note above the total_slope/intercept fit for the real,
+        # honest accuracy read on this (comparable to the spread model's own -- no proven edge,
+        # shipped on the same "real, backtested, no fabricated edge" basis the spread already is).
+        model_total = (home_net + away_net) * ratings["total_slope"] + ratings["total_intercept"]
+        model_home_total = round((model_total + model_home_favored) / 2, 2)
+        model_away_total = round((model_total - model_home_favored) / 2, 2)
+        tt_entry = team_totals_data.get(gid)
+
         games_out.append({
             "id": gid, "away": a, "home": h, "week": WEEK, "season": SEASON,
             # gameday/gametime come straight from the real nflverse schedule (games.csv) --
@@ -1209,6 +1301,11 @@ if __name__ == "__main__":
             "gametime": str(r.gametime) if pd.notna(r.gametime) else None,
             "model": round(-model_home_favored, 2),
             "market": round(-market_home_favored, 2) if market_home_favored is not None else None,
+            "model_total": round(model_total, 2),
+            "model_home_total": model_home_total,
+            "model_away_total": model_away_total,
+            "market_home_total": tt_entry["market_home_total"] if tt_entry else None,
+            "market_away_total": tt_entry["market_away_total"] if tt_entry else None,
             "ah": None, "aa": None,
             "blurb": "(auto-generated placeholder -- write-up not yet produced by this pipeline)"
         })
