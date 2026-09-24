@@ -1579,6 +1579,12 @@ function renderGamesList(){
           <div class="gc-lines">MARKET ${g.home} ${hasMarket ? `${g.market>0?'+':''}${g.market.toFixed(1)}` : '&mdash; no line yet'}<br><span class="model">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</span></div>
         </div>
       </div>
+      ${(g.model_home_total!=null || g.market_home_total!=null) ? `
+      <div class="gc-lines" style="margin-top:4px;font-size:11px;">
+        TOTALS &middot; ${g.away} ${g.market_away_total!=null?g.market_away_total.toFixed(1):'&mdash;'} <span class="model">(model ${g.model_away_total.toFixed(1)})</span>
+        &nbsp;&middot;&nbsp;
+        ${g.home} ${g.market_home_total!=null?g.market_home_total.toFixed(1):'&mdash;'} <span class="model">(model ${g.model_home_total.toFixed(1)})</span>
+      </div>` : ''}
       ${formatGameDateTime(g) ? `<div class="gc-final" style="margin-top:0;">${formatGameDateTime(g)}</div>` : ''}
       <div class="gc-blurb">${g.blurb}</div>
       <div class="gc-final">Upcoming${g.hasDetail?'  <span class="chevron">&middot; full breakdown &rarr;</span>':''}</div>
