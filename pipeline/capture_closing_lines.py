@@ -116,41 +116,5 @@ def capture(season, week):
             })
 
 
-
-
-def _debug_check_markets():
-    """TEMPORARY diagnostic -- not part of the real pipeline, will be removed after use."""
-    import urllib.request, urllib.error, json as _json
-    events_url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/?apiKey={API_KEY}"
-    with urllib.request.urlopen(events_url, timeout=15) as resp:
-        events = _json.loads(resp.read())
-        headers_seen = dict(resp.headers)
-    print(f"Found {len(events)} real upcoming/live NFL events.")
-    print(f"Real account quota -- used: {headers_seen.get('x-requests-used')}, remaining: {headers_seen.get('x-requests-remaining')}")
-    if not events:
-        print("No events available to test against right now.")
-        return
-    event_id = events[0]["id"]
-    print(f"Testing against real event: {events[0]['away_team']} @ {events[0]['home_team']} ({event_id})")
-
-    def try_market(market):
-        url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event_id}/odds?apiKey={API_KEY}&regions=us&markets={market}&oddsFormat=american"
-        try:
-            with urllib.request.urlopen(url, timeout=15) as resp:
-                data = _json.loads(resp.read())
-                n_books = len(data.get("bookmakers", []))
-                has_market = any(m["key"] == market for bm in data.get("bookmakers", []) for m in bm.get("markets", []))
-                print(f"  {market:25s} -> HTTP 200, {n_books} bookmaker(s) responded, market actually present: {has_market}")
-        except urllib.error.HTTPError as e:
-            body = e.read().decode(errors="replace")[:300]
-            print(f"  {market:25s} -> HTTP {e.code}: {body}")
-        except Exception as e:
-            print(f"  {market:25s} -> ERROR: {e}")
-
-    for market in ["spreads", "h2h", "totals", "team_totals", "alternate_spreads", "alternate_totals", "player_pass_yds"]:
-        try_market(market)
-
-
 if __name__ == "__main__":
-    _debug_check_markets()  # TEMPORARY -- real call (capture(SEASON, WEEK)) restored after this check
-
+    capture(SEASON, WEEK)
