@@ -1564,32 +1564,60 @@ function renderGamesList(){
     el.innerHTML = '<div class="empty-note">All of this week\'s games are final -- see Results for the graded record.</div>';
     return;
   }
-  el.innerHTML = upcoming.map(g=>{
-    // g.market is null whenever the odds pull found no book match for this game (rare, but
-    // real -- late schedule changes, a book not covering a specific game). Guard it rather
-    // than crash the whole list or fabricate a fake edge number against a missing line.
-    const hasMarket = g.market != null;
-    const edge = hasMarket ? Math.abs(g.market - g.model) : null;
-    return `
+  el.innerHTML = upcoming.map(g=>renderGameCard(g)).join('');
+}
+
+// Compact one-line weather summary for the card header -- same real WEATHER data the detail
+// page shows in full, just condensed. Blank (not an error string) when there's nothing to show
+// yet, so the day/time line doesn't get cluttered with a placeholder on every single card.
+function compactWeather(id){
+  const wx = WEATHER[id];
+  if(!wx || wx.error) return '';
+  if(wx.roof === 'dome') return 'Indoors';
+  const roofNote = wx.roof === 'retractable' ? ' (retractable)' : '';
+  return `${wx.temp_high}&deg;/${wx.temp_low}&deg;F, ${wx.wind_mph}mph${roofNote}`;
+}
+
+// One row of the consolidated lines block -- market vs. model vs. edge, same real numbers that
+// used to be scattered across the card (and the broken always-placeholder write-up) now all in
+// one place. edgeValueColor's 2-5pt green is context only, not a validated signal (see its own
+// comment) -- real backtests for BOTH spread and total edges found no reliable relationship
+// between edge size and real hit rate, so this reuses that same honest, unproven-signal shading
+// rather than inventing a separate, more confident-looking threshold for totals.
+function lineRow(label, market, model, fmtFn){
+  const hasMarket = market != null, hasModel = model != null;
+  const edge = (hasMarket && hasModel) ? Math.abs(market - model) : null;
+  return `
+    <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px;">
+      <span style="color:var(--sage);width:54px;flex-shrink:0;">${label}</span>
+      <span style="color:var(--sage);width:56px;">${hasMarket ? fmtFn(market) : '&mdash;'}</span>
+      <span class="model" style="width:56px;">${hasModel ? fmtFn(model) : '&mdash;'}</span>
+      <span style="flex:1;text-align:right;font-weight:700;color:${edge!=null ? edgeValueColor(edge) : 'var(--sage)'};">${edge!=null ? edge.toFixed(1) : ''}</span>
+    </div>`;
+}
+
+function renderGameCard(g){
+  const fmtSpread = v => `${v>0?'+':''}${v.toFixed(1)}`;
+  const fmtTotal = v => v.toFixed(1);
+  const dt = formatGameDateTime(g);
+  const wx = compactWeather(g.id);
+  return `
     <div class="game-card" onclick="openGame('${g.id}')">
       <div class="game-card-top">
         <div class="gc-teams">${logoImg(g.away,22)}${g.away}<span class="at">at</span>${logoImg(g.home,22)}${g.home}</div>
-        <div style="display:flex;align-items:baseline;gap:10px;">
-          ${edge!=null ? `<div style="font-size:15px;font-weight:800;color:${edgeValueColor(edge)};" title="Model vs. market edge">${edge.toFixed(1)}</div>` : ''}
-          <div class="gc-lines">MARKET ${g.home} ${hasMarket ? `${g.market>0?'+':''}${g.market.toFixed(1)}` : '&mdash; no line yet'}<br><span class="model">MODEL ${g.home} ${(g.model>0?'+':'')}${(g.model).toFixed(1)}</span></div>
-        </div>
+        <div class="gc-lines" style="font-size:11.5px;">${dt}${wx?` &middot; ${wx}`:''}</div>
       </div>
-      ${(g.model_home_total!=null || g.market_home_total!=null) ? `
-      <div class="gc-lines" style="margin-top:4px;font-size:11px;">
-        TOTALS &middot; ${g.away} ${g.market_away_total!=null?g.market_away_total.toFixed(1):'&mdash;'} <span class="model">(model ${g.model_away_total.toFixed(1)})</span>
-        &nbsp;&middot;&nbsp;
-        ${g.home} ${g.market_home_total!=null?g.market_home_total.toFixed(1):'&mdash;'} <span class="model">(model ${g.model_home_total.toFixed(1)})</span>
-      </div>` : ''}
-      ${formatGameDateTime(g) ? `<div class="gc-final" style="margin-top:0;">${formatGameDateTime(g)}</div>` : ''}
-      <div class="gc-blurb">${g.blurb}</div>
+      <div style="margin-top:8px;">
+        <div style="display:flex;gap:8px;font-size:10.5px;color:var(--sage);text-transform:uppercase;padding:0 0 2px 62px;font-weight:700;">
+          <span style="width:56px;">Market</span><span style="width:56px;">Model</span><span style="flex:1;text-align:right;">Edge</span>
+        </div>
+        ${lineRow('Spread '+g.home, g.market, g.model, fmtSpread)}
+        ${lineRow('Total', g.market_home_total!=null&&g.market_away_total!=null ? g.market_home_total+g.market_away_total : null, g.model_total, fmtTotal)}
+        ${lineRow(g.home+' tot', g.market_home_total, g.model_home_total, fmtTotal)}
+        ${lineRow(g.away+' tot', g.market_away_total, g.model_away_total, fmtTotal)}
+      </div>
       <div class="gc-final">Upcoming${g.hasDetail?'  <span class="chevron">&middot; full breakdown &rarr;</span>':''}</div>
     </div>`;
-  }).join('');
 }
 
 // ---- NEW: edge / signal helpers ----
@@ -1849,13 +1877,12 @@ function openGame(id){
       const agreement = edgeVsMarket < 1 ? "close to the market's own number" : `notably different from the market's line (a ${edgeVsMarket.toFixed(1)}-pt gap)`;
       autoStoryHtml = `<div class="section-label">Breakdown</div>
         <div class="story">
-          <p>${g.blurb}</p>
           <p>Our number favors ${favTeam}, driven by their offense (${favOff>0?'+':''}${favOff} pts above average) against a ${oppDef>0?'below-average':'above-average'} opposing defense (${oppDef>0?'+':''}${oppDef}), while the other side's offense (${oppOff>0?'+':''}${oppOff}) faces a ${favDef<0?'stronger':'weaker'} defense (${favDef>0?'+':''}${favDef}). That combination lands our projection ${agreement}.</p>
           <p class="empty-note" style="margin-top:8px;">A full player-level write-up (like the Week 9 Ravens/Chargers examples) hasn't been produced for this game yet -- this breakdown is auto-generated from the real team ratings, not a placeholder.</p>
           <p class="empty-note" style="margin-top:8px;">This game's edge is ${edgeVsMarket.toFixed(1)} pts${edgeVsMarket>=2 && edgeVsMarket<5 ? ' -- inside the 2-5pt range' : edgeVsMarket<2 ? ' -- under 2 pts' : ' -- 5+ pts'}. A 3-season backtest (2023-2025, 563 games) found no edge-size range that reliably beat the market: the 2-5pt range came out to 51.9% ATS combined (95% CI 45.5-58.3%, straddling the 52.38% breakeven), and an out-of-sample check (discover on 2023-24, test on 2025 alone) found it didn't hold up on new data. Shown for context, not as a confidence signal.</p>
         </div>`;
     } else {
-      autoStoryHtml = `<div class="story"><p>${g.blurb}</p><p>Market had ${g.home} at ${(g.market>0?'+':'')}${(g.market).toFixed(1)}, our model had them at ${(g.model>0?'+':'')}${(g.model).toFixed(1)}.</p></div>`;
+      autoStoryHtml = `<div class="story"><p>Market had ${g.home} at ${(g.market>0?'+':'')}${(g.market).toFixed(1)}, our model had them at ${(g.model>0?'+':'')}${(g.model).toFixed(1)}.</p></div>`;
     }
 
     el.innerHTML = `<div class="detail-teams">${logoImg(g.away,32)}${g.away}<span class="at">at</span>${logoImg(g.home,32)}${g.home}</div>
