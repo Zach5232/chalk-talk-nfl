@@ -116,5 +116,61 @@ def capture(season, week):
             })
 
 
+
+
+def _debug_opening_lines():
+    """TEMPORARY -- removed after use."""
+    """TEMPORARY diagnostic -- pulls REAL historical opening-ish line snapshots for several past
+    2025 weeks, to compare against real closing lines already in games.csv. Prints only line data
+    and quota usage, never the API key."""
+    import json as _json2
+    import urllib.request as _ur2
+
+    # (week, opening_snapshot_iso) -- snapshot picked as 5 days before that week's earliest real
+    # game, ~14:00 UTC (~10am ET), matching the real Tuesday-after-MNF pattern lines typically open.
+    WEEKS = [
+        (5,  "2025-09-27T14:00:00Z"),
+        (6,  "2025-10-04T14:00:00Z"),
+        (7,  "2025-10-11T14:00:00Z"),
+        (8,  "2025-10-18T14:00:00Z"),
+        (9,  "2025-10-25T14:00:00Z"),
+        (10, "2025-11-01T14:00:00Z"),
+        (11, "2025-11-08T14:00:00Z"),
+        (12, "2025-11-15T14:00:00Z"),
+        (13, "2025-11-22T14:00:00Z"),
+        (14, "2025-11-29T14:00:00Z"),
+    ]
+
+    results = []
+    for week, snap in WEEKS:
+        url = (f"https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds/"
+               f"?apiKey={API_KEY}&regions=us&markets=spreads&oddsFormat=american&date={snap}")
+        try:
+            with _ur2.urlopen(url, timeout=20) as resp:
+                data = _json2.loads(resp.read())
+                headers_seen = dict(resp.headers)
+        except Exception as e:
+            print(f"WEEK {week} @ {snap}: ERROR {e}")
+            continue
+
+        games = data.get("data", data) if isinstance(data, dict) else data
+        print(f"WEEK {week} @ {snap}: {len(games)} games, quota used={headers_seen.get('x-requests-used')} remaining={headers_seen.get('x-requests-remaining')} (last cost={headers_seen.get('x-requests-last')})")
+        for g in games:
+            home, away = g.get("home_team"), g.get("away_team")
+            best_home_pt = None
+            pts = []
+            for bm in g.get("bookmakers", []):
+                for mk in bm.get("markets", []):
+                    if mk["key"] != "spreads":
+                        continue
+                    hp = next((oc["point"] for oc in mk["outcomes"] if oc["name"] == home), None)
+                    if hp is not None:
+                        pts.append(hp)
+            if pts:
+                best_home_pt = sum(pts) / len(pts)  # simple average across books as "the opening number"
+            print(f"  RESULT week={week} home={home} away={away} open_home_pt={best_home_pt} n_books={len(pts)}")
+
+
 if __name__ == "__main__":
-    capture(SEASON, WEEK)
+    _debug_opening_lines()  # TEMPORARY -- real call (capture(SEASON, WEEK)) restored after this check
+
