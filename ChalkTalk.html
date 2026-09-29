@@ -4357,10 +4357,16 @@ function renderDashNotable(){
     facts.push({team: worst.team, text: `<b>${worst.team}</b>'s defense is allowing <b style="color:var(--alert);">${worst.def_pts>0?'+':''}${worst.def_pts} pts</b> above average -- worst mark in the league.`});
   }
 
-  // biggest single-game CPOE performance across tracked QBs
+  // biggest single-game CPOE performance across tracked QBs -- a real bug this used to have:
+  // a 1-attempt mop-up-duty relief snap can produce a wildly extreme CPOE purely from noise
+  // (one incompletion or one deep completion IS +-100% of that "game"), and this used to pick
+  // that up as if it were a meaningful performance. Require a real, meaningful sample (10+
+  // attempts, a rough "played at least most of a half" bar) before a game is even eligible.
+  const MIN_ATTEMPTS_FOR_NOTABLE_GAME = 10;
   let bestGame = null;
   for(const [qb, hist] of Object.entries(QB_HISTORY)){
     for(const h of hist){
+      if((h.attempts ?? 0) < MIN_ATTEMPTS_FOR_NOTABLE_GAME) continue;
       if(!bestGame || Math.abs(h.cpoe) > Math.abs(bestGame.cpoe)){
         bestGame = {qb, week: h.week, cpoe: h.cpoe};
       }
