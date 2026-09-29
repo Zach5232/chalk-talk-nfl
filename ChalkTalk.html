@@ -308,6 +308,9 @@
     <div class="empty-note" id="fantasy-season-note" style="padding:0 0 14px;"></div>
     <div id="fantasy-alerts"></div>
 
+    <div class="section-label">Fantasy Records &middot; manual entry</div>
+    <div id="fantasy-records"></div>
+
     <div class="section-label">Start/Sit Calculator</div>
     <div class="dash-card" id="fantasy-calc-card">
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
@@ -369,17 +372,11 @@
   </div>
 
   <div id="view-results" class="view">
-    <div class="section-label">Pick'em Record</div>
-    <div class="dash-card" id="results-pickem"></div>
+    <div class="section-label">Model Record &middot; every game, not just your picks (running tally, not something you actively bet)</div>
+    <div class="dash-card" id="results-model-record"></div>
 
     <div class="section-label">Survivor Record</div>
     <div class="dash-card" id="results-survivor"></div>
-
-    <div class="section-label">Fantasy Records</div>
-    <div id="results-fantasy"></div>
-
-    <div class="section-label">Model Record &middot; every game, not just your picks (running tally, not something you actively bet)</div>
-    <div class="dash-card" id="results-model-record"></div>
 
     <div class="section-label">Export Your Data</div>
     <div class="dash-card">
@@ -656,7 +653,9 @@ let UNDERPERFORMANCE = {players: [], note: null};
 // line, every game, whether you bet/picked it or not. See build_model_season_record() in
 // weekly_update.py: grades with the exact same convention as gradeATSPick() below, so this
 // can never silently disagree with what an individual game's grade shows.
-let MODEL_SEASON_RECORD = {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []};
+let MODEL_SEASON_RECORD = {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: [],
+  totals: {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []},
+  team_totals: {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []}};
 
 
 
@@ -2040,6 +2039,7 @@ function toggleLeagueVisibility(leagueId, checked){
 }
 
 function renderFantasy(){
+  renderFantasyRecords();
   renderDynastyWaiverWire();
   renderUnderperformanceWatch();
   const anySeasonData = FANTASY_ROSTERS.some(l => l.players.some(p => p.actual !== null));
@@ -3869,6 +3869,36 @@ function removeFantasyMatchup(leagueId, week){
   renderResults();
 }
 
+// Real game's own detail row -- shared by the spread and total sections below (team totals gets
+// its own, since it's graded per-team, not per-game).
+function modelRecordGameRow(g, sideLabel){
+  const clickable = GAMES.some(x => x.id === g.game_id);
+  return `
+    <div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid var(--line);font-size:12px;${clickable?'cursor:pointer;':''}" ${clickable?`onclick="openGame('${g.game_id}')"`:''}>
+      <span>${logoImg(g.away,16)}${g.away} at ${logoImg(g.home,16)}${g.home}</span>
+      <span style="color:var(--sage);">${sideLabel}: <b style="color:var(--text);">${g.pick ?? g.model_side}</b> (${g.edge>0?'+':''}${g.edge})</span>
+      <span class="status-pill ${g.grade}">${g.grade}</span>
+    </div>`;
+}
+
+function weeklyBreakdown(record, sideLabel){
+  const weekRows = Object.keys(record.by_week||{}).map(Number).sort((a,b)=>b-a);
+  const gamesByWeek = {};
+  (record.games||[]).forEach(g => { (gamesByWeek[g.week] = gamesByWeek[g.week] || []).push(g); });
+  return weekRows.map(wk => {
+    const w = record.by_week[wk];
+    const games = (gamesByWeek[wk]||[]).slice().sort((a,b)=>a.game_id.localeCompare(b.game_id));
+    return `
+    <details style="border-top:1px solid var(--line);padding:8px 0;">
+      <summary style="cursor:pointer;display:flex;justify-content:space-between;font-size:13px;list-style:none;">
+        <span>Week ${wk} <span style="color:var(--sage);font-weight:400;">(${games.length} game${games.length===1?'':'s'})</span></span>
+        <b>${w.wins}-${w.losses}${w.pushes?`-${w.pushes}`:''}</b>
+      </summary>
+      <div style="margin-top:8px;">${games.map(g => modelRecordGameRow(g, sideLabel)).join('')}</div>
+    </details>`;
+  }).join('');
+}
+
 function renderModelSeasonRecord(){
   const el = document.getElementById('results-model-record');
   if(!el) return;
@@ -3877,48 +3907,52 @@ function renderModelSeasonRecord(){
     el.innerHTML = '<div class="empty-note">No games graded yet this season -- populates automatically once real closing lines and final scores come in for a completed week.</div>';
     return;
   }
-  const weekRows = Object.keys(r.by_week||{}).map(Number).sort((a,b)=>b-a);
-  const gamesByWeek = {};
-  (r.games||[]).forEach(g => { (gamesByWeek[g.week] = gamesByWeek[g.week] || []).push(g); });
-  el.innerHTML = `
-    <div style="font-size:13px;margin-bottom:10px;">
-      <b>${r.wins}-${r.losses}${r.pushes?`-${r.pushes}`:''} ATS (${r.win_pct}%)</b> across
-      ${r.total_graded} graded games -- every real game with a market line this season, not
-      just ones you picked or bet. Breakeven at standard -110 odds is 52.38%.
-    </div>
-    ${weekRows.map(wk => {
-      const w = r.by_week[wk];
-      const games = (gamesByWeek[wk]||[]).slice().sort((a,b)=>a.game_id.localeCompare(b.game_id));
-      return `
-      <details style="border-top:1px solid var(--line);padding:8px 0;">
-        <summary style="cursor:pointer;display:flex;justify-content:space-between;font-size:13px;list-style:none;">
-          <span>Week ${wk} <span style="color:var(--sage);font-weight:400;">(${games.length} game${games.length===1?'':'s'})</span></span>
-          <b>${w.wins}-${w.losses}${w.pushes?`-${w.pushes}`:''}</b>
-        </summary>
-        <div style="margin-top:8px;">
-          ${games.map(g => {
-            // openGame() only knows about the CURRENT week's GAMES array -- a past week's
-            // game_id isn't in it (and there's no historical detail view yet), so only wire
-            // up the click for a game that's actually still live in GAMES right now.
-            const clickable = GAMES.some(x => x.id === g.game_id);
-            return `
-            <div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid var(--line);font-size:12px;${clickable?'cursor:pointer;':''}" ${clickable?`onclick="openGame('${g.game_id}')"`:''}>
-              <span>${logoImg(g.away,16)}${g.away} at ${logoImg(g.home,16)}${g.home}</span>
-              <span style="color:var(--sage);">Model: <b style="color:var(--text);">${g.model_side}</b> (${g.edge>0?'+':''}${g.edge})</span>
-              <span class="status-pill ${g.grade}">${g.grade}</span>
-            </div>`;
-          }).join('')}
-        </div>
-      </details>`;
-    }).join('')}`;
+  const t = r.totals || {};
+  const tt = r.team_totals || {};
+
+  const spreadSection = `
+    <details open style="padding:8px 0;">
+      <summary class="section-label" style="cursor:pointer;list-style:none;">Spread ATS &middot; ${r.wins}-${r.losses}${r.pushes?`-${r.pushes}`:''} (${r.win_pct}%)</summary>
+      <div style="font-size:12px;color:var(--sage);margin:6px 0 4px;">${r.total_graded} graded games -- every real game with a market line this season, not just ones you picked or bet. Breakeven at standard -110 odds is 52.38%.</div>
+      ${weeklyBreakdown(r, 'Model')}
+    </details>`;
+
+  const totalSection = t.total_graded ? `
+    <details style="padding:8px 0;border-top:1px solid var(--line);">
+      <summary class="section-label" style="cursor:pointer;list-style:none;">Game Total O/U &middot; ${t.wins}-${t.losses}${t.pushes?`-${t.pushes}`:''} (${t.win_pct}%)</summary>
+      <div style="font-size:12px;color:var(--sage);margin:6px 0 4px;">${t.total_graded} graded games, real closing total line (nflverse), same standard as the spread record above. Only counts from whenever the totals feature shipped -- older weeks aren't backfilled.</div>
+      ${weeklyBreakdown(t, 'Model')}
+    </details>` : `
+    <div style="padding:8px 0;border-top:1px solid var(--line);">
+      <div class="section-label">Game Total O/U</div>
+      <div class="empty-note">Not graded yet -- accumulates from here forward as totals-era games finish.</div>
+    </div>`;
+
+  const teamTotalSection = tt.total_graded ? `
+    <details style="padding:8px 0;border-top:1px solid var(--line);">
+      <summary class="section-label" style="cursor:pointer;list-style:none;">Team Totals &middot; ${tt.wins}-${tt.losses}${tt.pushes?`-${tt.pushes}`:''} (${tt.win_pct}%)</summary>
+      <div style="font-size:12px;color:var(--sage);margin:6px 0 4px;">${tt.note || ''}</div>
+      <div style="margin-top:4px;">
+        ${tt.games.slice().reverse().map(g => `
+        <div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid var(--line);font-size:12px;">
+          <span>${logoImg(g.team,16)}${g.team} <span style="color:var(--sage);">(Wk ${g.week})</span></span>
+          <span style="color:var(--sage);">Model: <b style="color:var(--text);">${g.pick}</b> (${g.edge>0?'+':''}${g.edge})</span>
+          <span class="status-pill ${g.grade}">${g.grade}</span>
+        </div>`).join('')}
+      </div>
+    </details>` : `
+    <div style="padding:8px 0;border-top:1px solid var(--line);">
+      <div class="section-label">Team Totals</div>
+      <div class="empty-note">Not graded yet -- accumulates from here forward.</div>
+    </div>`;
+
+  el.innerHTML = spreadSection + totalSection + teamTotalSection;
 }
 
 function renderResults(){
   renderModelSeasonRecord();
-  const pickemEl = document.getElementById('results-pickem');
   const survivorEl = document.getElementById('results-survivor');
-  const fantasyEl = document.getElementById('results-fantasy');
-  if(!pickemEl || !survivorEl || !fantasyEl) return;
+  if(!survivorEl) return;
 
   const currentWeek = GAMES && GAMES.length ? GAMES[0].week : 1;
 
@@ -3931,62 +3965,14 @@ function renderResults(){
     return sched ? `${sched.away.toLowerCase()}-${sched.home.toLowerCase()}` : null;
   }
 
-  // ---- Pick'em record ----
-  const pickemHist = getPickemHistory();
-  // Only real numeric week keys -- a stray non-numeric key (e.g. "undefined", from a pick made
-  // before GAMES had loaded a real week number) turns into NaN via Number(), and pickemHist[NaN]
-  // finds nothing, so Object.entries(undefined) throws and silently kills this ENTIRE function
-  // (Pick'em record AND everything rendered after it, including Survivor Record) -- exactly
-  // the "results not showing at all" symptom this guard fixes. Caught 2026-09-14.
-  const pickemWeeks = Object.keys(pickemHist).filter(k => /^\d+$/.test(k)).map(Number).sort((a,b)=>a-b);
-  let cumW=0, cumL=0, cumP=0;
-  const weekRows = pickemWeeks.map(week => {
-    const picks = pickemHist[week];
-    let w=0, l=0, p=0, pend=0;
-    const pickDetails = Object.entries(picks).map(([gameId, entry]) => {
-      const team = pickedTeam(entry), lineAtPick = pickedLine(entry);
-      const grade = gradeATSPick(gameId, team);
-      if(grade==='win') w++; else if(grade==='loss') l++; else if(grade==='push') p++; else pend++;
-      return {gameId, team, lineAtPick, grade};
-    });
-    cumW+=w; cumL+=l; cumP+=p;
-    return {week, w, l, p, pend, pickDetails};
-  });
-  const cumTotal = cumW+cumL+cumP;
-  const cumPct = cumTotal>0 ? ((cumW/(cumW+cumL||1))*100).toFixed(1) : null;
-
-  // Editable directly here, not just on the Pick'em page -- fixes a mis-recorded pick (fat
-  // fingered the wrong team, forgot to log it before the game) without needing that week's
-  // live market data: the two team options come from parseGameId, and setPickemPick already
-  // works for any week, not just the current one.
-  pickemEl.innerHTML = pickemWeeks.length===0 ? '<div class="empty-note">No picks locked yet -- head to Spread Zone and lock your 5 for this week.</div>' : `
-    <div style="font-size:13px;margin-bottom:12px;">
-      <b>Season record: ${cumW}-${cumL}${cumP?`-${cumP}`:''} ATS${cumPct?` (${cumPct}%)`:''}</b> across ${weekRows.filter(r=>r.w+r.l+r.p>0).length} graded week(s).
-    </div>
-    <div class="table-wrap">
-    <table class="rank">
-      <thead><tr><th>Week</th><th>Record</th><th>Picks</th></tr></thead>
-      <tbody>
-        ${weekRows.slice().reverse().map(r => `
-        <tr>
-          <td>Wk ${r.week}${r.week===currentWeek?' <span style="color:var(--sage);">(current)</span>':''}</td>
-          <td>${r.w}-${r.l}${r.p?`-${r.p}`:''}${r.pend?` <span style="color:var(--sage);">(${r.pend} pending)</span>`:''}</td>
-          <td style="font-size:11.5px;">
-            ${r.pickDetails.map(d => {
-              const {away, home} = parseGameId(d.gameId);
-              const lineStr = d.lineAtPick!=null ? ` @ ${d.lineAtPick>0?'+':''}${d.lineAtPick.toFixed(1)}` : '';
-              return `<span style="display:inline-flex;align-items:center;gap:3px;margin:2px 4px 2px 0;">
-                <span class="status-pill" style="${d.grade==='win'?'color:var(--good);':d.grade==='loss'?'color:var(--alert);':''}">${d.team}${lineStr}${d.grade?` (${d.grade})`:' (pending)'}</span>
-                <button class="btn" style="padding:1px 5px;font-size:9.5px;" title="Change to ${d.team===home?away:home}" onclick="setPickemPick(${r.week}, '${d.gameId}', '${d.team===home?away:home}'); renderResults();">&#8646;</button>
-                <button class="btn" style="padding:1px 5px;font-size:9.5px;" title="Remove this pick" onclick="setPickemPick(${r.week}, '${d.gameId}', '${d.team}'); renderResults();">&times;</button>
-              </span>`;
-            }).join('')}
-          </td>
-        </tr>`).join('')}
-      </tbody>
-    </table>
-    </div>`;
-
+  // Pick'em Record and Fantasy Records used to render here too -- removed from Results at the
+  // user's request: this page is meant to be a clean read on real model performance, not a mix
+  // of personal-pick tracking and fantasy league bookkeeping. Fantasy matchup logging still
+  // lives fully on the Fantasy tab. Pick'em's per-week W/L table with the fix-a-pick buttons,
+  // though, was ONLY ever rendered here -- it's not duplicated on the Pick'em tab (which only
+  // has this week's picks + pool standings/helper) -- so removing it from Results does remove
+  // that specific view, not just declutter a duplicate. The underlying data (getPickemHistory)
+  // is untouched and nothing about locking/grading picks is affected either way.
   // ---- Survivor record ----
   const survivorHist = getSurvivorHistory();
   // Same guard as pickemWeeks above -- a stray non-numeric key would otherwise crash this too.
@@ -4021,10 +4007,15 @@ function renderResults(){
     </table>
     </div>`}
   `;
+}
 
-  // ---- Fantasy records (manual entry, W/L derived) ----
+// Fantasy matchup W/L logging -- moved here from the old Results page (that was the only place
+// it ever rendered; Results is now a clean model-performance-only page, see renderResults()).
+function renderFantasyRecords(){
+  const el = document.getElementById('fantasy-records');
+  if(!el) return;
   const fmAll = getFantasyMatchups();
-  fantasyEl.innerHTML = FANTASY_ROSTERS.map(league => {
+  el.innerHTML = FANTASY_ROSTERS.map(league => {
     const matchups = fmAll[league.id] || [];
     const wins = matchups.filter(m=>m.pf>m.pa).length;
     const losses = matchups.filter(m=>m.pf<m.pa).length;
@@ -4833,7 +4824,9 @@ async function boot(){
   [QB_HISTORY, TEAM_PLAYERS, FANTASY_PROJECTIONS, RATING_HISTORY, BOOKS, WEATHER, CLOSING_RESULTS, CLOSING_LINES]
     .forEach(o => { for(const k of Object.keys(o)) delete o[k]; });
   UNDERPERFORMANCE.players = []; UNDERPERFORMANCE.note = null;
-  Object.assign(MODEL_SEASON_RECORD, {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []});
+  Object.assign(MODEL_SEASON_RECORD, {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: [],
+    totals: {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []},
+    team_totals: {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []}});
   try{
     const metaSnap = await db.collection('meta').doc('current').get();
     const meta = metaSnap.exists ? metaSnap.data() : {season: 2026, week: 1};
