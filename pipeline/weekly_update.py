@@ -1375,8 +1375,12 @@ if __name__ == "__main__":
         qb_wk = qb_wk[qb_wk.passer.isin(qb_lb_out and [r["player"] for r in qb_lb_out] or [])]
         qb_history_out = {}
         for name, grp in qb_wk.groupby("passer"):
-            qb_history_out[name] = [{"week": int(w), "cpoe": round(float(c), 2)}
-                                     for w, c in zip(grp.week, grp.cpoe)]
+            # attempts carried through per week (not just the season-long 100+ gate above) so a
+            # real but tiny-sample week -- a single mop-up-duty relief snap, e.g. -- can be told
+            # apart from a real, meaningful game when something downstream (like the "biggest
+            # single-game CPOE" notable fact) decides whether to actually feature it.
+            qb_history_out[name] = [{"week": int(w), "cpoe": round(float(c), 2), "attempts": int(a)}
+                                     for w, c, a in zip(grp.week, grp.cpoe, grp.attempts)]
         print(f"\n--- QB_HISTORY (real, {most_recent_season} only -- paste into const QB_HISTORY = { '{' } ... { '}' }) ---")
         print(json.dumps(qb_history_out, indent=1))
 
