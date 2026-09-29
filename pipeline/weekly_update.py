@@ -605,7 +605,14 @@ def build_closing_results(games_prev_week):
         if pd.isna(r.result) or r.result == "":
             continue
         gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
-        out[gid] = {"close_home": float(r.spread_line), "away_score": int(r.away_score), "home_score": int(r.home_score)}
+        entry = {"close_home": float(r.spread_line), "away_score": int(r.away_score), "home_score": int(r.home_score)}
+        # Real closing game total (nflverse's own total_line) -- same real-closing-number
+        # standard the spread grading already holds itself to, now available for grading the
+        # total model the exact same honest way, not against a live "market" snapshot that can
+        # go stale/null once a game's kicked off.
+        if pd.notna(r.total_line):
+            entry["close_total"] = float(r.total_line)
+        out[gid] = entry
     return out
 
 
@@ -902,6 +909,16 @@ def build_model_season_record(db, season):
     closing_docs = {d.id: d.to_dict() for d in db.collection("closing_results").stream()}
 
     graded, by_week = [], {}
+    # Totals graded the same real-closing-line standard as spread (close_total, straight from
+    # nflverse -- see build_closing_results). Team totals CAN'T be held to that same standard --
+    # there's no real historical/closing per-team-total data source (checked before building the
+    # totals feature at all) -- so team-total grading uses the last real market_home_total/
+    # market_away_total this pipeline itself stored for that game before kickoff, which is real
+    # and honest but not a true close the way close_home/close_total are. Both start accumulating
+    # from whenever the totals feature shipped -- older weeks' games docs don't have model_total/
+    # market_home_total at all and are skipped, not backfilled with a fabricated number.
+    total_graded, total_by_week = [], {}
+    team_total_graded = []
     for doc in games_docs:
         gdoc = doc.to_dict() or {}
         if gdoc.get("season") != season:
@@ -932,14 +949,64 @@ def build_model_season_record(db, season):
             by_week.setdefault(wk_key, {"wins": 0, "losses": 0, "pushes": 0})
             by_week[wk_key][{"win": "wins", "loss": "losses", "push": "pushes"}[grade]] += 1
 
+            # ---- Total (game combined score) -- real closing number, same rigor as spread ----
+            close_total = cr.get("close_total")
+            model_total = g.get("model_total")
+            if close_total is not None and model_total is not None:
+                actual_total = cr["home_score"] + cr["away_score"]
+                t_edge = model_total - close_total
+                model_pick = "over" if t_edge > 0 else "under"
+                t_diff = actual_total - close_total
+                if abs(t_diff) < 1e-9:
+                    t_grade = "push"
+                else:
+                    went_over = t_diff > 0
+                    t_grade = "win" if went_over == (model_pick == "over") else "loss"
+                total_graded.append({"week": wk, "game_id": g["id"], "pick": model_pick,
+                                      "edge": round(abs(t_edge), 2), "grade": t_grade})
+                total_by_week.setdefault(wk_key, {"wins": 0, "losses": 0, "pushes": 0})
+                total_by_week[wk_key][{"win": "wins", "loss": "losses", "push": "pushes"}[t_grade]] += 1
+
+            # ---- Each team's own total -- graded vs. our own last stored market snapshot ----
+            for side, team in (("home", g["home"]), ("away", g["away"])):
+                mkt = g.get(f"market_{side}_total")
+                mdl = g.get(f"model_{side}_total")
+                if mkt is None or mdl is None:
+                    continue
+                actual = cr["home_score"] if side == "home" else cr["away_score"]
+                tt_edge = mdl - mkt
+                pick = "over" if tt_edge > 0 else "under"
+                tt_diff = actual - mkt
+                if abs(tt_diff) < 1e-9:
+                    tt_grade = "push"
+                else:
+                    tt_grade = "win" if (tt_diff > 0) == (pick == "over") else "loss"
+                team_total_graded.append({"week": wk, "game_id": g["id"], "team": team, "pick": pick,
+                                           "edge": round(abs(tt_edge), 2), "grade": tt_grade})
+
     wins = sum(1 for r in graded if r["grade"] == "win")
     losses = sum(1 for r in graded if r["grade"] == "loss")
     pushes = sum(1 for r in graded if r["grade"] == "push")
     win_pct = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else None
 
+    t_wins = sum(1 for r in total_graded if r["grade"] == "win")
+    t_losses = sum(1 for r in total_graded if r["grade"] == "loss")
+    t_pushes = sum(1 for r in total_graded if r["grade"] == "push")
+    t_win_pct = round(t_wins / (t_wins + t_losses) * 100, 1) if (t_wins + t_losses) > 0 else None
+
+    tt_wins = sum(1 for r in team_total_graded if r["grade"] == "win")
+    tt_losses = sum(1 for r in team_total_graded if r["grade"] == "loss")
+    tt_pushes = sum(1 for r in team_total_graded if r["grade"] == "push")
+    tt_win_pct = round(tt_wins / (tt_wins + tt_losses) * 100, 1) if (tt_wins + tt_losses) > 0 else None
+
     return {
         "season": season, "wins": wins, "losses": losses, "pushes": pushes, "win_pct": win_pct,
         "total_graded": len(graded), "by_week": by_week, "games": graded,
+        "totals": {"wins": t_wins, "losses": t_losses, "pushes": t_pushes, "win_pct": t_win_pct,
+                   "total_graded": len(total_graded), "by_week": total_by_week, "games": total_graded},
+        "team_totals": {"wins": tt_wins, "losses": tt_losses, "pushes": tt_pushes, "win_pct": tt_win_pct,
+                         "total_graded": len(team_total_graded), "games": team_total_graded,
+                         "note": "Graded vs. the last market number this pipeline itself captured before kickoff, not a true historical close (no real closing per-team-total data source exists) -- honest, but a slightly different standard than the spread/total records above."},
     }
 
 
