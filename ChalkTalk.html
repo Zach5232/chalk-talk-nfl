@@ -2457,6 +2457,13 @@ function openTeamDetail(team){
     <div class="weather-box">
       <span class="wx-item"><b style="color:${r.overall_pts>0?'var(--gold)':'var(--alert)'}">${r.overall_pts>0?'+':''}${r.overall_pts}</b> pts vs. league average</span>
     </div>
+    <div class="dash-card" style="margin-top:8px;font-size:12.5px;line-height:1.6;">
+      <b>This is not a predicted score -- it's a margin.</b> ${team} at ${r.overall_pts>0?'+':''}${r.overall_pts} means: if they played a hypothetical exactly-league-average team on a neutral field, we'd expect them to win (or lose) by about ${Math.abs(r.overall_pts)} points. A team at 0.0 is exactly average. It says nothing on its own about how many points ${team} will actually score in a real game -- that depends on the specific opponent too (see below).
+      <br><br>
+      <b>How we get there:</b> every real offensive and defensive play ${team} has run this season is compared against how good the specific opponent they were facing is, using a real statistical fit (ridge regression) that separates "this team is genuinely good" from "they just played weak/strong opponents." A game from 6 weeks ago counts for about half as much as one from this week -- recent play matters more. Early in a season, before there's much real current-season data, this blends in a real share of last year's rating so the number isn't wildly unstable off 1-2 games; that share fades out on its own as more real games pile up (no manual adjustment needed).
+      <br><br>
+      <b>Why this can differ from a real game's spread in Spread Zone:</b> that number combines both teams' real off/def ratings directly against EACH OTHER for that specific matchup (plus real home-field edge) -- a more precise, game-specific calculation than this page's "vs. a hypothetical average team" power rating. They're built from the same underlying data, just answering slightly different questions.
+    </div>
     ${(TEAM_PLAYERS[team] && TEAM_PLAYERS[team].qb_change) ? `
     <div class="empty-note" style="border:1px solid var(--alert);color:var(--alert);padding:8px 10px;border-radius:8px;margin-top:8px;font-size:12px;">
       &#9888; QB change: started ${TEAM_PLAYERS[team].prior_qb} last season, now starting ${TEAM_PLAYERS[team].qb}. This rating is a team-level stat with no concept of "who's the QB" -- it's still largely running on last season's carryover prior this early, so it may understate a real personnel downgrade (or overstate an upgrade) until more real games with the new starter accumulate.
