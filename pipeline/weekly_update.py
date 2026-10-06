@@ -598,6 +598,94 @@ def fetch_team_totals_for_week(api_key, week_games):
     return out
 
 
+# ---------- Player prop value: real multi-book devig + consensus, not a from-scratch model ----------
+# Deliberately does NOT try to out-predict the market (that's a much higher, unproven bar -- see
+# the spread/total backtests). Pulls every real book's price for the same real player prop,
+# removes each book's own vig (devig), averages into a real consensus "what does the market as a
+# whole think," then flags whichever single book's price is out of line with that consensus --
+# real line-shopping/soft-book detection, the same technique tools like Unabated's Props
+# Simulator and Market-Based Projections are built around (confirmed via their own public docs
+# before this was written), not a novel or unvalidated idea.
+#
+# Real, verified cost before this was ever written as a permanent feature: 5 credits per event
+# for this exact market set (confirmed live against the real account), so a full ~16-game week
+# costs roughly 80 credits -- trivial against a 20K/month plan even run every single pipeline run.
+PROP_MARKETS = "player_pass_yds,player_rush_yds,player_reception_yds,player_receptions,player_pass_tds,player_pass_completions,player_rush_attempts,player_anytime_td"
+_MIN_EDGE_PP = 0.03  # 3 percentage points -- a real, meaningful gap, not noise in a devig estimate
+
+def _american_to_prob(odds):
+    odds = float(odds)
+    return -odds / (-odds + 100) if odds < 0 else 100 / (odds + 100)
+
+def build_prop_value_report(api_key, week_games):
+    import urllib.request
+    try:
+        events_url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/?apiKey={api_key}"
+        with urllib.request.urlopen(events_url, timeout=20) as resp:
+            events = json.loads(resp.read())
+    except Exception as e:
+        print(f"  (prop_value: couldn't fetch real event list, skipping entirely -- {e})")
+        return []
+
+    all_edges = []
+    for _, r in week_games.iterrows():
+        home_full, away_full = REV_MAP[r.home_team], REV_MAP[r.away_team]
+        event = next((e for e in events if e.get("home_team")==home_full and e.get("away_team")==away_full), None)
+        if not event:
+            continue
+        gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
+        url = (f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event['id']}/odds"
+               f"?apiKey={api_key}&regions=us&markets={PROP_MARKETS}&oddsFormat=american")
+        try:
+            with urllib.request.urlopen(url, timeout=20) as resp:
+                data = json.loads(resp.read())
+        except Exception as e:
+            print(f"  prop_value {gid}: couldn't fetch -- {e}")
+            continue
+
+        # (market, player, line) -> {book: {Over: price, Under: price}}
+        props = {}
+        for bm in data.get("bookmakers", []):
+            book = bm["key"]
+            for mk in bm.get("markets", []):
+                market_key = mk["key"]
+                by_player = {}
+                for oc in mk.get("outcomes", []):
+                    player, point = oc.get("description"), oc.get("point")
+                    by_player.setdefault((market_key, player, point), {})[oc["name"]] = oc["price"]
+                for key, sides in by_player.items():
+                    if "Over" in sides and "Under" in sides:
+                        props.setdefault(key, {})[book] = sides
+
+        for (market_key, player, point), books in props.items():
+            if len(books) < 2:
+                continue  # can't form a real consensus off a single book
+            devigged = {}
+            for book, sides in books.items():
+                p_over = _american_to_prob(sides["Over"])
+                p_under = _american_to_prob(sides["Under"])
+                total = p_over + p_under
+                devigged[book] = {"over": p_over/total, "under": p_under/total,
+                                   "over_odds": sides["Over"], "under_odds": sides["Under"]}
+            consensus_over = sum(d["over"] for d in devigged.values()) / len(devigged)
+            for book, d in devigged.items():
+                edge_over = consensus_over - d["over"]
+                edge_under = (1 - consensus_over) - d["under"]
+                if edge_over > _MIN_EDGE_PP:
+                    all_edges.append({"game_id": gid, "market": market_key, "player": player, "line": point,
+                                       "side": "Over", "book": book, "odds": d["over_odds"],
+                                       "edge_pp": round(edge_over*100, 1), "consensus_pct": round(consensus_over*100, 1),
+                                       "book_implied_pct": round(d["over"]*100, 1), "n_books": len(books)})
+                if edge_under > _MIN_EDGE_PP:
+                    all_edges.append({"game_id": gid, "market": market_key, "player": player, "line": point,
+                                       "side": "Under", "book": book, "odds": d["under_odds"],
+                                       "edge_pp": round(edge_under*100, 1), "consensus_pct": round((1-consensus_over)*100, 1),
+                                       "book_implied_pct": round(d["under"]*100, 1), "n_books": len(books)})
+
+    all_edges.sort(key=lambda e: -e["edge_pp"])
+    return all_edges
+
+
 # ---------- STEP 4: previous week's closing lines + results ----------
 def build_closing_results(games_prev_week):
     out = {}
@@ -795,7 +883,8 @@ def get_firestore_client(cred_path):
 def write_firestore(db, *, season, week, ratings_rows, games, books, closing, weather,
                      rating_history, qb_leaderboard, wr_leaderboard, rb_leaderboard,
                      qb_history, team_players, fantasy_projections, underperformance_report=None,
-                     team_full_roster=None, team_situational=None, team_diagnostics=None):
+                     team_full_roster=None, team_situational=None, team_diagnostics=None,
+                     prop_value=None):
     """One real write per real thing computed this run. Batches where Firestore allows it
     (500-write cap per batch, nowhere close to hit here); ratings_history/leaderboards/
     fantasy_projections/meta are each a single doc, so those are plain sets."""
@@ -838,6 +927,16 @@ def write_firestore(db, *, season, week, ratings_rows, games, books, closing, we
         batch.set(db.collection("weather").document(gid), entry)
     batch.commit()
     written.append(f"weather/* ({len(weather)} games)")
+
+    # prop_value/current -- real multi-book devig/consensus edges, this week only (full
+    # overwrite is correct here, not an accumulate-across-weeks collection like closing_results --
+    # last week's prop lines are dead once those games are over).
+    if prop_value is not None:
+        db.collection("prop_value").document("current").set({
+            "season": season, "week": week, "edges": prop_value,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        })
+        written.append(f"prop_value/current ({len(prop_value)} edges)")
 
     # closing_results/{gameId} -- set (not overwrite-the-collection), so this naturally
     # accumulates across weeks: each week's real gameIds land as their own new docs
@@ -1480,6 +1579,10 @@ if __name__ == "__main__":
     books = build_books_for_week(odds_data, ratings["games_this_week"])
     team_totals_data = fetch_team_totals_for_week(API_KEY, ratings["games_this_week"])
     print(f"\n--- TEAM TOTALS: real market lines fetched for {len(team_totals_data)} of {len(ratings['games_this_week'])} games ---")
+
+    prop_value_out = build_prop_value_report(API_KEY, ratings["games_this_week"])
+    print(f"\n--- PROP VALUE: {len(prop_value_out)} real flagged edges across this week's games ---")
+    print(json.dumps(prop_value_out[:20], indent=1), "\n...(top 20 shown)" if len(prop_value_out) > 20 else "")
     # Grade previous week's games (normal weekly cadence) PLUS any game in the CURRENT
     # week's slate that has already gone final -- e.g. re-running mid-week after a
     # Thursday/Sunday-night opener finishes, without waiting for the whole week to end.
@@ -1705,7 +1808,7 @@ if __name__ == "__main__":
             qb_history=qb_history_out, team_players=team_players_out,
             fantasy_projections=proj, underperformance_report=underperf,
             team_full_roster=team_full_roster_out, team_situational=team_situational_out,
-            team_diagnostics=team_diagnostics_out,
+            team_diagnostics=team_diagnostics_out, prop_value=prop_value_out,
         )
 
         # Real season-long model-vs-market record, every game, regardless of what was
