@@ -227,6 +227,7 @@
     <button id="nav-ranks" onclick="showView('ranks')">The Margin</button>
     <button id="nav-week" onclick="showView('week')">Spread Zone</button>
     <button id="nav-pickem" onclick="showView('pickem')">Pick'em</button>
+    <button id="nav-props" onclick="showView('props')">Props</button>
     <button id="nav-fantasy" onclick="showView('fantasy')">Player Watch</button>
     <button id="nav-survivor" onclick="showView('survivor')">Survivor</button>
     <button id="nav-results" onclick="showView('results')">Results</button>
@@ -277,6 +278,21 @@
 
     <div class="section-label">Market Movement vs. Your Splash Lines</div>
     <div class="dash-card" id="splash-movement"></div>
+  </div>
+
+  <div id="view-props" class="view">
+    <div class="section-label">Props &middot; multi-book line shopping</div>
+    <div class="dash-card" style="font-size:12px;color:var(--sage);margin-bottom:14px;">
+      This is NOT an independent prediction -- it's the same math a $99/mo tool like Unabated's
+      Props Simulator runs under the hood: every book quoting a player prop is devigged (its
+      Over/Under pair stripped of house edge back to a real implied probability), then averaged
+      across books into a consensus "true" number. Any single book priced more than 3 percentage
+      points off that consensus gets flagged here -- it's either a soft/slow number worth
+      grabbing, or a book with real information the others don't have yet. Needs 2+ books
+      quoting the exact same player/market/line to form a consensus at all, so thin markets
+      (anytime-TD especially) show up less often than big ones (pass/rush/rec yards).
+    </div>
+    <div id="prop-value-list"></div>
   </div>
 
   <div id="view-detail" class="view">
@@ -463,12 +479,14 @@ function showView(name){
   document.getElementById('nav-week').classList.toggle('active', name==='week');
   document.getElementById('nav-pickem').classList.toggle('active', name==='pickem');
   document.getElementById('nav-ranks').classList.toggle('active', name==='ranks');
+  document.getElementById('nav-props').classList.toggle('active', name==='props');
   document.getElementById('nav-fantasy').classList.toggle('active', name==='fantasy');
   document.getElementById('nav-survivor').classList.toggle('active', name==='survivor');
   document.getElementById('nav-results').classList.toggle('active', name==='results');
   document.getElementById('nav-tracker').classList.toggle('active', name==='tracker');
   if(name==='tracker'){ populateGameSelect(); renderBets(); }
   if(name==='dash'){ renderDashboard(); }
+  if(name==='props'){ renderPropValue(); }
   if(name==='fantasy'){ renderFantasy(); }
   if(name==='survivor'){ renderSurvivor(); }
   if(name==='results'){ renderResults(); }
@@ -656,6 +674,12 @@ let UNDERPERFORMANCE = {players: [], note: null};
 let MODEL_SEASON_RECORD = {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: [],
   totals: {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []},
   team_totals: {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: []}};
+
+// Real multi-book devig/consensus player prop edges -- NOT a from-scratch prediction, a real
+// line-shopping/soft-book-detection pass (see build_prop_value_report() in the pipeline). A
+// flagged edge means one specific book's price is out of line with what every other real book
+// quoting that same prop thinks is fair, not that our own model disagrees with the whole market.
+let PROP_VALUE = [];
 
 
 
@@ -1622,6 +1646,60 @@ function renderGameCard(g){
       </div>
       <div class="gc-final">Upcoming${g.hasDetail?'  <span class="chevron">&middot; full breakdown &rarr;</span>':''}</div>
     </div>`;
+}
+
+// Odds API market key -> plain label, for the Props tab.
+const PROP_MARKET_LABELS = {
+  player_pass_yds: 'Pass Yds', player_rush_yds: 'Rush Yds', player_reception_yds: 'Rec Yds',
+  player_receptions: 'Receptions', player_pass_tds: 'Pass TDs', player_pass_completions: 'Completions',
+  player_rush_attempts: 'Rush Att', player_anytime_td: 'Anytime TD',
+};
+// Book key -> plain label (Odds API's internal keys aren't always the obvious display name).
+const BOOK_LABELS = {
+  draftkings:'DraftKings', fanduel:'FanDuel', betmgm:'BetMGM', caesars:'Caesars',
+  pointsbetus:'PointsBet', williamhill_us:'Caesars', betrivers:'BetRivers', unibet_us:'Unibet',
+  wynnbet:'WynnBET', betonlineag:'BetOnline', bovada:'Bovada', mybookieag:'MyBookie',
+  lowvig:'LowVig', superbook:'SuperBook', betus:'BetUS', foxbet:'FOX Bet',
+};
+function bookLabel(k){ return BOOK_LABELS[k] || (k||'').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()); }
+
+// Props tab: real multi-book devig/consensus edges from Firestore's prop_value/current (written
+// by build_prop_value_report in the pipeline -- see that function's own comment for the math).
+// This is deliberately a LOWER bar than the spread/total model: it's not predicting anything,
+// just finding where one book's price disagrees with the rest of the market by more than noise
+// (_MIN_EDGE_PP = 3pp) should explain. No backtest claim is attached to this the way edgeValueColor
+// carries one for spread/total -- "outlier vs. consensus" is the whole claim, nothing stronger.
+function renderPropValue(){
+  const el = document.getElementById('prop-value-list');
+  if(!el) return;
+  if(!PROP_VALUE.length){
+    el.innerHTML = '<div class="empty-note">No edges flagged this week -- either every book agrees within 3pp, or props data hasn\'t loaded for this slate yet.</div>';
+    return;
+  }
+  el.innerHTML = PROP_VALUE.map(e=>{
+    const [away, home] = (e.game_id||'').split('-');
+    const matchup = (away && home) ? `${away.toUpperCase()} @ ${home.toUpperCase()}` : (e.game_id||'');
+    const marketLabel = PROP_MARKET_LABELS[e.market] || e.market;
+    const oddsStr = e.odds>0 ? `+${e.odds}` : `${e.odds}`;
+    return `
+    <div class="game-card" style="cursor:default;">
+      <div class="game-card-top">
+        <div class="gc-teams" style="font-size:13px;">${e.player}</div>
+        <div class="gc-lines" style="font-size:11px;">${matchup}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:6px;font-size:12.5px;">
+        <span style="color:var(--sage);min-width:86px;">${marketLabel}</span>
+        <span style="font-weight:700;">${e.side} ${e.line}</span>
+        <span style="color:var(--sage);">${bookLabel(e.book)} ${oddsStr}</span>
+        <span style="flex:1;text-align:right;font-weight:700;color:var(--good);">+${e.edge_pp.toFixed(1)}pp</span>
+      </div>
+      <div style="display:flex;gap:14px;font-size:10.5px;color:var(--sage);margin-top:4px;">
+        <span>Consensus: ${e.consensus_pct.toFixed(1)}%</span>
+        <span>This book: ${e.book_implied_pct.toFixed(1)}%</span>
+        <span>${e.n_books} books</span>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 // ---- NEW: edge / signal helpers ----
@@ -4895,7 +4973,7 @@ async function boot(){
   // exact array/object instances at page-load time, so a plain reassignment here would leave
   // that reference pointing at a permanently-empty orphaned copy while the real data landed in
   // a new object nothing else could see.
-  [RATINGS, GAMES, QB_LEADERBOARD, WR_LEADERBOARD, RB_LEADERBOARD, FANTASY_ROSTERS, FANTASY_ROSTERS_BASE]
+  [RATINGS, GAMES, QB_LEADERBOARD, WR_LEADERBOARD, RB_LEADERBOARD, FANTASY_ROSTERS, FANTASY_ROSTERS_BASE, PROP_VALUE]
     .forEach(a => { a.length = 0; });
   [QB_HISTORY, TEAM_PLAYERS, FANTASY_PROJECTIONS, RATING_HISTORY, BOOKS, WEATHER, CLOSING_RESULTS, CLOSING_LINES,
    TEAM_FULL_ROSTER, TEAM_SITUATIONAL, TEAM_DIAGNOSTICS]
@@ -4920,7 +4998,7 @@ async function boot(){
 
     const [ratingsSnap, historySnap, gamesSnap, booksSnap, weatherSnap, closingSnap,
            leaderboardsSnap, projSnap, rostersSnap, overridesSnap, stateSnap, underperfSnap,
-           modelRecordSnap, closingLinesSnap] = await Promise.all([
+           modelRecordSnap, closingLinesSnap, propValueSnap] = await Promise.all([
       db.collection('ratings').get(),
       db.collection('ratings_history').get(),
       db.collection('games').doc(weekId).get(),
@@ -4935,6 +5013,7 @@ async function boot(){
       db.collection('fantasy_underperformance').doc('current').get(),
       db.collection('model_season_record').doc('current').get(),
       db.collection('closing_lines').get(),
+      db.collection('prop_value').doc('current').get(),
     ]);
 
     RATINGS.push(...ratingsSnap.docs.map(d => d.data()));
@@ -4977,6 +5056,10 @@ async function boot(){
 
     if(underperfSnap.exists){
       Object.assign(UNDERPERFORMANCE, underperfSnap.data() || {});
+    }
+
+    if(propValueSnap.exists){
+      PROP_VALUE.push(...((propValueSnap.data() || {}).edges || []));
     }
 
     if(modelRecordSnap.exists){
