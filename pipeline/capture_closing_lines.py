@@ -116,5 +116,70 @@ def capture(season, week):
             })
 
 
+def _debug_historical_props_feasibility():
+    """TEMPORARY -- removed after use. Checks ONLY whether the Odds API's historical endpoint
+    has player-prop markets for a real week-1 2026 game already played, and at what quota cost
+    -- so we know before building anything whether a real retroactive backtest (weeks already
+    played this season, graded against real nflverse results) is even possible on our plan.
+    Makes at most 2 real API calls total. Prints only computed results, never the API key."""
+    import json, urllib.request
+
+    games = pd.read_csv(fetch_games_csv())
+    wk1 = games[(games.season.astype(str) == str(SEASON)) & (games.week == 1) & (games.game_type == "REG")]
+    if wk1.empty:
+        print(f"No real week 1 {SEASON} games found in games.csv -- can't pick a target.")
+        return
+    r = wk1.iloc[0]
+    kickoff_et = datetime.strptime(f"{r.gameday} {r.gametime}", "%Y-%m-%d %H:%M").replace(tzinfo=EASTERN)
+    kickoff_utc = kickoff_et.astimezone(timezone.utc)
+    snapshot_dt = kickoff_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"Target: real week 1 game {r.away_team}@{r.home_team}, kickoff {kickoff_utc.isoformat()}")
+    print(f"Querying historical events as of {snapshot_dt}...")
+
+    events_url = (f"https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events"
+                  f"?apiKey={API_KEY}&date={snapshot_dt}")
+    try:
+        with urllib.request.urlopen(events_url, timeout=20) as resp:
+            payload = json.loads(resp.read())
+            headers_seen = dict(resp.headers)
+    except Exception as e:
+        print(f"HISTORICAL EVENTS CALL FAILED: {e}")
+        return
+    print(f"  quota used={headers_seen.get('x-requests-used')} remaining={headers_seen.get('x-requests-remaining')} last_cost={headers_seen.get('x-requests-last')}")
+    events = payload.get("data", payload) if isinstance(payload, dict) else payload
+    if not isinstance(events, list):
+        print(f"  Unexpected shape: {type(payload)} -- raw snippet: {str(payload)[:500]}")
+        return
+    print(f"  {len(events)} real historical events returned for that snapshot")
+
+    home_full, away_full = REV_MAP[r.home_team], REV_MAP[r.away_team]
+    match = next((e for e in events if e.get("home_team") == home_full and e.get("away_team") == away_full), None)
+    if not match:
+        print(f"  Could not find {away_full} @ {home_full} in the historical events list -- stopping.")
+        print(f"  Sample of what WAS returned: {[ (e.get('away_team'), e.get('home_team')) for e in events[:5] ]}")
+        return
+    print(f"  Matched real event id {match['id']}")
+
+    markets = "player_pass_yds,player_rush_yds,player_reception_yds,player_receptions"
+    odds_url = (f"https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/{match['id']}/odds"
+                f"?apiKey={API_KEY}&regions=us&markets={markets}&oddsFormat=american&date={snapshot_dt}")
+    try:
+        with urllib.request.urlopen(odds_url, timeout=20) as resp:
+            odds_payload = json.loads(resp.read())
+            headers_seen2 = dict(resp.headers)
+    except Exception as e:
+        print(f"HISTORICAL EVENT-ODDS CALL FAILED: {e}")
+        return
+    print(f"  quota used={headers_seen2.get('x-requests-used')} remaining={headers_seen2.get('x-requests-remaining')} last_cost={headers_seen2.get('x-requests-last')}")
+    event_odds = odds_payload.get("data", odds_payload) if isinstance(odds_payload, dict) else odds_payload
+    bookmakers = event_odds.get("bookmakers", []) if isinstance(event_odds, dict) else []
+    print(f"  {len(bookmakers)} real bookmakers returned player-prop data for this historical snapshot")
+    for bm in bookmakers[:6]:
+        mkeys = [mk["key"] for mk in bm.get("markets", [])]
+        print(f"    {bm['key']}: markets={mkeys}")
+    if not bookmakers:
+        print(f"  Raw snippet for inspection: {str(event_odds)[:800]}")
+
+
 if __name__ == "__main__":
-    capture(SEASON, WEEK)
+    _debug_historical_props_feasibility()  # TEMPORARY -- real call (capture(SEASON, WEEK)) restored after this check
