@@ -57,6 +57,10 @@ service cloud.firestore {
       allow read: if true;
       allow write: if false;
     }
+    match /prop_value/{docId} {
+      allow read: if true;
+      allow write: if false;   // only the weekly pipeline (Admin SDK) writes this
+    }
     match /meta/{docId} {
       allow read: if true;
       allow write: if false;
