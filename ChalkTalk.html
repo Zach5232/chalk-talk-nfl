@@ -228,10 +228,15 @@
     <button id="nav-week" onclick="showView('week')">Spread Zone</button>
     <button id="nav-pickem" onclick="showView('pickem')">Pick'em</button>
     <button id="nav-props" onclick="showView('props')">Props</button>
-    <button id="nav-fantasy" onclick="showView('fantasy')">Player Watch</button>
-    <button id="nav-survivor" onclick="showView('survivor')">Survivor</button>
+    <!-- Player Watch / Survivor / Tracker hidden at the user's request (not using Player
+         Watch at all; eliminated from Survivor; bet tracking moved to the Juice Reel app) --
+         kept in the DOM (display:none) rather than deleted so showView()'s existing
+         getElementById calls for these ids keep working untouched, and the underlying data/
+         code isn't lost if any of this comes back later. -->
+    <button id="nav-fantasy" onclick="showView('fantasy')" style="display:none;">Player Watch</button>
+    <button id="nav-survivor" onclick="showView('survivor')" style="display:none;">Survivor</button>
     <button id="nav-results" onclick="showView('results')">Results</button>
-    <button id="nav-tracker" onclick="showView('tracker')">Tracker</button>
+    <button id="nav-tracker" onclick="showView('tracker')" style="display:none;">Tracker</button>
   </nav>
 
   <div id="view-dash" class="view active">
@@ -389,8 +394,12 @@
     <div class="section-label">Model Record &middot; every game, not just your picks (running tally, not something you actively bet)</div>
     <div class="dash-card" id="results-model-record"></div>
 
-    <div class="section-label">Survivor Record</div>
-    <div class="dash-card" id="results-survivor"></div>
+    <!-- Hidden along with the Survivor nav tab, same request -- kept in DOM so renderResults()'s
+         getElementById('results-survivor') keeps working untouched. -->
+    <div style="display:none;">
+      <div class="section-label">Survivor Record</div>
+      <div class="dash-card" id="results-survivor"></div>
+    </div>
 
     <div class="section-label">Export Your Data</div>
     <div class="dash-card">
@@ -4098,8 +4107,7 @@ function removeFantasyMatchup(leagueId, week){
   renderResults();
 }
 
-// Real game's own detail row -- shared by the spread and total sections below (team totals gets
-// its own, since it's graded per-team, not per-game).
+// Real game's own detail row -- shared by the spread and total sections below.
 function modelRecordGameRow(g, sideLabel){
   const clickable = GAMES.some(x => x.id === g.game_id);
   return `
@@ -4110,20 +4118,37 @@ function modelRecordGameRow(g, sideLabel){
     </div>`;
 }
 
-function weeklyBreakdown(record, sideLabel){
-  const weekRows = Object.keys(record.by_week||{}).map(Number).sort((a,b)=>b-a);
-  const gamesByWeek = {};
-  (record.games||[]).forEach(g => { (gamesByWeek[g.week] = gamesByWeek[g.week] || []).push(g); });
-  return weekRows.map(wk => {
-    const w = record.by_week[wk];
-    const games = (gamesByWeek[wk]||[]).slice().sort((a,b)=>a.game_id.localeCompare(b.game_id));
+// Team totals' own row -- single team + week badge, not an away@home pair (graded per-team,
+// not per-game).
+function teamTotalGameRow(g){
+  return `
+    <div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid var(--line);font-size:12px;">
+      <span>${logoImg(g.team,16)}${g.team}</span>
+      <span style="color:var(--sage);">Model: <b style="color:var(--text);">${g.pick}</b> (${g.edge>0?'+':''}${g.edge})</span>
+      <span class="status-pill ${g.grade}">${g.grade}</span>
+    </div>`;
+}
+
+// Click-to-expand per-week breakdown, shared by spread/total/team-total -- week win-loss-push
+// counts are computed directly from the real games list here (not a separate by_week field
+// that could drift out of sync with it), so this works for any of the three real record types
+// just by passing a different row renderer.
+function weeklyBreakdown(games, rowFn){
+  const byWeek = {};
+  (games||[]).forEach(g => { (byWeek[g.week] = byWeek[g.week] || []).push(g); });
+  const weeks = Object.keys(byWeek).map(Number).sort((a,b)=>b-a);
+  return weeks.map(wk => {
+    const wkGames = byWeek[wk].slice().sort((a,b)=>(a.game_id||'').localeCompare(b.game_id||''));
+    const wins = wkGames.filter(g=>g.grade==='win').length;
+    const losses = wkGames.filter(g=>g.grade==='loss').length;
+    const pushes = wkGames.filter(g=>g.grade==='push').length;
     return `
     <details style="border-top:1px solid var(--line);padding:8px 0;">
       <summary style="cursor:pointer;display:flex;justify-content:space-between;font-size:13px;list-style:none;">
-        <span>Week ${wk} <span style="color:var(--sage);font-weight:400;">(${games.length} game${games.length===1?'':'s'})</span></span>
-        <b>${w.wins}-${w.losses}${w.pushes?`-${w.pushes}`:''}</b>
+        <span>Week ${wk} <span style="color:var(--sage);font-weight:400;">(${wkGames.length} game${wkGames.length===1?'':'s'})</span></span>
+        <b>${wins}-${losses}${pushes?`-${pushes}`:''}</b>
       </summary>
-      <div style="margin-top:8px;">${games.map(g => modelRecordGameRow(g, sideLabel)).join('')}</div>
+      <div style="margin-top:8px;">${wkGames.map(rowFn).join('')}</div>
     </details>`;
   }).join('');
 }
@@ -4143,14 +4168,14 @@ function renderModelSeasonRecord(){
     <details open style="padding:8px 0;">
       <summary class="section-label" style="cursor:pointer;list-style:none;">Spread ATS &middot; ${r.wins}-${r.losses}${r.pushes?`-${r.pushes}`:''} (${r.win_pct}%)</summary>
       <div style="font-size:12px;color:var(--sage);margin:6px 0 4px;">${r.total_graded} graded games -- every real game with a market line this season, not just ones you picked or bet. Breakeven at standard -110 odds is 52.38%.</div>
-      ${weeklyBreakdown(r, 'Model')}
+      ${weeklyBreakdown(r.games, g => modelRecordGameRow(g, 'Model'))}
     </details>`;
 
   const totalSection = t.total_graded ? `
-    <details style="padding:8px 0;border-top:1px solid var(--line);">
+    <details open style="padding:8px 0;border-top:1px solid var(--line);">
       <summary class="section-label" style="cursor:pointer;list-style:none;">Game Total O/U &middot; ${t.wins}-${t.losses}${t.pushes?`-${t.pushes}`:''} (${t.win_pct}%)</summary>
       <div style="font-size:12px;color:var(--sage);margin:6px 0 4px;">${t.total_graded} graded games, real closing total line (nflverse), same standard as the spread record above. Only counts from whenever the totals feature shipped -- older weeks aren't backfilled.</div>
-      ${weeklyBreakdown(t, 'Model')}
+      ${weeklyBreakdown(t.games, g => modelRecordGameRow(g, 'Model'))}
     </details>` : `
     <div style="padding:8px 0;border-top:1px solid var(--line);">
       <div class="section-label">Game Total O/U</div>
@@ -4158,17 +4183,10 @@ function renderModelSeasonRecord(){
     </div>`;
 
   const teamTotalSection = tt.total_graded ? `
-    <details style="padding:8px 0;border-top:1px solid var(--line);">
+    <details open style="padding:8px 0;border-top:1px solid var(--line);">
       <summary class="section-label" style="cursor:pointer;list-style:none;">Team Totals &middot; ${tt.wins}-${tt.losses}${tt.pushes?`-${tt.pushes}`:''} (${tt.win_pct}%)</summary>
       <div style="font-size:12px;color:var(--sage);margin:6px 0 4px;">${tt.note || ''}</div>
-      <div style="margin-top:4px;">
-        ${tt.games.slice().reverse().map(g => `
-        <div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid var(--line);font-size:12px;">
-          <span>${logoImg(g.team,16)}${g.team} <span style="color:var(--sage);">(Wk ${g.week})</span></span>
-          <span style="color:var(--sage);">Model: <b style="color:var(--text);">${g.pick}</b> (${g.edge>0?'+':''}${g.edge})</span>
-          <span class="status-pill ${g.grade}">${g.grade}</span>
-        </div>`).join('')}
-      </div>
+      ${weeklyBreakdown(tt.games, teamTotalGameRow)}
     </details>` : `
     <div style="padding:8px 0;border-top:1px solid var(--line);">
       <div class="section-label">Team Totals</div>
