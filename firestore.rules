@@ -61,6 +61,10 @@ service cloud.firestore {
       allow read: if true;
       allow write: if false;   // only the weekly pipeline (Admin SDK) writes this
     }
+    match /qb_depth_chart_status/{docId} {
+      allow read: if true;
+      allow write: if false;   // only the twice-daily QB status check (Admin SDK) writes this
+    }
     match /meta/{docId} {
       allow read: if true;
       allow write: if false;
