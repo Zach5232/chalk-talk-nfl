@@ -611,7 +611,14 @@ def fetch_team_totals_for_week(api_key, week_games):
 # for this exact market set (confirmed live against the real account), so a full ~16-game week
 # costs roughly 80 credits -- trivial against a 20K/month plan even run every single pipeline run.
 PROP_MARKETS = "player_pass_yds,player_rush_yds,player_reception_yds,player_receptions,player_pass_tds,player_pass_completions,player_rush_attempts,player_anytime_td"
-_MIN_EDGE_PP = 0.03  # 3 percentage points -- a real, meaningful gap, not noise in a devig estimate
+# Real retroactive backtest against weeks 1-4 of this season (98 real flagged edges at the old
+# 3pp cutoff, 85 graded): 45.9% win rate vs. a 47.5% breakeven -- no real evidence this signal
+# clears the vig at 3pp, and the largest edge found all season was under 5pp, so there isn't
+# enough real spread in the data yet to prove a precise optimal cutoff either. This bump to 4pp
+# is a modest, honestly-labeled interim tightening (fewer, slightly cleaner-looking edges), NOT
+# a data-proven fix -- a real threshold-tuned curve needs the full per-edge dataset persisted,
+# not just the top-20 sample this backtest printed.
+_MIN_EDGE_PP = 0.04
 
 def _american_to_prob(odds):
     odds = float(odds)
