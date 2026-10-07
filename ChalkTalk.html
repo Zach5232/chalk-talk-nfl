@@ -239,9 +239,6 @@
     <div id="search-results"></div>
 
     <div id="dash-main-content">
-    <div class="section-label">Notable This Week</div>
-    <div class="dash-card" id="dash-notable"></div>
-
     <div class="section-label">Offense vs. Defense Landscape</div>
     <div class="dash-card" id="dash-quadrant"></div>
 
@@ -286,11 +283,13 @@
       This is NOT an independent prediction -- it's the same math a $99/mo tool like Unabated's
       Props Simulator runs under the hood: every book quoting a player prop is devigged (its
       Over/Under pair stripped of house edge back to a real implied probability), then averaged
-      across books into a consensus "true" number. Any single book priced more than 3 percentage
-      points off that consensus gets flagged here -- it's either a soft/slow number worth
-      grabbing, or a book with real information the others don't have yet. Needs 2+ books
-      quoting the exact same player/market/line to form a consensus at all, so thin markets
-      (anytime-TD especially) show up less often than big ones (pass/rush/rec yards).
+      across books into a consensus "true" number. Any single book priced more than 4 percentage
+      points off that consensus gets flagged here. A real backtest against weeks 1-4 of this
+      season (98 flagged edges) came back at 45.9% against a 47.5% breakeven -- no evidence this
+      alone beats the vig, and the largest edge found all season was under 5pp, so don't stake
+      real money on these. Needs 2+ books quoting the exact same player/market/line to form a
+      consensus at all, so thin markets (anytime-TD especially) show up less often than big ones
+      (pass/rush/rec yards).
     </div>
     <div id="prop-value-list"></div>
   </div>
@@ -1667,13 +1666,14 @@ function bookLabel(k){ return BOOK_LABELS[k] || (k||'').replace(/_/g,' ').replac
 // by build_prop_value_report in the pipeline -- see that function's own comment for the math).
 // This is deliberately a LOWER bar than the spread/total model: it's not predicting anything,
 // just finding where one book's price disagrees with the rest of the market by more than noise
-// (_MIN_EDGE_PP = 3pp) should explain. No backtest claim is attached to this the way edgeValueColor
-// carries one for spread/total -- "outlier vs. consensus" is the whole claim, nothing stronger.
+// (_MIN_EDGE_PP = 4pp) should explain. UNLIKE edgeValueColor for spread/total, this real backtest
+// (see the Props tab's own blurb) came back at 45.9% vs. a 47.5% breakeven across weeks 1-4 --
+// flagged here as a real disagreement worth knowing about, explicitly NOT a proven betting edge.
 function renderPropValue(){
   const el = document.getElementById('prop-value-list');
   if(!el) return;
   if(!PROP_VALUE.length){
-    el.innerHTML = '<div class="empty-note">No edges flagged this week -- either every book agrees within 3pp, or props data hasn\'t loaded for this slate yet.</div>';
+    el.innerHTML = '<div class="empty-note">No edges flagged this week -- either every book agrees within 4pp, or props data hasn\'t loaded for this slate yet.</div>';
     return;
   }
   el.innerHTML = PROP_VALUE.map(e=>{
@@ -4476,73 +4476,9 @@ function renderLineChart(targetId, points, opts){
 }
 
 function renderDashboard(){
-  renderDashNotable();
   renderDashQuadrant();
   initMovementChart();
   renderTeamSparkGrid();
-}
-
-function renderDashNotable(){
-  const facts = [];
-
-  // extremes across this week's ratings
-  const byHavoc = [...RATINGS].sort((a,b) => b.havoc_pts - a.havoc_pts);
-  if(byHavoc.length){
-    const top = byHavoc[0];
-    facts.push({team: top.team, text: `<b>${top.team}</b> leads the league in defensive havoc rate at <b style="color:var(--gold);">+${top.havoc_pts}pp</b> above average -- sacks, TFLs, forced fumbles, and picks, opponent-adjusted.`});
-  }
-  const byOff = [...RATINGS].sort((a,b) => b.off_pts - a.off_pts);
-  if(byOff.length){
-    const top = byOff[0];
-    facts.push({team: top.team, text: `<b>${top.team}</b>'s offense grades out at <b style="color:var(--gold);">+${top.off_pts} pts</b> above average, the best in the league right now.`});
-  }
-  const byDefWorst = [...RATINGS].sort((a,b) => b.def_pts - a.def_pts);
-  if(byDefWorst.length){
-    const worst = byDefWorst[0];
-    facts.push({team: worst.team, text: `<b>${worst.team}</b>'s defense is allowing <b style="color:var(--alert);">${worst.def_pts>0?'+':''}${worst.def_pts} pts</b> above average -- worst mark in the league.`});
-  }
-
-  // biggest single-game CPOE performance across tracked QBs -- a real bug this used to have:
-  // a 1-attempt mop-up-duty relief snap can produce a wildly extreme CPOE purely from noise
-  // (one incompletion or one deep completion IS +-100% of that "game"), and this used to pick
-  // that up as if it were a meaningful performance. Require a real, meaningful sample (10+
-  // attempts, a rough "played at least most of a half" bar) before a game is even eligible.
-  const MIN_ATTEMPTS_FOR_NOTABLE_GAME = 10;
-  let bestGame = null;
-  for(const [qb, hist] of Object.entries(QB_HISTORY)){
-    for(const h of hist){
-      if((h.attempts ?? 0) < MIN_ATTEMPTS_FOR_NOTABLE_GAME) continue;
-      if(!bestGame || Math.abs(h.cpoe) > Math.abs(bestGame.cpoe)){
-        bestGame = {qb, week: h.week, cpoe: h.cpoe};
-      }
-    }
-  }
-  if(bestGame){
-    const dir = bestGame.cpoe > 0 ? 'best' : 'worst';
-    facts.push({team: null, text: `<b>${bestGame.qb}</b> posted the ${dir} single-game accuracy performance we're tracking -- <b style="color:${bestGame.cpoe>0?'var(--good)':'var(--alert)'};">${bestGame.cpoe>0?'+':''}${bestGame.cpoe}% CPOE</b> in Week ${bestGame.week}.`});
-  }
-
-  // biggest week-over-week swing, for teams with real history
-  let biggestSwing = null;
-  for(const [team, hist] of Object.entries(RATING_HISTORY)){
-    for(let i=1;i<hist.length;i++){
-      const delta = hist[i].overall_pts - hist[i-1].overall_pts;
-      if(!biggestSwing || Math.abs(delta) > Math.abs(biggestSwing.delta)){
-        biggestSwing = {team, delta, week: hist[i].week};
-      }
-    }
-  }
-  if(biggestSwing){
-    const dir = biggestSwing.delta > 0 ? 'jumped' : 'dropped';
-    facts.push({team: biggestSwing.team, text: `<b>${biggestSwing.team}</b>'s rating ${dir} <b style="color:${biggestSwing.delta>0?'var(--good)':'var(--alert)'};">${biggestSwing.delta>0?'+':''}${biggestSwing.delta.toFixed(1)} pts</b> heading into Week ${biggestSwing.week} -- the biggest single-week move we're tracking.</b>`});
-  }
-
-  const el = document.getElementById('dash-notable');
-  if(facts.length === 0){ el.innerHTML = '<div class="empty-note">Nothing notable yet -- check back once more of the season is in.</div>'; return; }
-  el.innerHTML = facts.map(f => `
-    <div class="dash-edge-row" ${f.team ? `onclick="openTeamDetail('${f.team}')" style="cursor:pointer;"` : ''}>
-      <div style="font-size:13.5px;line-height:1.5;">${f.text}</div>
-    </div>`).join('');
 }
 
 // ---- Team search ----
