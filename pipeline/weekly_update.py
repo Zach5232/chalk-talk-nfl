@@ -89,12 +89,25 @@ def fetch_games_csv():
     """Real, always-current nflverse schedule/results dataset -- every game ever played, plus
     the full scheduled slate for the current season with real scores filled in as they
     finish. Re-downloaded on every call (small file, cheap) rather than assumed to exist on
-    disk already -- same reasoning as fetch_pbp() below."""
+    disk already -- same reasoning as fetch_pbp() below.
+
+    Real bug caught 2026-10-07: the plain uncompressed games.csv release asset started 404ing
+    (confirmed independently -- curl against it directly, from two unrelated contexts, same
+    404 -- not a transient CDN blip like _curl_with_retries guards against) while games.csv.gz
+    at the same release keeps working fine, so nflverse appears to have dropped the
+    uncompressed asset. Downloads the real .gz instead and decompresses it to the exact same
+    local games.csv path every existing caller (pd.read_csv(fetch_games_csv()), scattered
+    throughout this file and every satellite script) already expects -- zero call sites needed
+    to change."""
+    import gzip, shutil
     path = os.path.join(CACHE_DIR, "games.csv")
-    url = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
-    code = _curl_with_retries(url, path)
+    gz_path = path + ".gz"
+    url = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv.gz"
+    code = _curl_with_retries(url, gz_path)
     if code != "200":
-        raise RuntimeError(f"Failed to download games.csv from nflverse (HTTP {code}) after retries.")
+        raise RuntimeError(f"Failed to download games.csv.gz from nflverse (HTTP {code}) after retries.")
+    with gzip.open(gz_path, "rb") as f_in, open(path, "wb") as f_out:
+        shutil.copyfileobj(f_in, f_out)
     return path
 
 
