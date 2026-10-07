@@ -800,8 +800,10 @@ PLAYER_PROP_STATS = {
 
 def _real_player_stat_rows(current_season_pbp_path):
     """Real per-(week, team, player, stat) actual values this season, straight from real play-
-    by-play -- the shared source for both the projection model below and QB Watch's own roster
-    reads elsewhere in this file.
+    by-play, plus a real "n" opportunity count (pass attempts / carries / targets -- NOT just
+    completions, so a token garbage-time series can actually be told apart from a real game) --
+    the shared source for both the projection model below and QB Watch's own roster reads
+    elsewhere in this file.
 
     Real bug caught before this ever shipped: nflverse's short-name convention ("T.Johnson")
     is NOT unique league-wide -- confirmed live, 3 different real receivers share that exact
@@ -817,18 +819,37 @@ def _real_player_stat_rows(current_season_pbp_path):
     rows = []
     pass_p = p[(p.play_type == "pass") & p.passer.notna()]
     for (wk, team, name), g in pass_p.groupby(["week", "posteam", "passer"]):
-        rows.append((wk, team, name, "completions", float(g.complete_pass.sum())))
-        rows.append((wk, team, name, "pass_yards", float(g.passing_yards.fillna(0).sum())))
-        rows.append((wk, team, name, "pass_tds", float(g.pass_touchdown.fillna(0).sum())))
+        n = float(len(g))  # real pass attempts, not just completions
+        rows.append((wk, team, name, "completions", float(g.complete_pass.sum()), n))
+        rows.append((wk, team, name, "pass_yards", float(g.passing_yards.fillna(0).sum()), n))
+        rows.append((wk, team, name, "pass_tds", float(g.pass_touchdown.fillna(0).sum()), n))
     run_p = p[(p.play_type == "run") & p.rusher.notna()]
     for (wk, team, name), g in run_p.groupby(["week", "posteam", "rusher"]):
-        rows.append((wk, team, name, "rush_att", float(len(g))))
-        rows.append((wk, team, name, "rush_yards", float(g.rushing_yards.fillna(0).sum())))
-    rec_p = p[(p.play_type == "pass") & (p.complete_pass == 1) & p.receiver.notna()]
-    for (wk, team, name), g in rec_p.groupby(["week", "posteam", "receiver"]):
-        rows.append((wk, team, name, "receptions", float(len(g))))
-        rows.append((wk, team, name, "rec_yards", float(g.receiving_yards.fillna(0).sum())))
-    return pd.DataFrame(rows, columns=["week", "team", "player", "stat", "value"])
+        n = float(len(g))
+        rows.append((wk, team, name, "rush_att", n, n))
+        rows.append((wk, team, name, "rush_yards", float(g.rushing_yards.fillna(0).sum()), n))
+    # Targets (ANY real pass thrown their way, complete or not) -- confirmed real PBP populates
+    # `receiver` on incompletions too, so this is a real volume count, not just catches.
+    tgt_p = p[(p.play_type == "pass") & p.receiver.notna()]
+    for (wk, team, name), g in tgt_p.groupby(["week", "posteam", "receiver"]):
+        n = float(len(g))
+        comp = g[g.complete_pass == 1]
+        rows.append((wk, team, name, "receptions", float(len(comp)), n))
+        rows.append((wk, team, name, "rec_yards", float(comp.receiving_yards.fillna(0).sum()), n))
+    return pd.DataFrame(rows, columns=["week", "team", "player", "stat", "value", "n"])
+
+
+# Same real "meaningful snaps" thresholds build_team_full_roster already established and
+# validated (reused here for consistency, not re-derived) -- a game below these is a token/
+# garbage-time appearance, not a real representative sample of this player's role. Confirmed
+# live this matters: without this gate, Jalon Daniels' real week 3 relief series (3 pass
+# attempts) was diluting his real week 4 start (30 attempts, 148 yards) down to a nonsense 74.0
+# yard projection; with it, only the real start counts.
+MIN_OPPORTUNITY_FOR_PROJECTION = {
+    "completions": 5, "pass_yards": 5, "pass_tds": 5,   # min_pass_att
+    "rush_att": 3, "rush_yards": 3,                      # min_carries
+    "receptions": 2, "rec_yards": 2,                     # min_targets
+}
 
 
 MIN_GAMES_FOR_PROJECTION = 2  # see build_player_projection_model's own docstring for why
@@ -874,20 +895,27 @@ def build_player_projection_model(current_season_pbp_path):
     obs = []  # (stat, proj, actual)
     projections = defaultdict(dict)
     for stat, sdf in df.groupby("stat"):
+        min_n = MIN_OPPORTUNITY_FOR_PROJECTION.get(stat, 1)
         for (team, player), pdata in sdf.groupby(["team", "player"]):
             pdata = pdata.sort_values("week")
             pweeks = pdata.week.tolist()
             pvals = dict(zip(pdata.week, pdata.value))
-            for i, wk in enumerate(pweeks):
-                prior_weeks = pweeks[:i]
-                if len(prior_weeks) < MIN_GAMES_FOR_PROJECTION:
+            pn = dict(zip(pdata.week, pdata.n))
+            # Only a real meaningful-snaps game counts as HISTORY -- a token garbage-time
+            # series doesn't represent this player's real role (see MIN_OPPORTUNITY_FOR_
+            # PROJECTION's own comment). Still predicted AGAINST regardless of that week's own
+            # volume (a real future week's volume isn't known in advance either).
+            qualifying_weeks = [w for w in pweeks if pn[w] >= min_n]
+            for wk in pweeks:
+                prior_qualifying = [w for w in qualifying_weeks if w < wk]
+                if len(prior_qualifying) < MIN_GAMES_FOR_PROJECTION:
                     continue
-                proj = float(np.mean([pvals[w] for w in prior_weeks]))
+                proj = float(np.mean([pvals[w] for w in prior_qualifying]))
                 obs.append((stat, proj, pvals[wk]))
-            # The REAL current projection (for THIS week, using every real game so far under
-            # this specific team).
-            if len(pweeks) >= MIN_GAMES_FOR_PROJECTION:
-                projections[(team, player)][stat] = float(np.mean(list(pvals.values())))
+            # The REAL current projection (for THIS week, using every real qualifying game so
+            # far under this specific team).
+            if len(qualifying_weeks) >= MIN_GAMES_FOR_PROJECTION:
+                projections[(team, player)][stat] = float(np.mean([pvals[w] for w in qualifying_weeks]))
 
     sd_coef = {}
     residual_pool = defaultdict(list)
