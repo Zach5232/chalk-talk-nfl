@@ -680,6 +680,16 @@ let MODEL_SEASON_RECORD = {wins: 0, losses: 0, pushes: 0, win_pct: null, total_g
 // quoting that same prop thinks is fair, not that our own model disagrees with the whole market.
 let PROP_VALUE = [];
 
+// Real, automated QB-starter detection -- written twice a real day by the free, standalone
+// qb_status_check.py job (see its own docstring, and build_qb_depth_chart_status() in
+// weekly_update.py) by cross-checking nflverse's real depth charts and real injury reports
+// against who actually started each team's last real game. {team: {flag, qb_name,
+// qb_full_name, reason, secondary_note, penalty_epa, source}} for every real team, not just
+// flagged ones -- flag===false just means nothing's changed since last time. The MANUAL
+// qb_status_overrides system (dashboard_state, below) still exists as the escape hatch for a
+// genuine edge case automation can't call yet, and still wins when active.
+let QB_DEPTH_CHART_STATUS = {};
+
 
 
 let RATING_HISTORY = {};
@@ -1538,9 +1548,37 @@ function addQbStatusOverride(){
   setQbStatusOverrides(data);
   teamEl.value = ''; qbEl.value = ''; reasonEl.value = '';
 }
+function prefillQbOverride(team, qbName){
+  const teamEl = document.getElementById('qbwatch-team');
+  const qbEl = document.getElementById('qbwatch-qbname');
+  if(teamEl) teamEl.value = team;
+  if(qbEl && qbName) qbEl.value = qbName;
+  if(teamEl) teamEl.focus();
+}
+
 function renderQbWatch(){
   const el = document.getElementById('qb-watch');
   if(!el) return;
+
+  // ---- Automated (default path): real depth-chart + injury cross-check, refreshed ~2x/real-
+  // day by its own free workflow -- see QB_DEPTH_CHART_STATUS's own comment. Read-only; this
+  // is what keeps the dashboard current without anyone having to notice a change by hand.
+  const autoEntries = Object.entries(QB_DEPTH_CHART_STATUS).filter(([,s]) => s.flag);
+  const autoRows = autoEntries.map(([team, s]) => `
+    <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);">
+      <div style="flex-shrink:0;">${logoImg(team,20)}</div>
+      <div style="flex:1;font-size:12px;">
+        <b style="color:var(--gold);">${team} &middot; ${s.qb_full_name || s.qb_name}</b><br>
+        <span style="color:var(--sage);">${s.reason}</span><br>
+        <span style="color:var(--sage);font-size:11px;">${s.penalty_epa>0?'+':''}${s.penalty_epa} EPA/play (${s.source})</span>
+        ${s.secondary_note ? `<br><span style="color:var(--gold);font-size:11px;">&#9888; ${s.secondary_note}</span>` : ''}
+      </div>
+      <button class="btn" style="padding:3px 8px;font-size:10.5px;" onclick="prefillQbOverride('${team}','${(s.qb_name||'').replace(/'/g,"\\'")}')">Override</button>
+    </div>`).join('');
+
+  // ---- Manual (escape hatch only now): a real, active override here always wins over the
+  // automated read above for that team -- for the genuine case automation can't call yet
+  // (breaking news with no real depth-chart/injury-report signal at all).
   const data = getQbStatusOverrides();
   const entries = Object.entries(data);
   const rows = entries.map(([team, e]) => {
@@ -1551,7 +1589,7 @@ function renderQbWatch(){
     <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);">
       <div style="flex-shrink:0;">${logoImg(team,20)}</div>
       <div style="flex:1;font-size:12px;">
-        <b style="color:${e.active?'var(--gold)':'var(--sage)'};">${team}${e.qb_name?` &middot; ${e.qb_name}`:''}${e.active?' -- ACTIVE':' -- inactive'}</b><br>
+        <b style="color:${e.active?'var(--gold)':'var(--sage)'};">${team}${e.qb_name?` &middot; ${e.qb_name}`:''}${e.active?' -- ACTIVE (overriding auto)':' -- inactive'}</b><br>
         <span style="color:var(--sage);">${e.reason || e.note || ''}</span><br>
         <span style="color:var(--sage);font-size:11px;">${e.active ? computedStr : ''}</span>
       </div>
@@ -1559,19 +1597,24 @@ function renderQbWatch(){
       <button class="btn" style="padding:3px 8px;font-size:10.5px;" onclick="removeQbStatusOverride('${team}')">Remove</button>
     </div>`;
   }).join('');
+
+  const totalFlags = autoEntries.length + entries.filter(([,e])=>e.active).length;
   el.innerHTML = `
-    <details ${entries.some(([,e])=>e.active) ? 'open' : ''}>
-      <summary class="section-label" style="cursor:pointer;">QB Watch ${entries.filter(([,e])=>e.active).length ? `&middot; ${entries.filter(([,e])=>e.active).length} active` : ''}</summary>
+    <details ${totalFlags ? 'open' : ''}>
+      <summary class="section-label" style="cursor:pointer;">QB Watch ${totalFlags ? `&middot; ${totalFlags} flagged` : ''}</summary>
       <div style="font-size:11.5px;color:var(--sage);margin:8px 0 10px;">
-        A team's rating only reflects a new starter once it has real games of their snaps to learn from -- this flags a starter
-        change happening THIS week (before that), applying an EPA/play adjustment to just that one game's projection. It never
-        touches the team's season-long rating. Only flag someone truly new to the sample -- if a backup's already started a
-        game or two and played fine, the rating already knows that for real, and adding this on top would double-count it.
-        Just name who's actually playing (nflverse style, e.g. "T.Bagent") -- the real number gets computed from their own
-        career numbers automatically on the next pipeline run, nothing to calculate by hand. If the situation changes (the
-        announced backup ALSO goes down), just edit the QB name in place rather than re-deriving anything.
+        A team's rating only reflects a new starter once it has real games of their snaps to learn from -- this applies an
+        EPA/play adjustment to just THIS week's game projection for a real starter change, never the season-long rating.
+        <b>Automated</b> below is the default: a real, free check (nflverse depth charts + injury reports, cross-checked
+        against who actually started the team's last real game) refreshed twice a real day, no typing required. The real
+        personal EPA number comes from that player's own career numbers, computed automatically. <b>Manual override</b> is
+        only for a genuine edge case automation can't call yet (breaking news with no real signal in either source) -- an
+        active manual entry always wins over the automated read for that team.
       </div>
-      ${rows || '<div class="empty-note">No QB status flags right now.</div>'}
+      <div style="font-size:11px;color:var(--sage);text-transform:uppercase;font-weight:700;margin:10px 0 4px;">Automated</div>
+      ${autoRows || '<div class="empty-note">No real starter changes detected right now.</div>'}
+      <div style="font-size:11px;color:var(--sage);text-transform:uppercase;font-weight:700;margin:16px 0 4px;">Manual override (edge cases only)</div>
+      ${rows || '<div class="empty-note">No manual overrides set.</div>'}
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-top:10px;">
         <input id="qbwatch-team" placeholder="Team (e.g. CHI)" style="width:100px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
         <input id="qbwatch-qbname" placeholder="QB (e.g. T.Bagent)" style="width:140px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
@@ -2363,16 +2406,26 @@ function renderFantasyDupes(){
 function renderMarginQbWatch(){
   const el = document.getElementById('margin-qb-watch');
   if(!el) return;
-  const active = Object.entries(getQbStatusOverrides()).filter(([,e]) => e.active);
-  if(!active.length){ el.innerHTML = ''; return; }
+  // Same precedence as the pipeline itself applies: a real, active manual override wins over
+  // the automated read for that team; otherwise show the automated flag.
+  const manual = getQbStatusOverrides();
+  const combined = {};
+  for(const [team, s] of Object.entries(QB_DEPTH_CHART_STATUS)){
+    if(s.flag) combined[team] = {qb_name: s.qb_full_name || s.qb_name, reason: s.reason, auto: true};
+  }
+  for(const [team, e] of Object.entries(manual)){
+    if(e.active) combined[team] = {qb_name: e.qb_name, reason: e.reason || e.note || '', auto: false};
+  }
+  const rows = Object.entries(combined);
+  if(!rows.length){ el.innerHTML = ''; return; }
   el.innerHTML = `
     <div class="dash-card" style="margin-bottom:14px;border-color:var(--gold);">
       <div style="font-size:12px;font-weight:700;color:var(--gold);margin-bottom:6px;">
-        &#9888; ${active.length} team${active.length===1?'':'s'} below playing with a QB change the rating doesn't have real snaps of yet
+        &#9888; ${rows.length} team${rows.length===1?'':'s'} below playing with a QB change the rating doesn't have real snaps of yet
       </div>
-      ${active.map(([team,e]) => `
+      ${rows.map(([team,e]) => `
         <div style="font-size:12px;margin-top:4px;display:flex;align-items:flex-start;gap:6px;">
-          ${logoImg(team,16)}<span><b>${team}</b>${e.qb_name?` (${e.qb_name})`:''} -- ${e.reason || e.note || ''} (this week's game projection carries a real backup-QB penalty; Overall below does not)</span>
+          ${logoImg(team,16)}<span><b>${team}</b>${e.qb_name?` (${e.qb_name})`:''} -- ${e.reason} (this week's game projection carries a real backup-QB penalty; Overall below does not)${e.auto ? ' <span style="color:var(--sage);">[auto-detected]</span>' : ' <span style="color:var(--sage);">[manual]</span>'}</span>
         </div>`).join('')}
       <div style="font-size:11px;color:var(--sage);margin-top:6px;">Manage these in Spread Zone &middot; QB Watch.</div>
     </div>`;
@@ -4912,7 +4965,7 @@ async function boot(){
   [RATINGS, GAMES, QB_LEADERBOARD, WR_LEADERBOARD, RB_LEADERBOARD, FANTASY_ROSTERS, FANTASY_ROSTERS_BASE, PROP_VALUE]
     .forEach(a => { a.length = 0; });
   [QB_HISTORY, TEAM_PLAYERS, FANTASY_PROJECTIONS, RATING_HISTORY, BOOKS, WEATHER, CLOSING_RESULTS, CLOSING_LINES,
-   TEAM_FULL_ROSTER, TEAM_SITUATIONAL, TEAM_DIAGNOSTICS]
+   TEAM_FULL_ROSTER, TEAM_SITUATIONAL, TEAM_DIAGNOSTICS, QB_DEPTH_CHART_STATUS]
     .forEach(o => { for(const k of Object.keys(o)) delete o[k]; });
   UNDERPERFORMANCE.players = []; UNDERPERFORMANCE.note = null;
   Object.assign(MODEL_SEASON_RECORD, {wins: 0, losses: 0, pushes: 0, win_pct: null, total_graded: 0, games: [],
@@ -4934,7 +4987,7 @@ async function boot(){
 
     const [ratingsSnap, historySnap, gamesSnap, booksSnap, weatherSnap, closingSnap,
            leaderboardsSnap, projSnap, rostersSnap, overridesSnap, stateSnap, underperfSnap,
-           modelRecordSnap, closingLinesSnap, propValueSnap] = await Promise.all([
+           modelRecordSnap, closingLinesSnap, propValueSnap, qbAutoSnap] = await Promise.all([
       db.collection('ratings').get(),
       db.collection('ratings_history').get(),
       db.collection('games').doc(weekId).get(),
@@ -4950,6 +5003,7 @@ async function boot(){
       db.collection('model_season_record').doc('current').get(),
       db.collection('closing_lines').get(),
       db.collection('prop_value').doc('current').get(),
+      db.collection('qb_depth_chart_status').doc('current').get(),
     ]);
 
     RATINGS.push(...ratingsSnap.docs.map(d => d.data()));
@@ -4996,6 +5050,10 @@ async function boot(){
 
     if(propValueSnap.exists){
       PROP_VALUE.push(...((propValueSnap.data() || {}).edges || []));
+    }
+
+    if(qbAutoSnap.exists){
+      Object.assign(QB_DEPTH_CHART_STATUS, (qbAutoSnap.data() || {}).teams || {});
     }
 
     if(modelRecordSnap.exists){
