@@ -682,12 +682,14 @@ let PROP_VALUE = [];
 
 // Real, automated QB-starter detection -- written twice a real day by the free, standalone
 // qb_status_check.py job (see its own docstring, and build_qb_depth_chart_status() in
-// weekly_update.py) by cross-checking nflverse's real depth charts and real injury reports
-// against who actually started each team's last real game. {team: {flag, qb_name,
-// qb_full_name, reason, secondary_note, penalty_epa, source}} for every real team, not just
-// flagged ones -- flag===false just means nothing's changed since last time. The MANUAL
-// qb_status_overrides system (dashboard_state, below) still exists as the escape hatch for a
-// genuine edge case automation can't call yet, and still wins when active.
+// weekly_update.py). Primary signal is the real depth chart itself, walked past anyone the
+// real injury report lists unavailable -- catches a starter going down AND a starter
+// reclaiming the job once healthy, both the same automated way, no human judgment needed.
+// {team: {flag, qb_name, qb_full_name, reason, penalty_epa, source}} for every real team, not
+// just flagged ones -- flag===false just means nothing's changed since last time. The MANUAL
+// qb_status_overrides system (dashboard_state, below) still exists as the escape hatch for the
+// rare real case the depth chart itself hasn't caught up on yet (a pure coaching decision with
+// no injury-report trail at all), and still wins when active.
 let QB_DEPTH_CHART_STATUS = {};
 
 
@@ -1571,7 +1573,6 @@ function renderQbWatch(){
         <b style="color:var(--gold);">${team} &middot; ${s.qb_full_name || s.qb_name}</b><br>
         <span style="color:var(--sage);">${s.reason}</span><br>
         <span style="color:var(--sage);font-size:11px;">${s.penalty_epa>0?'+':''}${s.penalty_epa} EPA/play (${s.source})</span>
-        ${s.secondary_note ? `<br><span style="color:var(--gold);font-size:11px;">&#9888; ${s.secondary_note}</span>` : ''}
       </div>
       <button class="btn" style="padding:3px 8px;font-size:10.5px;" onclick="prefillQbOverride('${team}','${(s.qb_name||'').replace(/'/g,"\\'")}')">Override</button>
     </div>`).join('');
