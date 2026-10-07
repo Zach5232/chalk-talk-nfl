@@ -258,6 +258,177 @@ def fetch_qb_status_overrides(season, current_season_pbp_path):
     return out
 
 
+# ---------- Automated QB depth-chart detection -------------------------------------------
+# Real problem this replaces: qb_status_overrides (above) only updates when a person notices a
+# real starter change AND manually types it in -- confirmed stale in practice (a real mid-week
+# change sat unflagged on the dashboard with no one around to catch it). Two real, free nflverse
+# feeds make this automatable with no Odds API cost at all:
+#   - depth_charts: official team-reported depth charts, refreshed ~2x/real-day all season
+#   - injuries: official weekly injury report (report_status: Out/Doubtful/Questionable/...)
+# Neither one alone is reliable (a depth chart can leave an injured starter listed at #1 for
+# real cosmetic/historical reasons -- confirmed live: CHI's depth chart still lists Caleb
+# Williams #1 while the real injury report has him real-"Out" with a hamstring injury three
+# real weeks running, and the real games were started by Bagent instead). So this cross-checks
+# both real sources against each other, same "don't trust one input blindly" discipline as
+# everywhere else in this file.
+UNAVAILABLE_INJURY_STATUSES = {"out", "injured reserve", "ir", "doubtful"}
+
+_SURNAME_SUFFIXES_QB = {"jr", "sr", "ii", "iii", "iv", "v"}
+def _full_name_to_pbp_short(full_name):
+    """'Jacoby Brissett' -> 'J.Brissett', matching nflverse PBP's own short-name convention --
+    same best-effort first-initial + last-surname-token approach verified against the real
+    weeks 1-4 prop backtest (87% real match rate), now reused here instead of a second copy."""
+    toks = str(full_name).strip().split()
+    if not toks:
+        return None
+    first = toks[0]
+    rest = toks[1:]
+    while len(rest) > 1 and rest[-1].rstrip(".").lower() in _SURNAME_SUFFIXES_QB:
+        rest.pop()
+    surname = rest[-1] if rest else toks[0]
+    return f"{first[0]}.{surname}"
+
+
+def fetch_depth_charts(season):
+    """Real, current depth-chart QB order per team (pos_rank 1, 2, 3, ...), each team's own
+    most recent real snapshot (teams don't all update at the same moment) -- or None if
+    nflverse hasn't published this season's file yet."""
+    import urllib.request
+    url = f"https://github.com/nflverse/nflverse-data/releases/download/depth_charts/depth_charts_{season}.parquet"
+    try:
+        path = f"/tmp/depth_charts_{season}.parquet"
+        urllib.request.urlretrieve(url, path)
+        df = pd.read_parquet(path, columns=["dt", "team", "player_name", "pos_grp", "pos_abb", "pos_rank"])
+    except Exception as e:
+        print(f"  (depth_charts: couldn't fetch, skipping auto QB detection -- {e})")
+        return None
+    qb = df[(df.pos_grp == "3WR 1TE") & (df.pos_abb == "QB")].copy()
+    if qb.empty:
+        return None
+    team_latest_dt = qb.groupby("team")["dt"].transform("max")
+    return qb[qb.dt == team_latest_dt].sort_values(["team", "pos_rank"])
+
+
+def fetch_injury_report(season):
+    """Real most-recent-week official injury report, name (lowercased) -> report_status
+    (lowercased), or {} if not published yet. Only report_status matters here (Out/Doubtful/
+    etc.) -- a player with no row, or a NaN status, is treated as available, same as the real
+    injury report itself implies by omission."""
+    import urllib.request
+    url = f"https://github.com/nflverse/nflverse-data/releases/download/injuries/injuries_{season}.parquet"
+    try:
+        path = f"/tmp/injuries_{season}.parquet"
+        urllib.request.urlretrieve(url, path)
+        df = pd.read_parquet(path, columns=["week", "full_name", "report_status"])
+    except Exception as e:
+        print(f"  (injuries: couldn't fetch, skipping injury cross-check -- {e})")
+        return {}
+    if df.empty:
+        return {}
+    latest_week = df.week.max()
+    latest = df[(df.week == latest_week) & df.report_status.notna()]
+    return {str(n).lower().strip(): str(s).lower().strip() for n, s in zip(latest.full_name, latest.report_status)}
+
+
+def build_qb_depth_chart_status(season, current_season_pbp_path):
+    """The real automated replacement for manually noticing a QB change. For every team, picks
+    a real 'who's actually starting' candidate:
+      1. Default to whoever REALLY started that team's most recent played game (concrete fact,
+         not a prediction) -- UNLESS the real injury report now lists them Out/Doubtful/IR.
+      2. If unavailable (or it's a real Week 1 with no prior game yet), walk the real depth
+         chart in rank order and take the first name NOT listed unavailable.
+    Only flags a team when this real candidate differs from who actually played last time --
+    a stable, healthy starter produces zero noise, same as the goal of the old manual system
+    but without needing a person to notice first.
+
+    Deliberately conservative on the genuinely ambiguous case (an injured starter's real
+    practice/depth-chart status suggests they might be reclaiming the job, but there's no
+    concrete snap evidence yet): stays on the backup's own real track record and surfaces a
+    plain-language secondary_note instead of guessing -- a confirmed real case of exactly this
+    (CHI depth chart still listing an Out Caleb Williams at #1) is what this guards against.
+    """
+    dc = fetch_depth_charts(season)
+    injuries = fetch_injury_report(season)
+    if dc is None:
+        return {}
+
+    primary_by_team = _primary_passer_by_team(pd.read_parquet(current_season_pbp_path,
+                                                                columns=["play_type", "epa", "posteam", "passer_player_name"]))
+
+    def unavailable(full_name):
+        return injuries.get(str(full_name).lower().strip()) in UNAVAILABLE_INJURY_STATUSES
+
+    out = {}
+    for team, rows in dc.groupby("team"):
+        rows = rows.sort_values("pos_rank")
+        dc_qb1_full = rows.iloc[0].player_name
+        last_game_short = primary_by_team.get(team)
+
+        last_game_full = next((r.player_name for _, r in rows.iterrows()
+                                if _full_name_to_pbp_short(r.player_name) == last_game_short), None)
+
+        if last_game_short and last_game_full and not unavailable(last_game_full):
+            candidate_full = last_game_full
+        else:
+            healthy = [r.player_name for _, r in rows.iterrows() if not unavailable(r.player_name)]
+            candidate_full = healthy[0] if healthy else dc_qb1_full
+
+        candidate_short = _full_name_to_pbp_short(candidate_full)
+        flag = bool(last_game_short) and (candidate_short != last_game_short)
+
+        secondary_note = None
+        if _full_name_to_pbp_short(dc_qb1_full) != candidate_short and not unavailable(dc_qb1_full):
+            secondary_note = (f"Depth chart currently lists {dc_qb1_full} at QB1 (not flagged "
+                               f"injured) -- different from {candidate_full}, who this is using. "
+                               f"Possible the starter's reclaiming the job; verify before kickoff.")
+
+        if not flag:
+            out[team] = {"flag": False, "qb_name": candidate_short, "qb_full_name": candidate_full,
+                         "reason": "No change from last real game's starter.", "secondary_note": secondary_note,
+                         "penalty_epa": 0.0, "source": "no change detected"}
+            continue
+
+        computed = qb_personal_penalty(candidate_short, season, current_season_pbp_path)
+        penalty, source = (computed, "real personal EPA") if computed is not None else (BACKUP_QB_EPA_PENALTY, "generic fallback -- no real data on this player")
+        reason = (f"Real last game's starter ({last_game_short}) is now Out/Doubtful/IR -- using {candidate_full} instead."
+                  if last_game_full and unavailable(last_game_full)
+                  else f"Depth chart now lists {candidate_full} over last real game's starter ({last_game_short}).")
+        out[team] = {"flag": True, "qb_name": candidate_short, "qb_full_name": candidate_full,
+                     "reason": reason, "secondary_note": secondary_note,
+                     "penalty_epa": round(penalty, 4), "source": source}
+        print(f"  AUTO QB change detected: {team} -> {candidate_full} ({candidate_short}) = {penalty:+.3f} EPA/play [{source}] -- {reason}")
+
+    return out
+
+
+def fetch_qb_depth_chart_status_dict(season, current_season_pbp_path):
+    """Reads the ALREADY-computed auto status back from Firestore (written by the separate,
+    frequent pipeline/qb_status_check.py -- see that file's own docstring for why this is a
+    decoupled, more-frequent job rather than folded into this once-a-week pipeline) and
+    returns just the {team: penalty_epa} shape fetch_qb_status_overrides also returns, so the
+    two merge with a plain dict union at the call site (manual wins on a shared key). Falls
+    back to computing it fresh in-process if the doc isn't there yet (e.g. first deploy before
+    the new workflow has ever run) rather than silently applying nothing."""
+    import urllib.request
+    url = "https://firestore.googleapis.com/v1/projects/stock-model-42fb2/databases/(default)/documents/qb_depth_chart_status/current"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            doc = json.loads(resp.read())
+        fields = doc.get("fields", {}).get("teams", {}).get("mapValue", {}).get("fields", {})
+        if not fields:
+            raise ValueError("empty/missing teams map")
+        out = {}
+        for team, entry in fields.items():
+            f = entry.get("mapValue", {}).get("fields", {})
+            if f.get("flag", {}).get("booleanValue", False):
+                out[team] = f.get("penalty_epa", {}).get("doubleValue", 0.0)
+        return out
+    except Exception as e:
+        print(f"  (qb_depth_chart_status: couldn't read {e}, computing fresh in-process instead)")
+        status = build_qb_depth_chart_status(season, current_season_pbp_path)
+        return {t: s["penalty_epa"] for t, s in status.items() if s["flag"]}
+
+
 # ---------- STEP 2: ridge power rating fit (walk-forward, no lookahead) ----------
 def fit_split(hist, teams, tix, n, lam=3.0, halflife=6.0, prior_off=None, prior_def=None, value_col="off_epa"):
     maxwk = hist.week.max()
@@ -1629,7 +1800,17 @@ if __name__ == "__main__":
     print(f"home field advantage (epa): {round(ratings['hfa'],4)}")
 
     # ---- GAMES array (this week, model line vs market consensus) ----
-    qb_overrides = fetch_qb_status_overrides(SEASON, fetch_pbp(SEASON))
+    # Auto (real depth-chart + injury cross-check, refreshed ~2x/real-day by its own separate
+    # workflow -- see qb_status_check.py) applies by default; a real, active manual override
+    # for that same team wins on top of it (dict union -- manual_overrides' keys take priority)
+    # for the genuine edge cases automation can't call (breaking news with no real depth-chart/
+    # injury-report signal yet).
+    qb_auto = fetch_qb_depth_chart_status_dict(SEASON, fetch_pbp(SEASON))
+    qb_manual = fetch_qb_status_overrides(SEASON, fetch_pbp(SEASON))
+    qb_overrides = {**qb_auto, **qb_manual}
+    if qb_auto:
+        print(f"  QB auto-detect: {len(qb_auto)} team(s) flagged ({', '.join(qb_auto)})" +
+              (f" -- {len(qb_manual)} overridden by manual entries" if qb_manual else ""))
     games_out = []
     for _, r in ratings["games_this_week"].iterrows():
         h, a = r.home_team, r.away_team
