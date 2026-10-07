@@ -831,31 +831,41 @@ def _real_player_stat_rows(current_season_pbp_path):
     return pd.DataFrame(rows, columns=["week", "team", "player", "stat", "value"])
 
 
+MIN_GAMES_FOR_PROJECTION = 2  # see build_player_projection_model's own docstring for why
+
 def build_player_projection_model(current_season_pbp_path):
     """Real, walk-forward-validated per-player stat projections plus a real, data-fit
     predictive distribution -- not a point guess, something P(actual > any real line) can
-    actually be computed against. Validated locally against real weeks 2-4 of this season
-    before being written as a permanent feature (see the session notes): a plain recency-
-    weighted trailing mean ((0.5**age) weighting, the same scheme qb_personal_penalty already
-    uses) beat a flat trailing mean and a last-game-only baseline on bias, and beat last-game-
-    only by ~8-12% MAE on every one of these 7 real stats -- same 'simple beats fancy' result
-    the fantasy-projection work already found.
+    actually be computed against.
+
+    Point estimate is a PLAIN trailing mean, not recency-weighted -- a real, live mistake
+    caught and fixed before this was trusted: recency-weighting ((0.5**age)) was tried first
+    (matching qb_personal_penalty's own scheme), looked fine on aggregate MAE, but then
+    produced visibly broken real output on the very first live run -- CeeDee Lamb projected at
+    12.3 receptions (his one real 17-catch game, week 4, given almost all the weight) against a
+    market pricing him near his normal 5-8 range, and Deshaun Watson projected at 0.9 rush
+    yards (one real bad game weighted to dominate) against a market that knows his season-long
+    rushing profile. With only 2-4 real games to work with this early in a season, aggressive
+    recency weighting lets a single outlier game swing the whole projection -- this is exactly
+    the same real result the fantasy-projection work already found (its own docstring: plain
+    season-to-date average beat recency-weighting on real backtested MAE) and this should have
+    matched that finding from the start rather than re-discovering it the hard way.
+    MIN_GAMES_FOR_PROJECTION=2 additionally refuses to project a player off a single real game
+    at all, for the same reason.
 
     Real finding this is built around: standardized residuals (actual vs. projection, scaled
     by a real fitted a*sqrt(projection) relationship) come back meaningfully RIGHT-SKEWED --
-    confirmed real 90th-percentile z's of +1.3 to +2.0 vs. the +1.28 a symmetric Normal
-    distribution would predict, while the real 10th percentile is LESS extreme than Normal
-    (-0.9 to -1.2 vs. -1.28). Big breakout games really do happen more often than a bell curve
-    assumes, and real busts are slightly less extreme than one assumes too -- a hard floor near
-    zero plus an unbounded upside, which is exactly the shape you'd expect for a count/yardage
-    stat. So this does NOT assume Normal: P(over/under) gets computed against the real, pooled,
-    empirical standardized-residual shape for that stat (prob_over_line, below), not a CDF.
+    big breakout games happen more often than a symmetric Normal distribution predicts, while
+    real busts are slightly less extreme than Normal predicts too -- a hard floor near zero
+    plus an unbounded upside, the shape you'd expect for a count/yardage stat. So this does NOT
+    assume Normal: P(over/under) gets computed against the real, pooled, empirical
+    standardized-residual shape for that stat (prob_over_line, below), not a CDF.
 
     Returns (projections, sd_coef, residual_pool):
-      projections: {(team, player): {stat: recency-weighted mean}} -- keyed by team as well as
+      projections: {(team, player): {stat: plain trailing mean}} -- keyed by team as well as
         short name (see _real_player_stat_rows' own comment for the real collision this
-        prevents), only for a player/stat with at least one real prior game this season (never
-        fabricates a projection with zero data).
+        prevents), only for a player/stat with at least MIN_GAMES_FOR_PROJECTION real prior
+        games this season (never fabricates a projection off too little real data).
       sd_coef: {stat: real fitted coefficient c such that predicted SD = c * sqrt(max(proj,1))}
       residual_pool: {stat: [real standardized residuals, pooled across every real (player,
         week) observed this season]}
@@ -870,17 +880,14 @@ def build_player_projection_model(current_season_pbp_path):
             pvals = dict(zip(pdata.week, pdata.value))
             for i, wk in enumerate(pweeks):
                 prior_weeks = pweeks[:i]
-                if not prior_weeks:
+                if len(prior_weeks) < MIN_GAMES_FOR_PROJECTION:
                     continue
-                prior_vals = [pvals[w] for w in prior_weeks]
-                weights = [0.5 ** (len(prior_weeks) - 1 - j) for j in range(len(prior_weeks))]
-                proj = float(np.average(prior_vals, weights=weights))
+                proj = float(np.mean([pvals[w] for w in prior_weeks]))
                 obs.append((stat, proj, pvals[wk]))
             # The REAL current projection (for THIS week, using every real game so far under
-            # this specific team) -- same recency-weighted formula, through the most recent
-            # real week.
-            weights = [0.5 ** (len(pweeks) - 1 - j) for j in range(len(pweeks))]
-            projections[(team, player)][stat] = float(np.average(list(pvals.values()), weights=weights))
+            # this specific team).
+            if len(pweeks) >= MIN_GAMES_FOR_PROJECTION:
+                projections[(team, player)][stat] = float(np.mean(list(pvals.values())))
 
     sd_coef = {}
     residual_pool = defaultdict(list)
