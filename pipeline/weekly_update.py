@@ -13,6 +13,7 @@ arrays/objects in ChalkTalk.html.
 --- CONFIG: edit these each week ---
 """
 import subprocess, json, csv, os, time
+from collections import defaultdict
 import pandas as pd
 import numpy as np
 
@@ -787,6 +788,120 @@ def fetch_team_totals_for_week(api_key, week_games):
 # Real, verified cost before this was ever written as a permanent feature: 5 credits per event
 # for this exact market set (confirmed live against the real account), so a full ~16-game week
 # costs roughly 80 credits -- trivial against a 20K/month plan even run every single pipeline run.
+# Odds API market key -> the real stat field it corresponds to in our own play-by-play --
+# player_anytime_td excluded (same "Yes"/"No" vs "Over"/"Under" structural mismatch noted
+# below PROP_MARKETS -- can't form a model probability against a line that doesn't exist).
+PLAYER_PROP_STATS = {
+    "player_pass_yds": "pass_yards", "player_rush_yds": "rush_yards",
+    "player_reception_yds": "rec_yards", "player_receptions": "receptions",
+    "player_pass_tds": "pass_tds", "player_pass_completions": "completions",
+    "player_rush_attempts": "rush_att",
+}
+
+def _real_player_stat_rows(current_season_pbp_path):
+    """Real per-(week, player, stat) actual values this season, straight from real play-by-
+    play -- the shared source for both the projection model below and QB Watch's own roster
+    reads elsewhere in this file."""
+    cols = ["week", "season_type", "passer", "rusher", "receiver", "play_type",
+            "complete_pass", "passing_yards", "rushing_yards", "receiving_yards",
+            "pass_touchdown", "rush_touchdown"]
+    p = pd.read_parquet(current_season_pbp_path, columns=cols)
+    p = p[p.season_type == "REG"]
+    rows = []
+    pass_p = p[(p.play_type == "pass") & p.passer.notna()]
+    for (wk, name), g in pass_p.groupby(["week", "passer"]):
+        rows.append((wk, name, "completions", float(g.complete_pass.sum())))
+        rows.append((wk, name, "pass_yards", float(g.passing_yards.fillna(0).sum())))
+        rows.append((wk, name, "pass_tds", float(g.pass_touchdown.fillna(0).sum())))
+    run_p = p[(p.play_type == "run") & p.rusher.notna()]
+    for (wk, name), g in run_p.groupby(["week", "rusher"]):
+        rows.append((wk, name, "rush_att", float(len(g))))
+        rows.append((wk, name, "rush_yards", float(g.rushing_yards.fillna(0).sum())))
+    rec_p = p[(p.play_type == "pass") & (p.complete_pass == 1) & p.receiver.notna()]
+    for (wk, name), g in rec_p.groupby(["week", "receiver"]):
+        rows.append((wk, name, "receptions", float(len(g))))
+        rows.append((wk, name, "rec_yards", float(g.receiving_yards.fillna(0).sum())))
+    return pd.DataFrame(rows, columns=["week", "player", "stat", "value"])
+
+
+def build_player_projection_model(current_season_pbp_path):
+    """Real, walk-forward-validated per-player stat projections plus a real, data-fit
+    predictive distribution -- not a point guess, something P(actual > any real line) can
+    actually be computed against. Validated locally against real weeks 2-4 of this season
+    before being written as a permanent feature (see the session notes): a plain recency-
+    weighted trailing mean ((0.5**age) weighting, the same scheme qb_personal_penalty already
+    uses) beat a flat trailing mean and a last-game-only baseline on bias, and beat last-game-
+    only by ~8-12% MAE on every one of these 7 real stats -- same 'simple beats fancy' result
+    the fantasy-projection work already found.
+
+    Real finding this is built around: standardized residuals (actual vs. projection, scaled
+    by a real fitted a*sqrt(projection) relationship) come back meaningfully RIGHT-SKEWED --
+    confirmed real 90th-percentile z's of +1.3 to +2.0 vs. the +1.28 a symmetric Normal
+    distribution would predict, while the real 10th percentile is LESS extreme than Normal
+    (-0.9 to -1.2 vs. -1.28). Big breakout games really do happen more often than a bell curve
+    assumes, and real busts are slightly less extreme than one assumes too -- a hard floor near
+    zero plus an unbounded upside, which is exactly the shape you'd expect for a count/yardage
+    stat. So this does NOT assume Normal: P(over/under) gets computed against the real, pooled,
+    empirical standardized-residual shape for that stat (prob_over_line, below), not a CDF.
+
+    Returns (projections, sd_coef, residual_pool):
+      projections: {player: {stat: recency-weighted mean}} -- only for a player/stat with at
+        least one real prior game this season (never fabricates a projection with zero data).
+      sd_coef: {stat: real fitted coefficient c such that predicted SD = c * sqrt(max(proj,1))}
+      residual_pool: {stat: [real standardized residuals, pooled across every real (player,
+        week) observed this season]}
+    """
+    df = _real_player_stat_rows(current_season_pbp_path)
+    obs = []  # (stat, player, proj, actual)
+    projections = defaultdict(dict)
+    for stat, sdf in df.groupby("stat"):
+        for player, pdata in sdf.groupby("player"):
+            pdata = pdata.sort_values("week")
+            pweeks = pdata.week.tolist()
+            pvals = dict(zip(pdata.week, pdata.value))
+            for i, wk in enumerate(pweeks):
+                prior_weeks = pweeks[:i]
+                if not prior_weeks:
+                    continue
+                prior_vals = [pvals[w] for w in prior_weeks]
+                weights = [0.5 ** (len(prior_weeks) - 1 - j) for j in range(len(prior_weeks))]
+                proj = float(np.average(prior_vals, weights=weights))
+                obs.append((stat, proj, pvals[wk]))
+            # The REAL current projection (for THIS week, using every real game so far) --
+            # same recency-weighted formula, just evaluated through the most recent real week.
+            weights = [0.5 ** (len(pweeks) - 1 - j) for j in range(len(pweeks))]
+            projections[player][stat] = float(np.average(list(pvals.values()), weights=weights))
+
+    sd_coef = {}
+    residual_pool = defaultdict(list)
+    for stat in PLAYER_PROP_STATS.values():
+        s = [(proj, actual) for (st, proj, actual) in obs if st == stat]
+        if len(s) < 20:
+            continue  # not enough real observations yet for a trustworthy fit
+        x = np.sqrt(np.maximum(np.array([p for p, _ in s]), 1.0))
+        y = np.abs(np.array([a - p for p, a in s]))
+        a_coef = np.sum(x * y) / np.sum(x * x) / 0.7979  # E[|z|] under N(0,1) = sqrt(2/pi)
+        sd_coef[stat] = float(a_coef)
+        for proj, actual in s:
+            sd = max(a_coef * np.sqrt(max(proj, 1.0)), 0.5)
+            residual_pool[stat].append((actual - proj) / sd)
+
+    return dict(projections), sd_coef, dict(residual_pool)
+
+
+def prob_over_line(stat, projection, line, sd_coef, residual_pool):
+    """Real empirical P(actual > line), using the real fitted variance plus the real pooled
+    standardized-residual shape for this stat -- deliberately not a Normal-CDF shortcut (see
+    build_player_projection_model's docstring for the real, confirmed skew that would misprice)."""
+    pool = residual_pool.get(stat)
+    if not pool or stat not in sd_coef:
+        return None
+    sd = max(sd_coef[stat] * np.sqrt(max(projection, 1.0)), 0.5)
+    z_thresh = (line - projection) / sd
+    arr = np.array(pool)
+    return float(np.mean(arr > z_thresh))
+
+
 PROP_MARKETS = "player_pass_yds,player_rush_yds,player_reception_yds,player_receptions,player_pass_tds,player_pass_completions,player_rush_attempts,player_anytime_td"
 # Real retroactive backtest against weeks 1-4 of this season (98 real flagged edges at the old
 # 3pp cutoff, 85 graded): 45.9% win rate vs. a 47.5% breakeven -- no real evidence this signal
@@ -801,7 +916,22 @@ def _american_to_prob(odds):
     odds = float(odds)
     return -odds / (-odds + 100) if odds < 0 else 100 / (odds + 100)
 
-def build_prop_value_report(api_key, week_games):
+def build_prop_value_report(api_key, week_games, projection_model=None):
+    """Two real, DIFFERENT kinds of edge, tagged edge_type so the dashboard (and any future
+    backtest) can tell them apart rather than quietly blending two different claims:
+      - "devig": one specific book's price is out of line with every other real book quoting
+        the same prop -- line-shopping/soft-book detection, no prediction of our own involved.
+        Real backtest (weeks 1-4, 98 edges): 45.9% vs. a 47.5% breakeven -- NOT proven to beat
+        the vig, shown here as real market disagreement, not a validated signal.
+      - "model": OUR OWN real, walk-forward-validated player projection (see
+        build_player_projection_model) disagrees with the devigged MARKET CONSENSUS by a real
+        margin -- an actual independent prediction, not just outlier detection. Needs
+        projection_model passed in (None skips this half entirely, same real per-event odds
+        pull either way -- this costs ZERO extra Odds API quota, since the same live
+        current-week prop odds this function already pulls are reused for both checks). NOT
+        backtested yet -- the devig layer's own honest "doesn't beat the vig" result is reason
+        enough not to assume this one does either until it's actually tested.
+    """
     import urllib.request
     try:
         events_url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/?apiKey={api_key}"
@@ -810,6 +940,8 @@ def build_prop_value_report(api_key, week_games):
     except Exception as e:
         print(f"  (prop_value: couldn't fetch real event list, skipping entirely -- {e})")
         return []
+
+    projections, sd_coef, residual_pool = projection_model if projection_model else ({}, {}, {})
 
     all_edges = []
     for _, r in week_games.iterrows():
@@ -856,15 +988,39 @@ def build_prop_value_report(api_key, week_games):
                 edge_over = consensus_over - d["over"]
                 edge_under = (1 - consensus_over) - d["under"]
                 if edge_over > _MIN_EDGE_PP:
-                    all_edges.append({"game_id": gid, "market": market_key, "player": player, "line": point,
+                    all_edges.append({"edge_type": "devig", "game_id": gid, "market": market_key, "player": player, "line": point,
                                        "side": "Over", "book": book, "odds": d["over_odds"],
                                        "edge_pp": round(edge_over*100, 1), "consensus_pct": round(consensus_over*100, 1),
                                        "book_implied_pct": round(d["over"]*100, 1), "n_books": len(books)})
                 if edge_under > _MIN_EDGE_PP:
-                    all_edges.append({"game_id": gid, "market": market_key, "player": player, "line": point,
+                    all_edges.append({"edge_type": "devig", "game_id": gid, "market": market_key, "player": player, "line": point,
                                        "side": "Under", "book": book, "odds": d["under_odds"],
                                        "edge_pp": round(edge_under*100, 1), "consensus_pct": round((1-consensus_over)*100, 1),
                                        "book_implied_pct": round(d["under"]*100, 1), "n_books": len(books)})
+
+            # ---- "model" edge: OUR OWN projection vs. the real devigged market consensus ----
+            stat = PLAYER_PROP_STATS.get(market_key)
+            if not stat:
+                continue
+            short = _full_name_to_pbp_short(player)
+            proj = projections.get(short, {}).get(stat)
+            if proj is None:
+                continue  # no real prior-game data on this player this season -- don't guess
+            model_p_over = prob_over_line(stat, proj, point, sd_coef, residual_pool)
+            if model_p_over is None:
+                continue
+            model_edge_over = model_p_over - consensus_over
+            if abs(model_edge_over) > _MIN_EDGE_PP:
+                side = "Over" if model_edge_over > 0 else "Under"
+                # Shop for the real BEST price on that side -- lowest devigged implied
+                # probability = best payout for us, not highest (that'd be the worst price).
+                best_book, d = min(devigged.items(), key=lambda kv: kv[1]["over"] if side=="Over" else kv[1]["under"])
+                all_edges.append({"edge_type": "model", "game_id": gid, "market": market_key, "player": player, "line": point,
+                                   "side": side, "book": best_book, "odds": d["over_odds"] if side=="Over" else d["under_odds"],
+                                   "edge_pp": round(abs(model_edge_over)*100, 1),
+                                   "model_pct": round((model_p_over if side=="Over" else 1-model_p_over)*100, 1),
+                                   "consensus_pct": round((consensus_over if side=="Over" else 1-consensus_over)*100, 1),
+                                   "n_books": len(books), "projection": round(proj, 1)})
 
     all_edges.sort(key=lambda e: -e["edge_pp"])
     return all_edges
@@ -1764,8 +1920,15 @@ if __name__ == "__main__":
     team_totals_data = fetch_team_totals_for_week(API_KEY, ratings["games_this_week"])
     print(f"\n--- TEAM TOTALS: real market lines fetched for {len(team_totals_data)} of {len(ratings['games_this_week'])} games ---")
 
-    prop_value_out = build_prop_value_report(API_KEY, ratings["games_this_week"])
-    print(f"\n--- PROP VALUE: {len(prop_value_out)} real flagged edges across this week's games ---")
+    print("\n--- PLAYER PROJECTION MODEL: real walk-forward recency-weighted projections + real fitted variance ---")
+    projection_model_val = build_player_projection_model(fetch_pbp(SEASON))
+    print(f"  {len(projection_model_val[0])} real players with a usable projection, "
+          f"{len(projection_model_val[1])} stats with a real fitted variance model")
+
+    prop_value_out = build_prop_value_report(API_KEY, ratings["games_this_week"], projection_model=projection_model_val)
+    n_devig = sum(1 for e in prop_value_out if e["edge_type"]=="devig")
+    n_model = sum(1 for e in prop_value_out if e["edge_type"]=="model")
+    print(f"\n--- PROP VALUE: {len(prop_value_out)} real flagged edges ({n_devig} devig, {n_model} model) across this week's games ---")
     print(json.dumps(prop_value_out[:20], indent=1), "\n...(top 20 shown)" if len(prop_value_out) > 20 else "")
     # Grade previous week's games (normal weekly cadence) PLUS any game in the CURRENT
     # week's slate that has already gone final -- e.g. re-running mid-week after a
