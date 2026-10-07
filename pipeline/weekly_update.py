@@ -1463,8 +1463,8 @@ def build_model_season_record(db, season):
                 else:
                     went_over = t_diff > 0
                     t_grade = "win" if went_over == (model_pick == "over") else "loss"
-                total_graded.append({"week": wk, "game_id": g["id"], "pick": model_pick,
-                                      "edge": round(abs(t_edge), 2), "grade": t_grade})
+                total_graded.append({"week": wk, "game_id": g["id"], "away": g["away"], "home": g["home"],
+                                      "pick": model_pick, "edge": round(abs(t_edge), 2), "grade": t_grade})
                 total_by_week.setdefault(wk_key, {"wins": 0, "losses": 0, "pushes": 0})
                 total_by_week[wk_key][{"win": "wins", "loss": "losses", "push": "pushes"}[t_grade]] += 1
 
