@@ -344,21 +344,29 @@ def fetch_injury_report(season):
 
 
 def build_qb_depth_chart_status(season, current_season_pbp_path):
-    """The real automated replacement for manually noticing a QB change. For every team, picks
-    a real 'who's actually starting' candidate:
-      1. Default to whoever REALLY started that team's most recent played game (concrete fact,
-         not a prediction) -- UNLESS the real injury report now lists them Out/Doubtful/IR.
-      2. If unavailable (or it's a real Week 1 with no prior game yet), walk the real depth
-         chart in rank order and take the first name NOT listed unavailable.
-    Only flags a team when this real candidate differs from who actually played last time --
-    a stable, healthy starter produces zero noise, same as the goal of the old manual system
-    but without needing a person to notice first.
+    """The real automated replacement for manually noticing a QB change -- including a
+    starter RECLAIMING the job once they're healthy again, not just losing it.
 
-    Deliberately conservative on the genuinely ambiguous case (an injured starter's real
-    practice/depth-chart status suggests they might be reclaiming the job, but there's no
-    concrete snap evidence yet): stays on the backup's own real track record and surfaces a
-    plain-language secondary_note instead of guessing -- a confirmed real case of exactly this
-    (CHI depth chart still listing an Out Caleb Williams at #1) is what this guards against.
+    Primary signal is the real depth chart itself, walked in rank order past anyone the real
+    injury report lists Out/Doubtful/IR -- the team's own official, current declaration of who
+    plays, cross-checked against who's actually confirmed unavailable. This replaced an earlier
+    version that defaulted to "whoever started the last real game" instead: that version
+    correctly caught a starter going DOWN, but then stayed stuck on the backup forever even
+    after the real starter recovered (never flagged a recovery, since a healthy backup who
+    already played never triggers a change on its own) -- exactly the staleness problem this
+    whole system exists to kill, just moved rather than fixed. Depth-chart-primary catches both
+    directions the same real way, no human judgment required.
+
+    Only flags a team when this real candidate differs from who actually started last time --
+    a stable, healthy starter produces zero noise.
+
+    Known, honest limitation: a real non-injury benching that the depth chart hasn't reordered
+    yet and the injury report has no reason to mention (confirmed live: WAS still depth-chart-
+    lists Mariota #2 over Kaliakmanis, who's actually the one playing, with neither flagged
+    injured at all) won't be caught until the real depth chart itself updates -- no structured
+    data source captures a pure coaching decision. Self-corrects within about a real day, given
+    the real ~2x/day depth-chart refresh cadence; the manual override below still exists for
+    the rare case someone wants it fixed sooner than that.
     """
     dc = fetch_depth_charts(season)
     injuries = fetch_injury_report(season)
@@ -374,41 +382,26 @@ def build_qb_depth_chart_status(season, current_season_pbp_path):
     out = {}
     for team, rows in dc.groupby("team"):
         rows = rows.sort_values("pos_rank")
-        dc_qb1_full = rows.iloc[0].player_name
-        last_game_short = primary_by_team.get(team)
-
-        last_game_full = next((r.player_name for _, r in rows.iterrows()
-                                if _full_name_to_pbp_short(r.player_name) == last_game_short), None)
-
-        if last_game_short and last_game_full and not unavailable(last_game_full):
-            candidate_full = last_game_full
-        else:
-            healthy = [r.player_name for _, r in rows.iterrows() if not unavailable(r.player_name)]
-            candidate_full = healthy[0] if healthy else dc_qb1_full
-
+        healthy = [r.player_name for _, r in rows.iterrows() if not unavailable(r.player_name)]
+        candidate_full = healthy[0] if healthy else rows.iloc[0].player_name  # everyone flagged -- fall back to #1 anyway
         candidate_short = _full_name_to_pbp_short(candidate_full)
-        flag = bool(last_game_short) and (candidate_short != last_game_short)
 
-        secondary_note = None
-        if _full_name_to_pbp_short(dc_qb1_full) != candidate_short and not unavailable(dc_qb1_full):
-            secondary_note = (f"Depth chart currently lists {dc_qb1_full} at QB1 (not flagged "
-                               f"injured) -- different from {candidate_full}, who this is using. "
-                               f"Possible the starter's reclaiming the job; verify before kickoff.")
+        last_game_short = primary_by_team.get(team)
+        flag = bool(last_game_short) and (candidate_short != last_game_short)
 
         if not flag:
             out[team] = {"flag": False, "qb_name": candidate_short, "qb_full_name": candidate_full,
-                         "reason": "No change from last real game's starter.", "secondary_note": secondary_note,
+                         "reason": "No change from last real game's starter.",
                          "penalty_epa": 0.0, "source": "no change detected"}
             continue
 
         computed = qb_personal_penalty(candidate_short, season, current_season_pbp_path)
         penalty, source = (computed, "real personal EPA") if computed is not None else (BACKUP_QB_EPA_PENALTY, "generic fallback -- no real data on this player")
-        reason = (f"Real last game's starter ({last_game_short}) is now Out/Doubtful/IR -- using {candidate_full} instead."
-                  if last_game_full and unavailable(last_game_full)
-                  else f"Depth chart now lists {candidate_full} over last real game's starter ({last_game_short}).")
+        reason = (f"Real depth chart (injury-checked) now has {candidate_full} over last real game's starter ({last_game_short})."
+                  if last_game_short else
+                  f"No prior real game this season yet -- using the real depth chart's top healthy name, {candidate_full}.")
         out[team] = {"flag": True, "qb_name": candidate_short, "qb_full_name": candidate_full,
-                     "reason": reason, "secondary_note": secondary_note,
-                     "penalty_epa": round(penalty, 4), "source": source}
+                     "reason": reason, "penalty_epa": round(penalty, 4), "source": source}
         print(f"  AUTO QB change detected: {team} -> {candidate_full} ({candidate_short}) = {penalty:+.3f} EPA/play [{source}] -- {reason}")
 
     return out
