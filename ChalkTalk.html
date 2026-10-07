@@ -278,18 +278,17 @@
   </div>
 
   <div id="view-props" class="view">
-    <div class="section-label">Props &middot; multi-book line shopping</div>
+    <div class="section-label">Props &middot; two different kinds of edge</div>
     <div class="dash-card" style="font-size:12px;color:var(--sage);margin-bottom:14px;">
-      This is NOT an independent prediction -- it's the same math a $99/mo tool like Unabated's
-      Props Simulator runs under the hood: every book quoting a player prop is devigged (its
-      Over/Under pair stripped of house edge back to a real implied probability), then averaged
-      across books into a consensus "true" number. Any single book priced more than 4 percentage
-      points off that consensus gets flagged here. A real backtest against weeks 1-4 of this
-      season (98 flagged edges) came back at 45.9% against a 47.5% breakeven -- no evidence this
-      alone beats the vig, and the largest edge found all season was under 5pp, so don't stake
-      real money on these. Needs 2+ books quoting the exact same player/market/line to form a
-      consensus at all, so thin markets (anytime-TD especially) show up less often than big ones
-      (pass/rush/rec yards).
+      Two real, DIFFERENT checks, not one blended signal. <b>Devig</b> is line-shopping, not a
+      prediction: every book quoting a prop gets devigged (its Over/Under pair stripped of vig
+      back to a real implied probability) and averaged into a market consensus; any single book
+      priced 4+ points off that consensus gets flagged -- same math a $99/mo tool like
+      Unabated's Props Simulator runs. Real backtest (weeks 1-4, 98 edges): 45.9% vs. a 47.5%
+      breakeven -- no evidence this alone beats the vig. <b>Our model</b> is an actual
+      independent prediction -- our own walk-forward player projection compared against that
+      same market consensus -- not backtested yet, see its own section below for a real, live
+      caveat found testing it. Neither is proven; don't stake real money on either yet.
     </div>
     <div id="prop-value-list"></div>
   </div>
@@ -1717,14 +1716,18 @@ function renderPropValue(){
   const el = document.getElementById('prop-value-list');
   if(!el) return;
   if(!PROP_VALUE.length){
-    el.innerHTML = '<div class="empty-note">No edges flagged this week -- either every book agrees within 4pp, or props data hasn\'t loaded for this slate yet.</div>';
+    el.innerHTML = '<div class="empty-note">No edges flagged this week -- either every book/our model agrees within 4pp, or props data hasn\'t loaded for this slate yet.</div>';
     return;
   }
-  el.innerHTML = PROP_VALUE.map(e=>{
+  const devig = PROP_VALUE.filter(e => e.edge_type !== 'model');
+  const model = PROP_VALUE.filter(e => e.edge_type === 'model');
+
+  function card(e){
     const [away, home] = (e.game_id||'').split('-');
     const matchup = (away && home) ? `${away.toUpperCase()} @ ${home.toUpperCase()}` : (e.game_id||'');
     const marketLabel = PROP_MARKET_LABELS[e.market] || e.market;
     const oddsStr = e.odds>0 ? `+${e.odds}` : `${e.odds}`;
+    const isModel = e.edge_type === 'model';
     return `
     <div class="game-card" style="cursor:default;">
       <div class="game-card-top">
@@ -1738,12 +1741,30 @@ function renderPropValue(){
         <span style="flex:1;text-align:right;font-weight:700;color:var(--good);">+${e.edge_pp.toFixed(1)}pp</span>
       </div>
       <div style="display:flex;gap:14px;font-size:10.5px;color:var(--sage);margin-top:4px;">
-        <span>Consensus: ${e.consensus_pct.toFixed(1)}%</span>
-        <span>This book: ${e.book_implied_pct.toFixed(1)}%</span>
+        ${isModel
+          ? `<span>Our model: ${e.model_pct.toFixed(1)}%</span><span>Market: ${e.consensus_pct.toFixed(1)}%</span><span>Proj: ${e.projection}</span>`
+          : `<span>Consensus: ${e.consensus_pct.toFixed(1)}%</span><span>This book: ${e.book_implied_pct.toFixed(1)}%</span>`}
         <span>${e.n_books} books</span>
       </div>
     </div>`;
-  }).join('');
+  }
+
+  el.innerHTML = `
+    <div class="section-label">Devig / line-shopping (${devig.length})</div>
+    ${devig.length ? devig.map(card).join('') : '<div class="empty-note">None this week.</div>'}
+
+    <div class="section-label" style="margin-top:16px;">Our model vs. market (${model.length})</div>
+    <div class="dash-card" style="font-size:11.5px;color:var(--sage);margin-bottom:10px;">
+      A real, walk-forward-validated projection (plain trailing mean of each player's own
+      real qualifying games this season, min. 2 games with real meaningful volume) compared
+      against the devigged market consensus. <b>Not backtested yet</b> -- early live checks
+      found several real edges clustering on mobile-QB rushing-yards Unders at high confidence,
+      which may mean the variance model is still too narrow for that specific case (QB rushing
+      is lumpier than RB rushing -- fewer carries, higher per-carry variance -- and the current
+      fit pools all rushers together). Treat as informational, not a betting signal, until a
+      real backtest exists -- same standard the devig numbers above are held to.
+    </div>
+    ${model.length ? model.map(card).join('') : '<div class="empty-note">None this week.</div>'}`;
 }
 
 // ---- NEW: edge / signal helpers ----
