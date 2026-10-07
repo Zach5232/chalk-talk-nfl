@@ -799,29 +799,36 @@ PLAYER_PROP_STATS = {
 }
 
 def _real_player_stat_rows(current_season_pbp_path):
-    """Real per-(week, player, stat) actual values this season, straight from real play-by-
-    play -- the shared source for both the projection model below and QB Watch's own roster
-    reads elsewhere in this file."""
-    cols = ["week", "season_type", "passer", "rusher", "receiver", "play_type",
+    """Real per-(week, team, player, stat) actual values this season, straight from real play-
+    by-play -- the shared source for both the projection model below and QB Watch's own roster
+    reads elsewhere in this file.
+
+    Real bug caught before this ever shipped: nflverse's short-name convention ("T.Johnson")
+    is NOT unique league-wide -- confirmed live, 3 different real receivers share that exact
+    short name across 3 different teams this season alone (plus several more collisions at
+    other positions). Keeping team alongside player here, and keying the projection model by
+    (team, short_name) rather than short_name alone, is what keeps those real different
+    players' real different stat lines from silently overwriting each other."""
+    cols = ["week", "season_type", "posteam", "passer", "rusher", "receiver", "play_type",
             "complete_pass", "passing_yards", "rushing_yards", "receiving_yards",
             "pass_touchdown", "rush_touchdown"]
     p = pd.read_parquet(current_season_pbp_path, columns=cols)
     p = p[p.season_type == "REG"]
     rows = []
     pass_p = p[(p.play_type == "pass") & p.passer.notna()]
-    for (wk, name), g in pass_p.groupby(["week", "passer"]):
-        rows.append((wk, name, "completions", float(g.complete_pass.sum())))
-        rows.append((wk, name, "pass_yards", float(g.passing_yards.fillna(0).sum())))
-        rows.append((wk, name, "pass_tds", float(g.pass_touchdown.fillna(0).sum())))
+    for (wk, team, name), g in pass_p.groupby(["week", "posteam", "passer"]):
+        rows.append((wk, team, name, "completions", float(g.complete_pass.sum())))
+        rows.append((wk, team, name, "pass_yards", float(g.passing_yards.fillna(0).sum())))
+        rows.append((wk, team, name, "pass_tds", float(g.pass_touchdown.fillna(0).sum())))
     run_p = p[(p.play_type == "run") & p.rusher.notna()]
-    for (wk, name), g in run_p.groupby(["week", "rusher"]):
-        rows.append((wk, name, "rush_att", float(len(g))))
-        rows.append((wk, name, "rush_yards", float(g.rushing_yards.fillna(0).sum())))
+    for (wk, team, name), g in run_p.groupby(["week", "posteam", "rusher"]):
+        rows.append((wk, team, name, "rush_att", float(len(g))))
+        rows.append((wk, team, name, "rush_yards", float(g.rushing_yards.fillna(0).sum())))
     rec_p = p[(p.play_type == "pass") & (p.complete_pass == 1) & p.receiver.notna()]
-    for (wk, name), g in rec_p.groupby(["week", "receiver"]):
-        rows.append((wk, name, "receptions", float(len(g))))
-        rows.append((wk, name, "rec_yards", float(g.receiving_yards.fillna(0).sum())))
-    return pd.DataFrame(rows, columns=["week", "player", "stat", "value"])
+    for (wk, team, name), g in rec_p.groupby(["week", "posteam", "receiver"]):
+        rows.append((wk, team, name, "receptions", float(len(g))))
+        rows.append((wk, team, name, "rec_yards", float(g.receiving_yards.fillna(0).sum())))
+    return pd.DataFrame(rows, columns=["week", "team", "player", "stat", "value"])
 
 
 def build_player_projection_model(current_season_pbp_path):
@@ -845,17 +852,19 @@ def build_player_projection_model(current_season_pbp_path):
     empirical standardized-residual shape for that stat (prob_over_line, below), not a CDF.
 
     Returns (projections, sd_coef, residual_pool):
-      projections: {player: {stat: recency-weighted mean}} -- only for a player/stat with at
-        least one real prior game this season (never fabricates a projection with zero data).
+      projections: {(team, player): {stat: recency-weighted mean}} -- keyed by team as well as
+        short name (see _real_player_stat_rows' own comment for the real collision this
+        prevents), only for a player/stat with at least one real prior game this season (never
+        fabricates a projection with zero data).
       sd_coef: {stat: real fitted coefficient c such that predicted SD = c * sqrt(max(proj,1))}
       residual_pool: {stat: [real standardized residuals, pooled across every real (player,
         week) observed this season]}
     """
     df = _real_player_stat_rows(current_season_pbp_path)
-    obs = []  # (stat, player, proj, actual)
+    obs = []  # (stat, proj, actual)
     projections = defaultdict(dict)
     for stat, sdf in df.groupby("stat"):
-        for player, pdata in sdf.groupby("player"):
+        for (team, player), pdata in sdf.groupby(["team", "player"]):
             pdata = pdata.sort_values("week")
             pweeks = pdata.week.tolist()
             pvals = dict(zip(pdata.week, pdata.value))
@@ -867,10 +876,11 @@ def build_player_projection_model(current_season_pbp_path):
                 weights = [0.5 ** (len(prior_weeks) - 1 - j) for j in range(len(prior_weeks))]
                 proj = float(np.average(prior_vals, weights=weights))
                 obs.append((stat, proj, pvals[wk]))
-            # The REAL current projection (for THIS week, using every real game so far) --
-            # same recency-weighted formula, just evaluated through the most recent real week.
+            # The REAL current projection (for THIS week, using every real game so far under
+            # this specific team) -- same recency-weighted formula, through the most recent
+            # real week.
             weights = [0.5 ** (len(pweeks) - 1 - j) for j in range(len(pweeks))]
-            projections[player][stat] = float(np.average(list(pvals.values()), weights=weights))
+            projections[(team, player)][stat] = float(np.average(list(pvals.values()), weights=weights))
 
     sd_coef = {}
     residual_pool = defaultdict(list)
@@ -1003,7 +1013,11 @@ def build_prop_value_report(api_key, week_games, projection_model=None):
             if not stat:
                 continue
             short = _full_name_to_pbp_short(player)
-            proj = projections.get(short, {}).get(stat)
+            # Real short names collide across teams (see _real_player_stat_rows' own comment --
+            # confirmed live, up to 3 different real players sharing one short name this
+            # season) -- this game's own two teams are the real disambiguator, so only look up
+            # the one that's actually playing in it rather than trusting the short name alone.
+            proj = (projections.get((r.home_team, short)) or projections.get((r.away_team, short)) or {}).get(stat)
             if proj is None:
                 continue  # no real prior-game data on this player this season -- don't guess
             model_p_over = prob_over_line(stat, proj, point, sd_coef, residual_pool)
