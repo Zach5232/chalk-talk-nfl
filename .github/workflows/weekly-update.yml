@@ -22,6 +22,18 @@ on:
         description: "Week (leave blank to use the file's default)"
         required: false
         type: string
+      pull_spreads:
+        description: "Pull spreads (1 credit)"
+        type: boolean
+        default: true
+      pull_team_totals:
+        description: "Pull team totals (~1 credit per game)"
+        type: boolean
+        default: true
+      pull_props:
+        description: "Pull player props (~5 credits per game, ~80 a run)"
+        type: boolean
+        default: false
 
 jobs:
   update:
@@ -50,6 +62,9 @@ jobs:
           # env vars simply aren't set at all on a blank input (or a cron run).
           CHALKTALK_SEASON: ${{ github.event.inputs.season || '' }}
           CHALKTALK_WEEK: ${{ github.event.inputs.week || '' }}
+          # Which odds to pull: a cron run pulls everything; a manual run pulls only what's ticked.
+          # Anything unticked keeps the lines already saved for this week.
+          CHALKTALK_ODDS: ${{ github.event_name != 'workflow_dispatch' && 'spreads,team_totals,props' || format('{0},{1},{2}', inputs.pull_spreads && 'spreads' || '', inputs.pull_team_totals && 'team_totals' || '', inputs.pull_props && 'props' || '') }}
         run: |
           # An unfilled manual-trigger input arrives here as an empty string, not unset --
           # and int("") in weekly_update.py would crash, so blank ones get unset entirely

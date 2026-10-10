@@ -45,6 +45,11 @@ except ImportError:
             "your real Odds API key, or set the ODDS_API_KEY environment variable."
         )
 MODE = "live"          # real season is live -- pulls the current real odds board
+# Which Odds API pulls this run makes: any of spreads, team_totals, props (CHALKTALK_ODDS, set by the
+# workflow's checkboxes on a manual run; a cron run pulls all three). A market that isn't pulled keeps
+# what's already saved in Firestore for this week instead of being blanked out. Rough cost per run:
+# spreads 1 credit, team_totals ~1 per game, props ~5 per game.
+ODDS = {x.strip() for x in os.environ.get("CHALKTALK_ODDS", "spreads,team_totals,props").split(",") if x.strip()}
 HIST_DATE = "2025-11-04T12:00:00Z"  # unused in live mode, left for reference/backtesting
 
 TEAM_MAP = {
@@ -1269,6 +1274,28 @@ def get_firestore_client(cred_path):
     return firestore.client()
 
 
+def load_saved_odds(cred_path, season, week, week_games):
+    """This week's last saved spreads (books/{gid}) and team totals (games/{season}-wk{week}), for the
+    markets a run skips. books/{gid} has no week on it and matchups repeat, so a book doc is only reused
+    when this week's games doc shows a market line was saved for that game."""
+    if not (_FIREBASE_AVAILABLE and cred_path):
+        return {}, {}
+    db = get_firestore_client(cred_path)
+    wk = db.collection("games").document(f"{season}-wk{week}").get()
+    saved = {g["id"]: g for g in (wk.to_dict() or {}).get("games", [])} if wk.exists else {}
+    books, tt = {}, {}
+    for _, r in week_games.iterrows():
+        gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
+        g = saved.get(gid) or {}
+        if g.get("market") is not None:
+            d = db.collection("books").document(gid).get()
+            if d.exists:
+                books[gid] = d.to_dict()
+        if g.get("market_home_total") is not None or g.get("market_away_total") is not None:
+            tt[gid] = {"market_home_total": g.get("market_home_total"), "market_away_total": g.get("market_away_total")}
+    return books, tt
+
+
 def write_firestore(db, *, season, week, ratings_rows, games, books, closing, weather,
                      rating_history, qb_leaderboard, wr_leaderboard, rb_leaderboard,
                      qb_history, team_players, fantasy_projections, underperformance_report=None,
@@ -1964,21 +1991,40 @@ if __name__ == "__main__":
                                   if SEASON == 2025 else fetch_pbp(SEASON - 1))
     ratings = run_ratings(SEASON, WEEK, prior_season_pbp_path=prior_season_pbp_path_val)
 
-    odds_data = pull_week_odds(MODE, API_KEY, HIST_DATE)
-    books = build_books_for_week(odds_data, ratings["games_this_week"])
-    team_totals_data = fetch_team_totals_for_week(API_KEY, ratings["games_this_week"])
-    print(f"\n--- TEAM TOTALS: real market lines fetched for {len(team_totals_data)} of {len(ratings['games_this_week'])} games ---")
+    print(f"--- ODDS PULLS THIS RUN: {', '.join(sorted(ODDS)) or 'none'} ---")
+    if ODDS >= {"spreads", "team_totals"}:
+        saved_books, saved_tt = {}, {}
+    else:
+        saved_books, saved_tt = load_saved_odds(
+            os.environ.get("FIREBASE_CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
+            SEASON, WEEK, ratings["games_this_week"])
+    if "spreads" in ODDS:
+        odds_data = pull_week_odds(MODE, API_KEY, HIST_DATE)
+        books = build_books_for_week(odds_data, ratings["games_this_week"])
+    else:
+        books = saved_books
+        print(f"  spreads: not pulled -- kept the saved lines for {len(books)} games")
+    if "team_totals" in ODDS:
+        team_totals_data = fetch_team_totals_for_week(API_KEY, ratings["games_this_week"])
+        print(f"\n--- TEAM TOTALS: real market lines fetched for {len(team_totals_data)} of {len(ratings['games_this_week'])} games ---")
+    else:
+        team_totals_data = saved_tt
+        print(f"  team totals: not pulled -- kept the saved lines for {len(team_totals_data)} games")
 
     print("\n--- PLAYER PROJECTION MODEL: real walk-forward recency-weighted projections + real fitted variance ---")
     projection_model_val = build_player_projection_model(fetch_pbp(SEASON))
     print(f"  {len(projection_model_val[0])} real players with a usable projection, "
           f"{len(projection_model_val[1])} stats with a real fitted variance model")
 
-    prop_value_out = build_prop_value_report(API_KEY, ratings["games_this_week"], projection_model=projection_model_val)
-    n_devig = sum(1 for e in prop_value_out if e["edge_type"]=="devig")
-    n_model = sum(1 for e in prop_value_out if e["edge_type"]=="model")
-    print(f"\n--- PROP VALUE: {len(prop_value_out)} real flagged edges ({n_devig} devig, {n_model} model) across this week's games ---")
-    print(json.dumps(prop_value_out[:20], indent=1), "\n...(top 20 shown)" if len(prop_value_out) > 20 else "")
+    if "props" in ODDS:
+        prop_value_out = build_prop_value_report(API_KEY, ratings["games_this_week"], projection_model=projection_model_val)
+        n_devig = sum(1 for e in prop_value_out if e["edge_type"]=="devig")
+        n_model = sum(1 for e in prop_value_out if e["edge_type"]=="model")
+        print(f"\n--- PROP VALUE: {len(prop_value_out)} real flagged edges ({n_devig} devig, {n_model} model) across this week's games ---")
+        print(json.dumps(prop_value_out[:20], indent=1), "\n...(top 20 shown)" if len(prop_value_out) > 20 else "")
+    else:
+        prop_value_out = None  # write_firestore leaves prop_value/current as it was
+        print("\n--- PROP VALUE: props not pulled this run -- the saved prop edges stay as they are ---")
     # Grade previous week's games (normal weekly cadence) PLUS any game in the CURRENT
     # week's slate that has already gone final -- e.g. re-running mid-week after a
     # Thursday/Sunday-night opener finishes, without waiting for the whole week to end.
