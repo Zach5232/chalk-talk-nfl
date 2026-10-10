@@ -12,6 +12,10 @@ on:
     # Tuesday 10:00 ET (14:00 UTC during EDT, 15:00 UTC during EST -- 14:00 UTC covers the
     # real season, which runs entirely within EDT/EST's daylight-saving window this year).
     - cron: "0 14 * * 2"
+    # Sunday 10:45 ET (EDT; 9:45 once standard time starts Nov 1) -- fresh spreads + game totals for
+    # game-day line shopping, after most injury news and with game-day weather. ~4 credits. Keeps the
+    # team totals/props saved from the last run.
+    - cron: "45 14 * * 0"
   workflow_dispatch:
     inputs:
       season:
@@ -23,13 +27,21 @@ on:
         required: false
         type: string
       pull_spreads:
-        description: "Pull spreads (1 credit)"
+        description: "Pull spreads (2 credits: Pinnacle + your 12 books/exchanges)"
+        type: boolean
+        default: true
+      pull_totals:
+        description: "Pull game totals / over-unders (2 credits, all games)"
         type: boolean
         default: true
       pull_team_totals:
-        description: "Pull team totals (~1 credit per game)"
+        description: "Pull team totals (~2 credits per game)"
         type: boolean
         default: true
+      team_total_games:
+        description: "Team totals only for these teams/games, e.g. BUF,KC (blank = all games)"
+        required: false
+        type: string
       pull_props:
         description: "Pull player props (~5 credits per game, ~80 a run)"
         type: boolean
@@ -62,9 +74,12 @@ jobs:
           # env vars simply aren't set at all on a blank input (or a cron run).
           CHALKTALK_SEASON: ${{ github.event.inputs.season || '' }}
           CHALKTALK_WEEK: ${{ github.event.inputs.week || '' }}
-          # Which odds to pull: a cron run pulls everything; a manual run pulls only what's ticked.
-          # Anything unticked keeps the lines already saved for this week.
-          CHALKTALK_ODDS: ${{ github.event_name != 'workflow_dispatch' && 'spreads,team_totals,props' || format('{0},{1},{2}', inputs.pull_spreads && 'spreads' || '', inputs.pull_team_totals && 'team_totals' || '', inputs.pull_props && 'props' || '') }}
+          # Which odds to pull: the Tuesday cron pulls everything except props (~80 credits a run --
+          # tick props on a manual run when you actually want them); the Sunday cron pulls spreads +
+          # game totals only; a manual run pulls only what's ticked. Anything not pulled keeps the
+          # lines already saved for this week.
+          CHALKTALK_ODDS: ${{ github.event_name == 'schedule' && (github.event.schedule == '45 14 * * 0' && 'spreads,totals' || 'spreads,totals,team_totals') || format('{0},{1},{2},{3}', inputs.pull_spreads && 'spreads' || '', inputs.pull_totals && 'totals' || '', inputs.pull_team_totals && 'team_totals' || '', inputs.pull_props && 'props' || '') }}
+          CHALKTALK_TT_GAMES: ${{ github.event.inputs.team_total_games || '' }}
         run: |
           # An unfilled manual-trigger input arrives here as an empty string, not unset --
           # and int("") in weekly_update.py would crash, so blank ones get unset entirely

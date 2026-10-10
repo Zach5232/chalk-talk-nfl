@@ -14,6 +14,7 @@ arrays/objects in ChalkTalk.html.
 """
 import subprocess, json, csv, os, time
 from collections import defaultdict
+from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 
@@ -45,11 +46,15 @@ except ImportError:
             "your real Odds API key, or set the ODDS_API_KEY environment variable."
         )
 MODE = "live"          # real season is live -- pulls the current real odds board
-# Which Odds API pulls this run makes: any of spreads, team_totals, props (CHALKTALK_ODDS, set by the
-# workflow's checkboxes on a manual run; a cron run pulls all three). A market that isn't pulled keeps
-# what's already saved in Firestore for this week instead of being blanked out. Rough cost per run:
-# spreads 1 credit, team_totals ~1 per game, props ~5 per game.
-ODDS = {x.strip() for x in os.environ.get("CHALKTALK_ODDS", "spreads,team_totals,props").split(",") if x.strip()}
+# Which Odds API pulls this run makes: any of spreads, totals, team_totals, props (CHALKTALK_ODDS, set
+# by the workflow's checkboxes on a manual run; the Tuesday cron pulls everything except props). A
+# market that isn't pulled keeps what's already saved in Firestore for this week instead of being
+# blanked out. Rough cost per run, pulling the 13 ODDS_BOOKS (2 groups of 10): spreads 2 credits, totals
+# 2 (both ride the same all-games call), team_totals ~2 per game; props (all US books) ~5 per game.
+ODDS = {x.strip() for x in os.environ.get("CHALKTALK_ODDS", "spreads,totals,team_totals").split(",") if x.strip()}
+# Optional: only pull team totals for these games -- comma-separated team abbreviations or game ids
+# ("BUF,KC" or "buf-kc"). Blank = every game this week. Team totals cost ~2 credits per game pulled.
+TT_GAMES = {x.strip().lower() for x in os.environ.get("CHALKTALK_TT_GAMES", "").split(",") if x.strip()}
 HIST_DATE = "2025-11-04T12:00:00Z"  # unused in live mode, left for reference/backtesting
 
 TEAM_MAP = {
@@ -688,12 +693,34 @@ def run_ratings(season, week, prior_season_pbp_path):
     }
 
 
+# ---------- Books: same setup as the NHL model (Zach5232/NHL-Model board.py) ----------
+# Pinnacle is the sharp market reference only (fair price), never a bet. BET_BOOKS are the books
+# actually bet at plus the prediction-market exchanges. The Odds API bills each group of up to 10
+# bookmakers like a region: 13 books = 2 credits per market per call.
+SHARP_BOOK = "pinnacle"
+BET_BOOKS = ["betonlineag", "espnbet", "williamhill_us", "betrivers", "betmgm", "fanduel", "draftkings",
+             "ballybet", "kalshi", "polymarket", "novig", "prophetx"]
+ODDS_BOOKS = [SHARP_BOOK] + BET_BOOKS
+# Pregame take-order fees, copied from the NHL model's model_config.json (each checked there against a
+# real order slip on 2026-10-10 -- edit both places if a fee schedule changes). Sportsbooks have none.
+#   parabolic: fee = rate * p * (1 - p) per $1 contract bought at price p (Kalshi, Polymarket)
+#   winnings:  commission on net winnings (ProphetX); Novig charges nothing pregame
+EXCHANGE_FEES = {
+    "kalshi": {"type": "parabolic", "rate": 0.07},
+    "polymarket": {"type": "parabolic", "rate": 0.07},
+    "prophetx": {"type": "winnings", "rate": 0.02},
+}
+
+
 # ---------- STEP 3: odds pull (this week's games, per-book) ----------
-def pull_week_odds(mode, api_key, hist_date=None):
+def pull_week_odds(mode, api_key, hist_date=None, markets="spreads", bookmakers=None):
+    """markets: comma-separated Odds API market keys. bookmakers: explicit book list (billed per group
+    of 10 books, per market); None = every US book (1 credit per market for the whole slate)."""
     if mode == "live":
-        url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/?apiKey={api_key}&regions=us&markets=spreads&oddsFormat=american"
+        who = f"bookmakers={','.join(bookmakers)}" if bookmakers else "regions=us"
+        url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/?apiKey={api_key}&{who}&markets={markets}&oddsFormat=american"
     else:
-        url = f"https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds/?apiKey={api_key}&regions=us&markets=spreads&oddsFormat=american&date={hist_date}"
+        url = f"https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds/?apiKey={api_key}&regions=us&markets={markets}&oddsFormat=american&date={hist_date}"
     out_path = os.path.join(CACHE_DIR, "week_odds.json")
     subprocess.run(["curl","-s","-o",out_path,url], check=True)
     d = json.load(open(out_path))
@@ -720,6 +747,27 @@ def build_books_for_week(odds_data, week_games):
             gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
             books_out[gid] = {"books": rows}
     return books_out
+
+
+def build_totals_for_week(odds_data, week_games):
+    """Every book's own game total line + over/under price (not averaged away), so line shopping can
+    compare each book against the fair line built from all of them. {gid: [{book, line, over, under}]}"""
+    out = {}
+    for _, r in week_games.iterrows():
+        home_full = REV_MAP[r.home_team]; away_full = REV_MAP[r.away_team]
+        match = next((g for g in odds_data if g["home_team"]==home_full and g["away_team"]==away_full), None)
+        if not match: continue
+        rows = []
+        for bm in match.get("bookmakers", []):
+            for mk in bm.get("markets", []):
+                if mk["key"] != "totals": continue
+                ov = next((oc for oc in mk["outcomes"] if oc["name"] == "Over"), None)
+                un = next((oc for oc in mk["outcomes"] if oc["name"] == "Under"), None)
+                if ov and un and ov.get("point") is not None and ov.get("point") == un.get("point"):
+                    rows.append({"book": bm["key"], "line": ov["point"], "over": ov["price"], "under": un["price"]})
+        if rows:
+            out[f"{r.away_team.lower()}-{r.home_team.lower()}"] = rows
+    return out
 
 
 # ---------- Team totals: real market lines for each team's own projected points ----------
@@ -749,36 +797,357 @@ def fetch_team_totals_for_week(api_key, week_games):
         if not event:
             continue
         gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
+        if TT_GAMES and not ({gid, r.home_team.lower(), r.away_team.lower()} & TT_GAMES):
+            continue  # not one of the games picked for this run -- no credit spent on it
         url = (f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event['id']}/odds"
-               f"?apiKey={api_key}&regions=us&markets=team_totals&oddsFormat=american")
+               f"?apiKey={api_key}&bookmakers={','.join(ODDS_BOOKS)}&markets=team_totals&oddsFormat=american")
         try:
             with urllib.request.urlopen(url, timeout=20) as resp:
                 data = json.loads(resp.read())
         except Exception as e:
             print(f"  team_totals {gid}: couldn't fetch -- {e}")
             continue
-        home_pts, away_pts = [], []
+        home_pts, away_pts, tt_books = [], [], []
         for bm in data.get("bookmakers", []):
             for mk in bm.get("markets", []):
                 if mk["key"] != "team_totals":
                     continue
-                for oc in mk["outcomes"]:
-                    # team_totals outcomes are named "Over"/"Under" with a separate "description"
-                    # field naming which team's total the line belongs to.
-                    if oc.get("name") != "Over":
+                # team_totals outcomes are named "Over"/"Under" with a separate "description"
+                # field naming which team's total the line belongs to.
+                for team_full, side in ((home_full, "home"), (away_full, "away")):
+                    ov = next((oc for oc in mk["outcomes"] if oc.get("name") == "Over" and oc.get("description") == team_full), None)
+                    un = next((oc for oc in mk["outcomes"] if oc.get("name") == "Under" and oc.get("description") == team_full), None)
+                    if ov is None or ov.get("point") is None:
                         continue
-                    desc = oc.get("description")
-                    if desc == home_full and oc.get("point") is not None:
-                        home_pts.append(oc["point"])
-                    elif desc == away_full and oc.get("point") is not None:
-                        away_pts.append(oc["point"])
+                    (home_pts if side == "home" else away_pts).append(ov["point"])
+                    # Each book's own line + both prices, kept for line shopping (only when the over
+                    # and under are quoted at the same number -- otherwise there's nothing to devig).
+                    if un is not None and un.get("point") == ov["point"]:
+                        tt_books.append({"book": bm["key"], "team": side, "line": ov["point"],
+                                         "over": ov["price"], "under": un["price"]})
         if home_pts or away_pts:
             out[gid] = {
                 "market_home_total": round(sum(home_pts)/len(home_pts), 2) if home_pts else None,
                 "market_away_total": round(sum(away_pts)/len(away_pts), 2) if away_pts else None,
                 "n_books": max(len(home_pts), len(away_pts)),
+                "books": tt_books,
             }
     return out
+
+
+# ---------- Line shopping: fair line from every book, then which book's offer actually beats it ----------
+# The fair line is the market's own consensus (each book's over/under devigged, then the single center
+# that best fits all of them) -- NOT our model's projection. The backtests (2026-10-10, 2021-2025
+# team totals and 2024-2025 game totals) found the market's closing number more accurate than any
+# version of our model, so the honest reference point for "is this book's offer good" is the market
+# itself. Win probabilities come from real historical scores near that center (2015 on), which is
+# what makes a half point through 20/17/24/27 (team) or 41/44/47/51 (game) worth more than one
+# through 25 or 46 -- key numbers fall straight out of the real distribution.
+SHOP_MIN_EV = 0.0      # show every offer that's +EV at the fair price, however small
+# the stronger bar per market (starred on the card): team totals get a higher one because Pinnacle takes
+# smaller bets there, so its fair price is less reliable than on spreads/game totals
+SHOP_STRONG_EV = {"spread": 0.02, "total": 0.02, "team_total": 0.03}
+SHOP_MIN_BOOKS = 3     # need at least this many books to call a consensus a consensus
+_SCORE_HIST = None
+
+
+def _score_history():
+    """Real (market center, actual points) pairs: game totals vs. the closing total, each team's
+    points vs. its closing-implied team total ((total +/- spread) / 2), and the home margin vs. the
+    closing spread. Free -- nflverse games.csv."""
+    global _SCORE_HIST
+    if _SCORE_HIST is None:
+        g = pd.read_csv(fetch_games_csv())
+        g = g[(g.game_type == "REG") & (g.season >= 2015) & g.result.notna()
+              & g.total_line.notna() & g.spread_line.notna()]
+        game = pd.DataFrame({"center": g.total_line, "pts": g.home_score + g.away_score})
+        team = pd.concat([pd.DataFrame({"center": (g.total_line + g.spread_line) / 2, "pts": g.home_score}),
+                          pd.DataFrame({"center": (g.total_line - g.spread_line) / 2, "pts": g.away_score})])
+        # spread: home margin vs. the closing home spread (nflverse spread_line > 0 = home favored),
+        # which is where 3 and 7 come from
+        _SCORE_HIST = {"total": (game.center.values, game.pts.values),
+                       "team_total": (team.center.values, team.pts.values),
+                       "spread": (g.spread_line.values, g.result.values)}
+    return _SCORE_HIST
+
+
+def _pmf(kind, center):
+    """Real chance of landing on each exact score/margin, from games whose closing number was near
+    `center` (Gaussian-weighted, 1-point bandwidth, so it moves smoothly as the center moves)."""
+    c, pts = _score_history()[kind]
+    w = np.exp(-0.5 * ((c - center) / 1.0) ** 2)
+    keep = w > 1e-3
+    s = pd.Series(w[keep]).groupby(pts[keep]).sum()
+    return s / s.sum()
+
+
+def _probs_at(pmf, line):
+    """P(over), P(under) of `line` under a score distribution."""
+    k = pmf.index.values
+    return float(pmf[k > line].sum()), float(pmf[k < line].sum())
+
+
+def _market_pricer(kind, books):
+    """Fair over/under probabilities for ANY line, anchored to the market: Pinnacle's own devigged
+    price at Pinnacle's line when Pinnacle has the market (the sharp reference, same as the NHL model),
+    otherwise the line most books hang with their devigged prices averaged. Other lines shift from
+    there by the real chance of landing on each number in between -- the key-number part. Returns
+    (anchor_line, source, fn(line) -> (p_over, p_under))."""
+    sharp = [b for b in books if b["book"] == SHARP_BOOK]
+    if sharp:
+        cons, at, source = float(sharp[0]["line"]), sharp[:1], "Pinnacle"
+    else:
+        cons = float(pd.Series([b["line"] for b in books]).mode().median())
+        at, source = [b for b in books if b["line"] == cons], "consensus"
+    q = float(np.mean([_american_to_prob(b["over"]) / (_american_to_prob(b["over"]) + _american_to_prob(b["under"]))
+                       for b in at]))
+    pmf = _pmf(kind, cons)
+    over_c = q * (1 - float(pmf.get(cons, 0.0)))
+
+    def price(line):
+        k = pmf.index.values
+        if line >= cons:
+            po = over_c - float(pmf[(k > cons) & (k <= line)].sum())
+        else:
+            po = over_c + float(pmf[(k > line) & (k <= cons)].sum())
+        po = min(max(po, 0.0), 1.0)
+        return po, max(1.0 - po - float(pmf.get(line, 0.0)), 0.0)
+    return cons, source, price
+
+
+def _payout(odds, book=None):
+    """Profit per unit risked, after the exchange's fee if `book` is one (EXCHANGE_FEES)."""
+    odds = float(odds)
+    pay = odds / 100 if odds > 0 else 100 / -odds
+    fee = EXCHANGE_FEES.get(book)
+    if not fee:
+        return pay
+    if fee["type"] == "parabolic":
+        p = 1 / (1 + pay)
+        return 1 / (p + fee["rate"] * p * (1 - p)) - 1
+    return pay * (1 - fee["rate"])
+
+
+def _american(p):
+    """Fair American odds for a win probability (pushes already excluded)."""
+    p = min(max(p, 1e-6), 1 - 1e-6)
+    return round(-100 * p / (1 - p)) if p >= 0.5 else round(100 * (1 - p) / p)
+
+
+def _odds_for_payout(pay):
+    """American odds that pay `pay` units of profit per unit risked."""
+    return round(pay * 100) if pay >= 1 else round(-100 / max(pay, 1e-9))
+
+
+def _price_offers(price, books, side):
+    """Every book's offer on one side, priced by `price(line) -> (p_over, p_under)`: real
+    win/push/loss probability, fair odds and EV."""
+    offers = []
+    for b in books:
+        if b["book"] == SHARP_BOOK:
+            continue  # the reference, not a place to bet
+        po, pu = price(b["line"])
+        win, loss = (po, pu) if side == "over" else (pu, po)
+        offers.append({"book": b["book"], "line": b["line"], "odds": b[side],
+                       "win_prob": round(win, 4), "push_prob": round(max(1 - win - loss, 0.0), 4),
+                       "fair_odds": _american(win / max(win + loss, 1e-9)),
+                       "ev": round(win * _payout(b[side], b["book"]) - loss, 4)})
+    return offers
+
+
+def build_shop_report(game_totals, team_totals_data, spread_books, week_games, model_totals=None):
+    """Per game: the fair market line for the spread, the game total and each team total, plus the
+    best offer on each side with its real win probability, fair odds and EV at that fair line.
+
+    Game totals also get our model's view of the same offers (priced at our projected total instead
+    of the market's) -- shown alongside, NOT used for the bet flag: the 2024-2025 backtest had the
+    model at ~52-53% O/U, below breakeven, while the fair-market comparison is plain arithmetic on
+    prices that actually exist. Costs no API credits -- only reads lines already pulled or saved.
+
+    Returns {gid: [side, ...]}. Spreads are handled as an over/under on the home margin: the home
+    side at home_pt covers when margin > -home_pt, so line = -home_pt, "over" = home, "under" = away."""
+    model_totals = model_totals or {}
+    out = {}
+    for _, r in week_games.iterrows():
+        gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
+        markets = []
+        sp = [{"book": b["book"], "line": -b["home_pt"], "over": b["home_odds"], "under": b["away_odds"]}
+              for b in (spread_books.get(gid) or {}).get("books", [])
+              if b.get("home_odds") is not None and b.get("away_odds") is not None]
+        if len(sp) >= SHOP_MIN_BOOKS:
+            markets.append(("spread", None, sp))
+        if len(game_totals.get(gid) or []) >= SHOP_MIN_BOOKS:
+            markets.append(("total", None, game_totals[gid]))
+        tt_books = (team_totals_data.get(gid) or {}).get("books") or []
+        for tside, team in (("home", r.home_team), ("away", r.away_team)):
+            rows = [b for b in tt_books if b["team"] == tside]
+            if len(rows) >= SHOP_MIN_BOOKS:
+                markets.append(("team_total", team, rows))
+
+        sides = []
+        for kind, team, books in markets:
+            cons, source, price = _market_pricer(kind, books)
+            po, pu = price(cons)
+            for side in ("over", "under"):
+                offers = _price_offers(price, books, side)
+                if not offers:
+                    continue  # only the reference book has this market -- nothing to bet
+                best = max(offers, key=lambda o: o["ev"])
+                # every other book still +EV on this same side -- for when the best book is limited,
+                # you don't have an account there, or its line moves first
+                also = [{k: o[k] for k in ("book", "line", "odds", "ev")}
+                        for o in sorted(offers, key=lambda o: -o["ev"]) if o is not best and o["ev"] > 0][:10]
+                pw, pl = (po, pu) if side == "over" else (pu, po)
+                entry = {"market": kind, "team": team, "side": side, "fair_source": source,
+                         "consensus_line": cons, "consensus_fair_odds": _american(pw / max(pw + pl, 1e-9)),
+                         # the worst price at the consensus line still worth SHOP_MIN_EV -- what to shop for
+                         "target_odds": _odds_for_payout((SHOP_STRONG_EV[kind] + pl) / max(pw, 1e-9)),
+                         "n_books": len(books), **best, "bet": best["ev"] > SHOP_MIN_EV,
+                         "strong": best["ev"] >= SHOP_STRONG_EV[kind], "also": also}
+                if kind == "spread":
+                    # back to normal spread terms: side = team, line = that team's own spread
+                    entry["side"] = "home" if side == "over" else "away"
+                    entry["team"] = r.home_team if side == "over" else r.away_team
+                    entry["line"] = -best["line"] if side == "over" else best["line"]
+                    entry["consensus_line"] = -cons if side == "over" else cons
+                    entry["also"] = [{**o, "line": -o["line"] if side == "over" else o["line"]} for o in also]
+                if kind == "total" and model_totals.get(gid) is not None:
+                    # our model's view: the same offer, priced off real games that closed near OUR number
+                    mu = float(model_totals[gid])
+                    mpmf = _pmf(kind, mu)
+                    m = _price_offers(lambda L: _probs_at(mpmf, L),
+                                      [b for b in books if b["book"] == best["book"] and b["line"] == best["line"]], side)[0]
+                    mo, mu_ = _probs_at(mpmf, cons)
+                    mw, ml = (mo, mu_) if side == "over" else (mu_, mo)
+                    entry.update({"model_line": round(mu, 2), "model_win_prob": m["win_prob"],
+                                  "model_fair_odds": m["fair_odds"], "model_ev": m["ev"],
+                                  "model_consensus_fair_odds": _american(mw / max(mw + ml, 1e-9))})
+                sides.append(entry)
+        if sides:
+            out[gid] = sides
+    return out
+
+
+# ---------- +EV play log: every flagged offer, graded against the close and the final score ----------
+# Every +EV offer (best book AND every "also" book) is logged the first time a pull sees it, at the price
+# it was first available -- what you'd have gotten by betting it then. After the game: win/loss/push,
+# and the same bet's EV re-priced at the CLOSING line (closing line value). A bet that keeps beating
+# the close is the earliest real evidence an edge is real, long before a win-loss record can show it.
+# Spread/total closes come free from nflverse (consensus close + its prices, not Pinnacle specifically);
+# team totals have no free close, so they're graded on result only for now.
+# Stored under model_season_record/ (already public-read) so no Firestore rules change is needed:
+#   ev_log_{season}_wk{week}  -- this week's plays
+#   current.ev_plays          -- season summary by market and EV bucket, read by the Results page
+EV_BUCKETS = [(0.0, 0.01, "0-1%"), (0.01, 0.02, "1-2%"), (0.02, 0.03, "2-3%"), (0.03, 9.0, "3%+")]
+
+
+def _ev_play_rows(games_out):
+    for g in games_out:
+        for e in g.get("shop") or []:
+            if not e.get("bet"):
+                continue
+            for o in [e] + list(e.get("also") or []):
+                if o["ev"] <= 0:
+                    continue
+                key = f"{g['id']}|{e['market']}|{e['team'] or ''}|{e['side']}|{o['book']}|{o['line']}"
+                yield key, {"game": g["id"], "home": g["home"], "away": g["away"], "market": e["market"],
+                            "team": e["team"], "side": e["side"], "book": o["book"], "line": o["line"],
+                            "odds": o["odds"], "ev": o["ev"]}
+
+
+def log_ev_plays(db, season, week, games_out):
+    """Upsert this pull's +EV offers into the week's log, keeping the FIRST price/EV seen."""
+    ref = db.collection("model_season_record").document(f"ev_log_{season}_wk{week}")
+    snap = ref.get()
+    plays = (snap.to_dict() or {}).get("plays", {}) if snap.exists else {}
+    now = datetime.now(timezone.utc).isoformat(timespec="minutes")
+    new = 0
+    for key, row in _ev_play_rows(games_out):
+        if key in plays:
+            plays[key].update({"last_seen": now, "last_odds": row["odds"], "last_ev": row["ev"]})
+        else:
+            plays[key] = {**row, "first_seen": now, "last_seen": now, "last_odds": row["odds"], "last_ev": row["ev"]}
+            new += 1
+    ref.set({"season": season, "week": week, "plays": plays})
+    print(f"  +EV log: {new} new plays this pull, {len(plays)} logged for week {week}")
+
+
+def _close_ev(play, game_row):
+    """The same bet re-priced at the free nflverse close: EV if you'd been paid the closing fair price."""
+    r = game_row
+    if play["market"] == "spread":
+        if pd.isna(r.spread_line) or pd.isna(r.home_spread_odds) or pd.isna(r.away_spread_odds):
+            return None
+        book = {"book": "close", "line": float(r.spread_line), "over": float(r.home_spread_odds), "under": float(r.away_spread_odds)}
+        line, side = (-play["line"], "over") if play["side"] == "home" else (play["line"], "under")
+        kind = "spread"
+    elif play["market"] == "total":
+        if pd.isna(r.total_line) or pd.isna(r.over_odds) or pd.isna(r.under_odds):
+            return None
+        book = {"book": "close", "line": float(r.total_line), "over": float(r.over_odds), "under": float(r.under_odds)}
+        line, side, kind = play["line"], play["side"], "total"
+    else:
+        return None
+    _, _, price = _market_pricer(kind, [book])
+    po, pu = price(line)
+    win, loss = (po, pu) if side == "over" else (pu, po)
+    return round(win * _payout(play["odds"], play["book"]) - loss, 4)
+
+
+def _ev_result(play, r):
+    """win / loss / push and units (1 unit risked, after exchange fees)."""
+    if play["market"] == "spread":
+        margin = float(r.home_score - r.away_score)
+        diff = margin + play["line"] if play["side"] == "home" else -margin + play["line"]
+    else:
+        pts = float(r.home_score + r.away_score) if play["market"] == "total" else \
+              float(r.home_score if play["team"] == r.home_team else r.away_score)
+        diff = (pts - play["line"]) if play["side"] == "over" else (play["line"] - pts)
+    if diff > 0:
+        return "win", round(_payout(play["odds"], play["book"]), 4)
+    return ("push", 0.0) if diff == 0 else ("loss", -1.0)
+
+
+def grade_ev_log(db, season, through_week):
+    """Grade every logged play whose game is final, then rebuild the season summary."""
+    games = pd.read_csv(fetch_games_csv())
+    g = games[(games.season.astype(str) == str(season)) & (games.game_type == "REG")]
+    by_id = {f"{r.away_team.lower()}-{r.home_team.lower()}|{int(r.week)}": r for r in g.itertuples()}
+    every = []
+    for wk in range(1, through_week + 1):
+        ref = db.collection("model_season_record").document(f"ev_log_{season}_wk{wk}")
+        snap = ref.get()
+        if not snap.exists:
+            continue
+        plays = (snap.to_dict() or {}).get("plays", {})
+        changed = False
+        for p in plays.values():
+            r = by_id.get(f"{p['game']}|{wk}")
+            if p.get("result") is None and r is not None and pd.notna(r.result):
+                p["result"], p["units"] = _ev_result(p, r)
+                p["close_ev"] = _close_ev(p, r)
+                changed = True
+            every.append(p)
+        if changed:
+            ref.set({"season": season, "week": wk, "plays": plays})
+
+    def summarize(rows):
+        graded = [p for p in rows if p.get("result")]
+        clv = [p["close_ev"] for p in graded if p.get("close_ev") is not None]
+        return {"plays": len(rows), "graded": len(graded),
+                "wins": sum(p["result"] == "win" for p in graded), "losses": sum(p["result"] == "loss" for p in graded),
+                "pushes": sum(p["result"] == "push" for p in graded),
+                "units": round(sum(p["units"] for p in graded), 2),
+                "avg_ev": round(float(np.mean([p["ev"] for p in rows])), 4) if rows else None,
+                "avg_close_ev": round(float(np.mean(clv)), 4) if clv else None,
+                "beat_close_pct": round(100 * sum(c > 0 for c in clv) / len(clv), 1) if clv else None}
+
+    summary = {"all": summarize(every), "by_market": {}, "by_bucket": {}}
+    for m in ("spread", "total", "team_total"):
+        summary["by_market"][m] = summarize([p for p in every if p["market"] == m])
+    for lo, hi, label in EV_BUCKETS:
+        summary["by_bucket"][label] = summarize([p for p in every if lo < p["ev"] <= hi])
+    return summary
 
 
 # ---------- Player prop value: real multi-book devig + consensus, not a from-scratch model ----------
@@ -1275,15 +1644,15 @@ def get_firestore_client(cred_path):
 
 
 def load_saved_odds(cred_path, season, week, week_games):
-    """This week's last saved spreads (books/{gid}) and team totals (games/{season}-wk{week}), for the
-    markets a run skips. books/{gid} has no week on it and matchups repeat, so a book doc is only reused
-    when this week's games doc shows a market line was saved for that game."""
+    """This week's last saved spreads (books/{gid}), game totals and team totals (games/{season}-wk{week}),
+    for the markets a run skips. books/{gid} has no week on it and matchups repeat, so a book doc is only
+    reused when this week's games doc shows a market line was saved for that game."""
     if not (_FIREBASE_AVAILABLE and cred_path):
-        return {}, {}
+        return {}, {}, {}
     db = get_firestore_client(cred_path)
     wk = db.collection("games").document(f"{season}-wk{week}").get()
     saved = {g["id"]: g for g in (wk.to_dict() or {}).get("games", [])} if wk.exists else {}
-    books, tt = {}, {}
+    books, totals, tt = {}, {}, {}
     for _, r in week_games.iterrows():
         gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
         g = saved.get(gid) or {}
@@ -1291,9 +1660,12 @@ def load_saved_odds(cred_path, season, week, week_games):
             d = db.collection("books").document(gid).get()
             if d.exists:
                 books[gid] = d.to_dict()
+        if g.get("total_books"):
+            totals[gid] = g["total_books"]
         if g.get("market_home_total") is not None or g.get("market_away_total") is not None:
-            tt[gid] = {"market_home_total": g.get("market_home_total"), "market_away_total": g.get("market_away_total")}
-    return books, tt
+            tt[gid] = {"market_home_total": g.get("market_home_total"), "market_away_total": g.get("market_away_total"),
+                       "books": g.get("tt_books") or []}
+    return books, totals, tt
 
 
 def write_firestore(db, *, season, week, ratings_rows, games, books, closing, weather,
@@ -1353,6 +1725,7 @@ def write_firestore(db, *, season, week, ratings_rows, games, books, closing, we
             "updated_at": firestore.SERVER_TIMESTAMP,
         })
         written.append(f"prop_value/current ({len(prop_value)} edges)")
+
 
     # closing_results/{gameId} -- set (not overwrite-the-collection), so this naturally
     # accumulates across weeks: each week's real gameIds land as their own new docs
@@ -1992,24 +2365,37 @@ if __name__ == "__main__":
     ratings = run_ratings(SEASON, WEEK, prior_season_pbp_path=prior_season_pbp_path_val)
 
     print(f"--- ODDS PULLS THIS RUN: {', '.join(sorted(ODDS)) or 'none'} ---")
-    if ODDS >= {"spreads", "team_totals"}:
-        saved_books, saved_tt = {}, {}
+    if ODDS >= {"spreads", "totals", "team_totals"} and not TT_GAMES:
+        saved_books, saved_totals, saved_tt = {}, {}, {}
     else:
-        saved_books, saved_tt = load_saved_odds(
+        saved_books, saved_totals, saved_tt = load_saved_odds(
             os.environ.get("FIREBASE_CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
             SEASON, WEEK, ratings["games_this_week"])
+    # spreads and game totals ride the same all-games call (1 credit per market)
+    bulk_markets = [m for m in ("spreads", "totals") if m in ODDS]
+    odds_data = (pull_week_odds(MODE, API_KEY, HIST_DATE, markets=",".join(bulk_markets), bookmakers=ODDS_BOOKS)
+                 if bulk_markets else [])
     if "spreads" in ODDS:
-        odds_data = pull_week_odds(MODE, API_KEY, HIST_DATE)
         books = build_books_for_week(odds_data, ratings["games_this_week"])
     else:
         books = saved_books
         print(f"  spreads: not pulled -- kept the saved lines for {len(books)} games")
+    if "totals" in ODDS:
+        game_totals = build_totals_for_week(odds_data, ratings["games_this_week"])
+        print(f"\n--- GAME TOTALS: every book's line fetched for {len(game_totals)} of {len(ratings['games_this_week'])} games ---")
+    else:
+        game_totals = saved_totals
+        print(f"  game totals: not pulled -- kept the saved lines for {len(game_totals)} games")
     if "team_totals" in ODDS:
         team_totals_data = fetch_team_totals_for_week(API_KEY, ratings["games_this_week"])
-        print(f"\n--- TEAM TOTALS: real market lines fetched for {len(team_totals_data)} of {len(ratings['games_this_week'])} games ---")
+        # a run limited to a few games keeps the other games' saved lines instead of dropping them
+        team_totals_data = {**saved_tt, **team_totals_data}
+        print(f"\n--- TEAM TOTALS: real market lines fetched for {len(team_totals_data)} of {len(ratings['games_this_week'])} games"
+              f"{' (limited to: ' + ', '.join(sorted(TT_GAMES)) + ')' if TT_GAMES else ''} ---")
     else:
         team_totals_data = saved_tt
         print(f"  team totals: not pulled -- kept the saved lines for {len(team_totals_data)} games")
+
 
     print("\n--- PLAYER PROJECTION MODEL: real walk-forward recency-weighted projections + real fitted variance ---")
     projection_model_val = build_player_projection_model(fetch_pbp(SEASON))
@@ -2120,9 +2506,29 @@ if __name__ == "__main__":
             "model_away_total": model_away_total,
             "market_home_total": tt_entry["market_home_total"] if tt_entry else None,
             "market_away_total": tt_entry["market_away_total"] if tt_entry else None,
+            # every book's own line + prices, kept so a later run that skips these markets can still
+            # line-shop them (see load_saved_odds / build_shop_report)
+            "market_total": float(np.median([b["line"] for b in game_totals[gid]])) if game_totals.get(gid) else None,
+            "total_books": game_totals.get(gid) or [],
+            "tt_books": (tt_entry or {}).get("books") or [],
             "ah": None, "aa": None,
             "blurb": "(auto-generated placeholder -- write-up not yet produced by this pipeline)"
         })
+    # Line shopping per game: fair market line + best offer per side for spread, game total and team
+    # totals (plus our model's view of the total), attached to each game so Spread Zone can show it
+    # on the card. No API credits -- only the lines already pulled or kept above.
+    shop = build_shop_report(game_totals, team_totals_data, books, ratings["games_this_week"],
+                             model_totals={g["id"]: g["model_total"] for g in games_out})
+    for g in games_out:
+        g["shop"] = shop.get(g["id"], [])
+    flagged = [(gid, e) for gid, sides in shop.items() for e in sides if e["bet"]]
+    print(f"\n--- LINE SHOPPING: {sum(len(v) for v in shop.values())} sides priced against the fair line, "
+          f"{len(flagged)} +EV ({sum(1 for _, e in flagged if e['strong'])} past the strong bar) ---")
+    for gid, e in sorted(flagged, key=lambda x: -x[1]["ev"])[:25]:
+        who = e["team"] or gid
+        print(f"  {e['market']:10s} {who:8s} {e['side']:5s} {e['line']:>6} {e['odds']:>+5} @ {e['book']:14s} "
+              f"consensus {e['consensus_line']:>6} ({e['consensus_fair_odds']:+d})  win {e['win_prob']:.1%}  EV {e['ev']:+.1%}")
+
     print("\n--- GAMES (paste into const GAMES = [ ... ], write-ups still need a pass) ---")
     print(json.dumps(games_out, indent=1))
 
@@ -2268,8 +2674,11 @@ if __name__ == "__main__":
         # week's games/closing_results (both already accumulate automatically), so this
         # naturally grows correctly with zero extra data collection.
         record = build_model_season_record(fdb, SEASON)
+        # +EV plays: log this pull's, grade any whose game is final (see log_ev_plays/grade_ev_log)
+        log_ev_plays(fdb, SEASON, WEEK, games_out)
+        ev_plays = grade_ev_log(fdb, SEASON, WEEK)
         fdb.collection("model_season_record").document("current").set({
-            **record, "updated_at": firestore.SERVER_TIMESTAMP,
+            **record, "ev_plays": ev_plays, "updated_at": firestore.SERVER_TIMESTAMP,
         })
         print(f"\n--- MODEL SEASON RECORD: {record['wins']}-{record['losses']}"
               f"{'-'+str(record['pushes']) if record['pushes'] else ''} ATS"

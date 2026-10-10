@@ -160,6 +160,7 @@
   .books-table td{padding:8px;border-bottom:1px solid var(--line);text-align:right;}
   .books-table td:first-child{text-align:left;color:#C7C7CC;}
   .books-table td.best{color:var(--gold);font-weight:700;}
+  .ev-table th,.ev-table td{padding:6px 4px;}
 
   .calc{background:var(--panel);border-radius:16px;padding:16px 18px;margin:10px 0 4px;box-shadow:0 1px 2px rgba(0,0,0,0.25);}
   .calc-row{display:flex;gap:8px;margin-bottom:8px;align-items:center;}
@@ -1675,17 +1676,123 @@ function lineRow(label, market, model, fmtFn){
     </div>`;
 }
 
+// ---- Fair lines (line shopping) -------------------------------------------------------------
+// g.shop comes from build_shop_report in the pipeline: for the spread, game total and each team
+// total, the line most books hang ("consensus"), what it's really worth on each side once the vig
+// is out ("fair odds"), the worst price still worth betting ("bet at"), and the best offer the
+// pulled books actually have -- flagged when it's worth +2% EV or more at the fair price. Fair =
+// the market's own consensus, not our model: the backtests found the market more accurate than
+// any version of the model. The game total also shows our model's line as a second opinion only
+// (~52-53% O/U in the 2024-2025 backtest, below breakeven) -- it never drives the bet flag.
+const fmtOdds = o => o==null ? '&mdash;' : `${o>0?'+':''}${o}`;
+const fmtPts = v => `${v>0?'+':''}${Number.isInteger(v)?v:v.toFixed(1)}`;
+function shopSides(g, market, team){
+  return (g.shop||[]).filter(e => e.market===market && (team==null || e.team===team));
+}
+function shopSideLabel(g, e){
+  if(e.market==='spread') return `${e.team} ${fmtPts(e.line)}`;
+  const who = e.market==='team_total' ? `${e.team} TT ` : '';
+  return `${who}${e.side==='over'?'O':'U'} ${e.line}`;
+}
+function shopRow(label, fairLine, sideA, sideB, extra){
+  return `
+    <div style="display:flex;align-items:baseline;gap:8px;padding:3px 0;font-size:12px;">
+      <span style="color:var(--sage);width:54px;flex-shrink:0;">${label}</span>
+      <span style="width:56px;font-weight:600;">${fairLine}</span>
+      <span style="flex:1;color:var(--sage);">${sideA} &middot; ${sideB}${extra?`<br><span class="model">${extra}</span>`:''}</span>
+    </div>`;
+}
+function renderFairLines(g){
+  const rows = [];
+  const sp = shopSides(g,'spread');
+  const spH = sp.find(e=>e.side==='home'), spA = sp.find(e=>e.side==='away');
+  if(spH && spA) rows.push(shopRow('Spread', `${g.home} ${fmtPts(spH.consensus_line)}`,
+      `${g.home} ${fmtOdds(spH.consensus_fair_odds)}`, `${g.away} ${fmtOdds(spA.consensus_fair_odds)}`));
+  const tot = shopSides(g,'total');
+  const tO = tot.find(e=>e.side==='over'), tU = tot.find(e=>e.side==='under');
+  if(tO && tU) rows.push(shopRow('Total', tO.consensus_line,
+      `O ${fmtOdds(tO.consensus_fair_odds)}`, `U ${fmtOdds(tU.consensus_fair_odds)}`,
+      tO.model_line!=null ? `Our line ${tO.model_line.toFixed(1)} &rarr; O ${fmtOdds(tO.model_consensus_fair_odds)}` : ''));
+  for(const team of [g.home, g.away]){
+    const tt = shopSides(g,'team_total',team);
+    const o = tt.find(e=>e.side==='over'), u = tt.find(e=>e.side==='under');
+    if(o && u) rows.push(shopRow(team+' tot', o.consensus_line, `O ${fmtOdds(o.consensus_fair_odds)}`, `U ${fmtOdds(u.consensus_fair_odds)}`));
+  }
+  if(!rows.length) return '';
+  // One green box per +EV side (every one, however small -- a star marks the stronger per-market bar:
+  // 2% spreads/totals, 3% team totals); tapping it drops down every other book still +EV on that same
+  // side (stopPropagation so it opens the list instead of the game page).
+  const bets = (g.shop||[]).filter(e=>e.bet).sort((a,b)=>b.ev-a.ev);
+  const evTxt = ev => `${ev>=0?'+':''}${(ev*100).toFixed(1)}%`;
+  const betHtml = bets.map(e => {
+    const also = e.also || [];
+    const head = `${e.strong?'&#9733; ':''}BET ${shopSideLabel(g,e)} ${fmtOdds(e.odds)} @ ${bookLabel(e.book)} &middot; ${evTxt(e.ev)} EV`;
+    const box = 'margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(95,191,122,0.12);color:var(--good);font-size:12px;font-weight:600;';
+    if(!also.length) return `<div style="${box}">${head}</div>`;
+    return `
+    <details style="${box}" onclick="event.stopPropagation()">
+      <summary style="cursor:pointer;">${head} <span style="opacity:.75;font-weight:500;">&middot; +${also.length} more book${also.length>1?'s':''}</span></summary>
+      <div style="margin-top:6px;font-weight:500;">
+        ${also.map(o => `
+          <div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;">
+            <span>${bookLabel(o.book)} &middot; ${shopSideLabel(g,{...e, line:o.line})} ${fmtOdds(o.odds)}</span>
+            <span>${evTxt(o.ev)}</span>
+          </div>`).join('')}
+      </div>
+    </details>`;
+  }).join('');
+  return `
+    <div style="display:flex;gap:8px;font-size:10.5px;color:var(--sage);text-transform:uppercase;padding:0 0 2px 62px;font-weight:700;">
+      <span style="width:56px;">Fair line</span><span style="flex:1;">Fair odds</span>
+    </div>
+    ${rows.join('')}
+    ${betHtml}`;
+}
+
+// Detail page: every side of every market -- fair odds, the price worth betting at, and the best
+// offer the pulled books actually have.
+function renderFairLinesDetail(g){
+  if(!(g.shop||[]).length) return '';
+  const order = {spread:0, total:1, team_total:2};
+  const rows = [...g.shop].sort((a,b)=>order[a.market]-order[b.market] || (a.team||'').localeCompare(b.team||''));
+  return `
+    <div class="section-label">Fair lines &middot; shop for "bet at" or better</div>
+    <div class="table-wrap">
+    <table class="books-table">
+      <thead><tr><th>Side</th><th>Fair</th><th>&#9733; at</th><th>Best offer</th><th>EV</th></tr></thead>
+      <tbody>
+        ${rows.map(e => {
+          const fairSide = e.market==='spread' ? `${e.team} ${fmtPts(e.consensus_line)}`
+            : `${e.market==='team_total'?e.team+' TT ':''}${e.side==='over'?'O':'U'} ${e.consensus_line}`;
+          return `<tr>
+            <td>${fairSide}</td>
+            <td>${fmtOdds(e.consensus_fair_odds)}</td>
+            <td>${fmtOdds(e.target_odds)}</td>
+            <td class="${e.bet?'best':''}">${shopSideLabel(g,e)} ${fmtOdds(e.odds)} ${bookLabel(e.book)}</td>
+            <td style="color:${e.ev>=0?'var(--good)':'var(--sage)'};">${e.ev>=0?'+':''}${(e.ev*100).toFixed(1)}%</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    </div>
+    ${(() => { const t = g.shop.find(e=>e.market==='total' && e.model_line!=null && e.side==='over');
+      return t ? `<p class="empty-note" style="margin-top:6px;">Our total: ${t.model_line.toFixed(1)} (fair O ${t.consensus_line} ${fmtOdds(t.model_consensus_fair_odds)}). Second opinion only -- the model was ~52-53% on over/unders in backtests, so the bet flag uses the market's fair price, not ours.</p>` : ''; })()}
+    <p class="empty-note" style="margin-top:6px;">Fair = Pinnacle's line with the vig removed (the sharp reference -- never flagged as a bet), or the books' consensus when Pinnacle has no line${(() => { const src = [...new Set(g.shop.map(e=>e.fair_source).filter(Boolean))]; return src.length ? ` (this game: ${src.join(' / ')})` : ''; })()}. Kalshi, Polymarket and ProphetX EV is after their fees. Every +EV offer gets a green BET box; &#9733; = past the stronger bar (+2% spreads/totals, +3% team totals), and "&#9733; at" is the worst price on that exact line that still clears it. Other lines are priced using how often real games land on each number (key numbers).</p>`;
+}
+
 function renderGameCard(g){
   const fmtSpread = v => `${v>0?'+':''}${v.toFixed(1)}`;
   const fmtTotal = v => v.toFixed(1);
   const dt = formatGameDateTime(g);
   const wx = compactWeather(g.id);
+  const fair = renderFairLines(g);
   return `
     <div class="game-card" onclick="openGame('${g.id}')">
       <div class="game-card-top">
         <div class="gc-teams">${logoImg(g.away,22)}${g.away}<span class="at">at</span>${logoImg(g.home,22)}${g.home}</div>
         <div class="gc-lines" style="font-size:11.5px;">${dt}${wx?` &middot; ${wx}`:''}</div>
       </div>
+      ${fair ? `<div style="margin-top:8px;">${fair}</div>` : `
       <div style="margin-top:8px;">
         <div style="display:flex;gap:8px;font-size:10.5px;color:var(--sage);text-transform:uppercase;padding:0 0 2px 62px;font-weight:700;">
           <span style="width:56px;">Market</span><span style="width:56px;">Model</span><span style="flex:1;text-align:right;">Edge</span>
@@ -1694,7 +1801,7 @@ function renderGameCard(g){
         ${lineRow('Total', g.market_home_total!=null&&g.market_away_total!=null ? g.market_home_total+g.market_away_total : null, g.model_total, fmtTotal)}
         ${lineRow(g.home+' tot', g.market_home_total, g.model_home_total, fmtTotal)}
         ${lineRow(g.away+' tot', g.market_away_total, g.model_away_total, fmtTotal)}
-      </div>
+      </div>`}
       <div class="gc-final">Upcoming${g.hasDetail?'  <span class="chevron">&middot; full breakdown &rarr;</span>':''}</div>
     </div>`;
 }
@@ -1711,6 +1818,8 @@ const BOOK_LABELS = {
   pointsbetus:'PointsBet', williamhill_us:'Caesars', betrivers:'BetRivers', unibet_us:'Unibet',
   wynnbet:'WynnBET', betonlineag:'BetOnline', bovada:'Bovada', mybookieag:'MyBookie',
   lowvig:'LowVig', superbook:'SuperBook', betus:'BetUS', foxbet:'FOX Bet',
+  espnbet:'ESPN BET/theScore', ballybet:'Bally Bet', pinnacle:'Pinnacle',
+  kalshi:'Kalshi', polymarket:'Polymarket', novig:'Novig', prophetx:'ProphetX',
 };
 function bookLabel(k){ return BOOK_LABELS[k] || (k||'').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()); }
 
@@ -2057,6 +2166,7 @@ function openGame(id){
       ${ratingsTableHtml}
       ${autoStoryHtml}
       ${weatherHtml}
+      ${renderFairLinesDetail(g)}
       ${booksHtml}`;
     showView('detail'); return;
   }
@@ -2101,6 +2211,7 @@ function openGame(id){
     </div>
 
     ${weatherHtml}
+    ${renderFairLinesDetail(g)}
     ${booksHtml}
   `;
   showView('detail');
@@ -4193,7 +4304,36 @@ function renderModelSeasonRecord(){
       <div class="empty-note">Not graded yet -- accumulates from here forward.</div>
     </div>`;
 
-  el.innerHTML = spreadSection + totalSection + teamTotalSection;
+  el.innerHTML = spreadSection + totalSection + teamTotalSection + evPlaysSection(r.ev_plays);
+}
+
+// +EV play tracking (grade_ev_log in the pipeline): every +EV offer the line shopper flagged, at the
+// first price it was seen, graded on result AND on EV at the closing price. "Beat close" is the number
+// to watch -- it shows whether the flags are real edges far sooner than a win-loss record can.
+function evPlaysSection(ev){
+  const head = `<div style="padding:8px 0;border-top:1px solid var(--line);"><div class="section-label">+EV Plays (line shopping)</div>`;
+  if(!ev || !ev.all || !ev.all.plays){
+    return head + '<div class="empty-note">No +EV plays logged yet -- fills in from the first odds pull with line shopping.</div></div>';
+  }
+  const pct = v => v==null ? '&mdash;' : `${v>=0?'+':''}${(v*100).toFixed(1)}%`;
+  const row = (label, x) => x && x.plays ? `<tr>
+      <td>${label}</td><td>${x.plays}</td>
+      <td>${x.wins}-${x.losses}${x.pushes?`-${x.pushes}`:''}</td>
+      <td style="color:${x.units>=0?'var(--good)':'var(--alert)'};">${x.units>=0?'+':''}${x.units}</td>
+      <td>${pct(x.avg_ev)}</td>
+      <td style="color:${(x.avg_close_ev||0)>=0?'var(--good)':'var(--alert)'};">${pct(x.avg_close_ev)}</td>
+      <td>${x.beat_close_pct==null?'&mdash;':x.beat_close_pct+'%'}</td></tr>` : '';
+  const names = {spread:'Spreads', total:'Totals', team_total:'Team tot.'};
+  return head + `
+    <div style="font-size:12px;color:var(--sage);margin:6px 0 4px;">Every +EV offer flagged, 1 unit each at the first price seen. EV = when flagged. "@ Close" re-prices the same bet at the closing line (free nflverse close; team totals have no free close yet) -- consistently positive means the edges are real, long before the win-loss record can show it.</div>
+    <div class="table-wrap"><table class="books-table ev-table" style="white-space:nowrap;font-size:11.5px;">
+      <thead><tr><th></th><th>#</th><th>W-L</th><th>Units</th><th>EV</th><th>@ Close</th><th>Beat</th></tr></thead>
+      <tbody>
+        ${row('All', ev.all)}
+        ${Object.entries(ev.by_market||{}).map(([k,x]) => row(names[k]||k, x)).join('')}
+        ${Object.entries(ev.by_bucket||{}).map(([k,x]) => row(k, x)).join('')}
+      </tbody>
+    </table></div></div>`;
 }
 
 function renderResults(){
