@@ -480,6 +480,19 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
+// One collection failing (e.g. the shared Firebase project's rules missing a block) shouldn't blank the
+// whole dashboard: a failed read comes back as an empty snapshot and is listed in FAILED_READS, so
+// everything else still loads and the banner names exactly which collection to fix.
+const FAILED_READS = [];
+const EMPTY_SNAP = {exists: false, docs: [], data: () => ({}), forEach: () => {}};
+function safeGet(promise, name){
+  return promise.catch(err => {
+    console.warn(`Firestore read failed: ${name}`, err);
+    FAILED_READS.push(name);
+    return EMPTY_SNAP;
+  });
+}
+
 function showView(name){
   document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
   document.getElementById('view-'+name).classList.add('active');
@@ -5168,22 +5181,22 @@ async function boot(){
     const [ratingsSnap, historySnap, gamesSnap, booksSnap, weatherSnap, closingSnap,
            leaderboardsSnap, projSnap, rostersSnap, overridesSnap, stateSnap, underperfSnap,
            modelRecordSnap, closingLinesSnap, propValueSnap, qbAutoSnap] = await Promise.all([
-      db.collection('ratings').get(),
-      db.collection('ratings_history').get(),
-      db.collection('games').doc(weekId).get(),
-      db.collection('books').get(),
-      db.collection('weather').get(),
-      db.collection('closing_results').get(),
-      db.collection('leaderboards').doc('current').get(),
-      db.collection('fantasy_projections').doc('current').get(),
-      db.collection('fantasy_rosters').get(),
-      db.collection('fantasy_roster_overrides').get(),
-      db.collection('dashboard_state').get(),
-      db.collection('fantasy_underperformance').doc('current').get(),
-      db.collection('model_season_record').doc('current').get(),
-      db.collection('closing_lines').get(),
-      db.collection('prop_value').doc('current').get(),
-      db.collection('qb_depth_chart_status').doc('current').get(),
+      safeGet(db.collection('ratings').get(), 'ratings'),
+      safeGet(db.collection('ratings_history').get(), 'ratings_history'),
+      safeGet(db.collection('games').doc(weekId).get(), 'games'),
+      safeGet(db.collection('books').get(), 'books'),
+      safeGet(db.collection('weather').get(), 'weather'),
+      safeGet(db.collection('closing_results').get(), 'closing_results'),
+      safeGet(db.collection('leaderboards').doc('current').get(), 'leaderboards'),
+      safeGet(db.collection('fantasy_projections').doc('current').get(), 'fantasy_projections'),
+      safeGet(db.collection('fantasy_rosters').get(), 'fantasy_rosters'),
+      safeGet(db.collection('fantasy_roster_overrides').get(), 'fantasy_roster_overrides'),
+      safeGet(db.collection('dashboard_state').get(), 'dashboard_state'),
+      safeGet(db.collection('fantasy_underperformance').doc('current').get(), 'fantasy_underperformance'),
+      safeGet(db.collection('model_season_record').doc('current').get(), 'model_season_record'),
+      safeGet(db.collection('closing_lines').get(), 'closing_lines'),
+      safeGet(db.collection('prop_value').doc('current').get(), 'prop_value'),
+      safeGet(db.collection('qb_depth_chart_status').doc('current').get(), 'qb_depth_chart_status'),
     ]);
 
     RATINGS.push(...ratingsSnap.docs.map(d => d.data()));
@@ -5252,7 +5265,11 @@ async function boot(){
     stateSnap.docs.forEach(d => { DASHBOARD_STATE_CACHE[d.id] = (d.data() || {}).value; });
     migrateLocalStorageStateToFirestore();
 
-    hideBootBanner();
+    if(FAILED_READS.length){
+      showBootBanner(`Some data couldn't load (${FAILED_READS.join(', ')}) -- the Firestore rules are blocking it. Everything else is live.`, true);
+    } else {
+      hideBootBanner();
+    }
   } catch(e){
     console.error('Firestore load failed', e);
     showBootBanner(`Couldn't load live data from Firestore -- ${e.message}. Showing whatever loaded before the error; try refreshing.`, true);
