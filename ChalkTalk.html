@@ -266,6 +266,20 @@
   <div id="view-week" class="view">
     <div class="section-label" id="spread-zone-label">Spread Zone &middot; Week 1, 2026</div>
     <div id="qb-watch" style="margin-bottom:16px;"></div>
+    <div id="stake-settings" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0 0 12px;font-size:12px;color:var(--sage);">
+      <label style="display:flex;align-items:center;gap:6px;">Bankroll $
+        <input id="stake-bankroll" type="number" inputmode="decimal" min="0" step="50" placeholder="optional"
+          style="width:96px;padding:5px 7px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--chalk);font-size:13px;"
+          oninput="saveStakeSettings()">
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;">Kelly
+        <select id="stake-kelly" onchange="saveStakeSettings()"
+          style="padding:5px 7px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--chalk);font-size:13px;">
+          <option value="0.125">1/8</option><option value="0.1667">1/6</option><option value="0.25">1/4</option>
+        </select>
+      </label>
+      <span style="flex-basis:100%;font-size:11px;">Saved only in this browser on this device -- never uploaded, so nobody else sees it.</span>
+    </div>
     <div id="games-list"></div>
   </div>
 
@@ -1648,6 +1662,7 @@ function renderQbWatch(){
 }
 
 function renderGamesList(){
+  initStakeSettings();
   renderQbWatch();
   const el = document.getElementById('games-list');
   // Spread Zone is for games still to be decided -- once real, a game moves to Results'
@@ -1699,11 +1714,31 @@ function lineRow(label, market, model, fmtFn){
 // (~52-53% O/U in the 2024-2025 backtest, below breakeven) -- it never drives the bet flag.
 const fmtOdds = o => o==null ? '&mdash;' : `${o>0?'+':''}${o}`;
 const fmtPts = v => `${v>0?'+':''}${Number.isInteger(v)?v:v.toFixed(1)}`;
-// Stake as % of bankroll: 1/8 Kelly, capped at 2% -- same sizing as the NHL model (model_config.json
-// kelly_fraction 0.125, max_stake 2.0). Kelly = EV / net payout, where net payout is the profit per
+// Stake as % of bankroll: 1/8 Kelly by default (1/6 or 1/4 selectable), capped at 2% -- same default
+// sizing as the NHL model (model_config.json kelly_fraction 0.125, max_stake 2.0). Kelly = EV / net payout, where net payout is the profit per
 // unit AFTER the exchange's fee (same fee table as the pipeline's EXCHANGE_FEES), so a Kalshi price
 // sizes off what it really pays. Fractional because the EV is an estimate, not a known edge.
-const KELLY_FRACTION = 0.125, MAX_STAKE_PCT = 2.0;
+// Bankroll + Kelly fraction are per-viewer settings kept in localStorage only (never Firestore), so
+// sharing the link never shares anyone's bankroll; blank bankroll = stakes shown as % only.
+const MAX_STAKE_PCT = 2.0;
+const STAKE_SETTINGS = {bankroll: null, kelly: 0.125};
+try {
+  const saved = JSON.parse(localStorage.getItem('chalktalk_stake_settings') || '{}');
+  if(saved.bankroll > 0) STAKE_SETTINGS.bankroll = saved.bankroll;
+  if([0.125, 0.1667, 0.25].includes(saved.kelly)) STAKE_SETTINGS.kelly = saved.kelly;
+} catch(e) {}
+function initStakeSettings(){
+  const b = document.getElementById('stake-bankroll'), k = document.getElementById('stake-kelly');
+  if(b) b.value = STAKE_SETTINGS.bankroll || '';
+  if(k) k.value = String(STAKE_SETTINGS.kelly);
+}
+function saveStakeSettings(){
+  const b = parseFloat(document.getElementById('stake-bankroll').value);
+  STAKE_SETTINGS.bankroll = b > 0 ? b : null;
+  STAKE_SETTINGS.kelly = parseFloat(document.getElementById('stake-kelly').value) || 0.125;
+  try { localStorage.setItem('chalktalk_stake_settings', JSON.stringify(STAKE_SETTINGS)); } catch(e) {}
+  renderGamesList();
+}
 const EXCHANGE_FEES = {kalshi:{type:'parabolic',rate:0.07}, polymarket:{type:'parabolic',rate:0.07}, prophetx:{type:'winnings',rate:0.02}};
 function netPayout(odds, book){
   const pay = odds > 0 ? odds/100 : 100/-odds;
@@ -1714,7 +1749,7 @@ function netPayout(odds, book){
 }
 function kellyStake(ev, odds, book){
   if(!(ev > 0) || odds == null) return 0;
-  return Math.min(MAX_STAKE_PCT, 100 * KELLY_FRACTION * ev / netPayout(odds, book));
+  return Math.min(MAX_STAKE_PCT, 100 * STAKE_SETTINGS.kelly * ev / netPayout(odds, book));
 }
 
 function shopSides(g, market, team){
@@ -1755,7 +1790,12 @@ function renderFairLines(g){
   // side (stopPropagation so it opens the list instead of the game page).
   const bets = (g.shop||[]).filter(e=>e.bet).sort((a,b)=>b.ev-a.ev);
   const evTxt = ev => `${ev>=0?'+':''}${(ev*100).toFixed(1)}%`;
-  const stakeTxt = o => { const k = kellyStake(o.ev, o.odds, o.book); return k > 0 ? ` &middot; Stake ${k < 0.01 ? '&lt;0.01' : k.toFixed(2)}%` : ''; };
+  const stakeTxt = o => {
+    const k = kellyStake(o.ev, o.odds, o.book);
+    if(!(k > 0)) return '';
+    const pct = `${k < 0.01 ? '&lt;0.01' : k.toFixed(2)}%`;
+    return STAKE_SETTINGS.bankroll ? ` &middot; Stake $${(STAKE_SETTINGS.bankroll * k / 100).toFixed(2)} (${pct})` : ` &middot; Stake ${pct}`;
+  };
   const betHtml = bets.map(e => {
     const also = e.also || [];
     const head = `${e.strong?'&#9733; ':''}BET ${shopSideLabel(g,e)} ${fmtOdds(e.odds)} @ ${bookLabel(e.book)} &middot; ${evTxt(e.ev)} EV${stakeTxt(e)}`;
