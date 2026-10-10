@@ -1699,6 +1699,24 @@ function lineRow(label, market, model, fmtFn){
 // (~52-53% O/U in the 2024-2025 backtest, below breakeven) -- it never drives the bet flag.
 const fmtOdds = o => o==null ? '&mdash;' : `${o>0?'+':''}${o}`;
 const fmtPts = v => `${v>0?'+':''}${Number.isInteger(v)?v:v.toFixed(1)}`;
+// Stake as % of bankroll: 1/8 Kelly, capped at 2% -- same sizing as the NHL model (model_config.json
+// kelly_fraction 0.125, max_stake 2.0). Kelly = EV / net payout, where net payout is the profit per
+// unit AFTER the exchange's fee (same fee table as the pipeline's EXCHANGE_FEES), so a Kalshi price
+// sizes off what it really pays. Fractional because the EV is an estimate, not a known edge.
+const KELLY_FRACTION = 0.125, MAX_STAKE_PCT = 2.0;
+const EXCHANGE_FEES = {kalshi:{type:'parabolic',rate:0.07}, polymarket:{type:'parabolic',rate:0.07}, prophetx:{type:'winnings',rate:0.02}};
+function netPayout(odds, book){
+  const pay = odds > 0 ? odds/100 : 100/-odds;
+  const fee = EXCHANGE_FEES[book];
+  if(!fee) return pay;
+  if(fee.type === 'parabolic'){ const p = 1/(1+pay); return 1/(p + fee.rate*p*(1-p)) - 1; }
+  return pay * (1 - fee.rate);
+}
+function kellyStake(ev, odds, book){
+  if(!(ev > 0) || odds == null) return 0;
+  return Math.min(MAX_STAKE_PCT, 100 * KELLY_FRACTION * ev / netPayout(odds, book));
+}
+
 function shopSides(g, market, team){
   return (g.shop||[]).filter(e => e.market===market && (team==null || e.team===team));
 }
@@ -1737,9 +1755,10 @@ function renderFairLines(g){
   // side (stopPropagation so it opens the list instead of the game page).
   const bets = (g.shop||[]).filter(e=>e.bet).sort((a,b)=>b.ev-a.ev);
   const evTxt = ev => `${ev>=0?'+':''}${(ev*100).toFixed(1)}%`;
+  const stakeTxt = o => { const k = kellyStake(o.ev, o.odds, o.book); return k > 0 ? ` &middot; Stake ${k < 0.01 ? '&lt;0.01' : k.toFixed(2)}%` : ''; };
   const betHtml = bets.map(e => {
     const also = e.also || [];
-    const head = `${e.strong?'&#9733; ':''}BET ${shopSideLabel(g,e)} ${fmtOdds(e.odds)} @ ${bookLabel(e.book)} &middot; ${evTxt(e.ev)} EV`;
+    const head = `${e.strong?'&#9733; ':''}BET ${shopSideLabel(g,e)} ${fmtOdds(e.odds)} @ ${bookLabel(e.book)} &middot; ${evTxt(e.ev)} EV${stakeTxt(e)}`;
     const box = 'margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(95,191,122,0.12);color:var(--good);font-size:12px;font-weight:600;';
     if(!also.length) return `<div style="${box}">${head}</div>`;
     return `
@@ -1749,7 +1768,7 @@ function renderFairLines(g){
         ${also.map(o => `
           <div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;">
             <span>${bookLabel(o.book)} &middot; ${shopSideLabel(g,{...e, line:o.line})} ${fmtOdds(o.odds)}</span>
-            <span>${evTxt(o.ev)}</span>
+            <span>${evTxt(o.ev)}${stakeTxt(o)}</span>
           </div>`).join('')}
       </div>
     </details>`;
