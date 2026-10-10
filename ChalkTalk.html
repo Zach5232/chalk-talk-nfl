@@ -1811,7 +1811,10 @@ function buildCheckSides(g){
 function renderPriceCheck(g){
   const sides = buildCheckSides(g);
   if(!sides.length) return '';
+  // Line/odds are text boxes with the decimal keypad plus a +/- button, because the iPhone number pad
+  // has no minus key.
   const id = g.id, inp = 'padding:5px 6px;border-radius:6px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:13px;';
+  const pm = 'padding:5px 9px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--chalk);font-size:14px;line-height:1;';
   const s0 = sides[0];
   return `
     <details style="margin-top:8px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);font-size:12px;" onclick="event.stopPropagation()" ontoggle="if(this.open) checkPrice('${id}')">
@@ -1820,8 +1823,14 @@ function renderPriceCheck(g){
         <select id="chk-side-${id}" style="${inp}" onchange="prefillCheck('${id}')">
           ${sides.map((s,i)=>`<option value="${i}">${s.label}</option>`).join('')}
         </select>
-        <input id="chk-line-${id}" type="number" step="0.5" inputmode="decimal" style="${inp}width:70px;" value="${s0.best.line}" oninput="checkPrice('${id}')" aria-label="Line">
-        <input id="chk-odds-${id}" type="number" step="1" inputmode="numeric" style="${inp}width:70px;" value="${s0.best.odds}" oninput="checkPrice('${id}')" aria-label="Odds">
+        <span style="display:inline-flex;gap:3px;">
+          <button type="button" style="${pm}" onclick="flipSign('chk-line-${id}','${id}')" aria-label="Flip line sign">&plusmn;</button>
+          <input id="chk-line-${id}" type="text" inputmode="decimal" autocomplete="off" style="${inp}width:62px;" value="${s0.best.line}" oninput="checkPrice('${id}')" aria-label="Line">
+        </span>
+        <span style="display:inline-flex;gap:3px;">
+          <button type="button" style="${pm}" onclick="flipSign('chk-odds-${id}','${id}')" aria-label="Flip odds sign">&plusmn;</button>
+          <input id="chk-odds-${id}" type="text" inputmode="decimal" autocomplete="off" style="${inp}width:62px;" value="${s0.best.odds}" oninput="checkPrice('${id}')" aria-label="Odds">
+        </span>
         <select id="chk-book-${id}" style="${inp}" onchange="checkPrice('${id}')">
           <option value="">Sportsbook</option><option value="novig">Novig</option><option value="kalshi">Kalshi</option>
           <option value="polymarket">Polymarket</option><option value="prophetx">ProphetX</option>
@@ -1830,6 +1839,13 @@ function renderPriceCheck(g){
       <div id="chk-out-${id}" style="margin-top:8px;line-height:1.5;"></div>
     </details>`;
 }
+function flipSign(inputId, id){
+  const el = document.getElementById(inputId), v = el.value.trim();
+  el.value = v.startsWith('-') ? v.slice(1) : (v.startsWith('+') ? '-' + v.slice(1) : '-' + v);
+  checkPrice(id);
+}
+// accepts "-115", "+105", "105", "−115" (typographic minus); anything else = NaN
+const parseSigned = v => parseFloat(String(v).trim().replace(/^[−–]/, '-').replace(/^\+/, ''));
 function prefillCheck(id){
   const s = CHECK_SIDES[id][+document.getElementById(`chk-side-${id}`).value];
   document.getElementById(`chk-line-${id}`).value = s.best.line;
@@ -1840,8 +1856,8 @@ async function checkPrice(id){
   const out = document.getElementById(`chk-out-${id}`);
   try { await loadKeyNumbers(); } catch(e){ out.textContent = "Couldn't load the key-number tables -- try refreshing."; return; }
   const s = CHECK_SIDES[id][+document.getElementById(`chk-side-${id}`).value];
-  const line = parseFloat(document.getElementById(`chk-line-${id}`).value);
-  const odds = parseFloat(document.getElementById(`chk-odds-${id}`).value);
+  const line = parseSigned(document.getElementById(`chk-line-${id}`).value);
+  const odds = parseSigned(document.getElementById(`chk-odds-${id}`).value);
   const book = document.getElementById(`chk-book-${id}`).value;
   if(isNaN(line) || isNaN(odds) || (odds > -100 && odds < 100)){ out.innerHTML = '<span style="color:var(--sage);">Enter a line and American odds (e.g. -115 or +105).</span>'; return; }
   const [po, pu] = marketProbs(s.kind, s.anchor, s.q, s.toMarket(line));
