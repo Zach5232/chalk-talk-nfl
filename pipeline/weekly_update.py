@@ -1000,6 +1000,8 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
                 pw, pl = (po, pu) if side == "over" else (pu, po)
                 entry = {"market": kind, "team": team, "side": side, "fair_source": source,
                          "consensus_line": cons, "consensus_fair_odds": _american(pw / max(pw + pl, 1e-9)),
+                         # unrounded, so the dashboard's "check a price" box prices off exactly this
+                         "consensus_fair_prob": round(pw / max(pw + pl, 1e-9), 5),
                          # the worst price at the consensus line still worth SHOP_MIN_EV -- what to shop for
                          "target_odds": _odds_for_payout((SHOP_STRONG_EV[kind] + pl) / max(pw, 1e-9)),
                          "n_books": len(books), **best, "bet": best["ev"] > SHOP_MIN_EV,

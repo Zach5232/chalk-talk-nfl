@@ -1752,6 +1752,119 @@ function kellyStake(ev, odds, book){
   return Math.min(MAX_STAKE_PCT, 100 * STAKE_SETTINGS.kelly * ev / netPayout(odds, book));
 }
 
+// ---- Check a price: price ANY line/odds you find yourself against this game's fair line, no odds
+// pull. Same math as the pipeline's _market_pricer: anchor = the fair line + its fair (no-vig) price,
+// other lines shift by the real chance of landing on each number in between, from key_numbers.json
+// (pipeline/build_key_numbers.py precomputes the pipeline's own _pmf on a half-point grid).
+let KEY_NUMBERS = null;
+async function loadKeyNumbers(){
+  if(!KEY_NUMBERS){
+    const r = await fetch('key_numbers.json');
+    KEY_NUMBERS = (await r.json()).pmf;
+  }
+  return KEY_NUMBERS;
+}
+function pmfAt(kind, center){
+  const t = KEY_NUMBERS[kind], keys = Object.keys(t).map(Number);
+  const c = Math.min(Math.max(Math.round(center*2)/2, Math.min(...keys)), Math.max(...keys));
+  return t[c.toFixed(1)] || {};
+}
+const probFromOdds = o => o < 0 ? -o/(-o+100) : 100/(o+100);
+// a side's fair P(win | no push): the pipeline's unrounded value when saved, else from its rounded fair odds
+const fairProb = e => e.consensus_fair_prob != null ? e.consensus_fair_prob : probFromOdds(e.consensus_fair_odds);
+const oddsFromProb = p => { p = Math.min(Math.max(p,1e-6),1-1e-6); return p >= 0.5 ? Math.round(-100*p/(1-p)) : Math.round(100*(1-p)/p); };
+// P(over), P(under) of `line` when the fair line is `anchor` and P(over anchor | no push) is `q`
+function marketProbs(kind, anchor, q, line){
+  const pmf = pmfAt(kind, anchor), sum = f => Object.entries(pmf).reduce((s,[k,p]) => f(+k) ? s+p : s, 0);
+  const overA = q * (1 - (pmf[String(anchor)] || 0));
+  let po = line >= anchor ? overA - sum(k => k > anchor && k <= line) : overA + sum(k => k > line && k <= anchor);
+  po = Math.min(Math.max(po, 0), 1);
+  return [po, Math.max(1 - po - (Number.isInteger(line) ? (pmf[String(line)] || 0) : 0), 0)];
+}
+// Every side this game can be checked on, in market terms (spreads = over/under on the home margin)
+const CHECK_SIDES = {};
+function buildCheckSides(g){
+  const out = [], find = (m, side, team) => shopSides(g, m, team).find(e => e.side === side);
+  const spH = find('spread','home'), spA = find('spread','away');
+  if(spH && spA){
+    const anchor = -spH.consensus_line, q = fairProb(spH);
+    out.push({label:`${g.home} spread`, kind:'spread', anchor, q, side:'over', toMarket: v => -v, best: spH});
+    out.push({label:`${g.away} spread`, kind:'spread', anchor, q, side:'under', toMarket: v => v, best: spA});
+  }
+  const tO = find('total','over'), tU = find('total','under');
+  if(tO && tU){
+    const anchor = tO.consensus_line, q = fairProb(tO);
+    out.push({label:'Total over', kind:'total', anchor, q, side:'over', toMarket: v => v, best: tO, model: tO.model_line});
+    out.push({label:'Total under', kind:'total', anchor, q, side:'under', toMarket: v => v, best: tU, model: tU.model_line});
+  }
+  for(const team of [g.home, g.away]){
+    const o = find('team_total','over',team), u = find('team_total','under',team);
+    if(o && u){
+      const anchor = o.consensus_line, q = fairProb(o);
+      out.push({label:`${team} TT over`, kind:'team_total', anchor, q, side:'over', toMarket: v => v, best: o});
+      out.push({label:`${team} TT under`, kind:'team_total', anchor, q, side:'under', toMarket: v => v, best: u});
+    }
+  }
+  CHECK_SIDES[g.id] = out;
+  return out;
+}
+function renderPriceCheck(g){
+  const sides = buildCheckSides(g);
+  if(!sides.length) return '';
+  const id = g.id, inp = 'padding:5px 6px;border-radius:6px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:13px;';
+  const s0 = sides[0];
+  return `
+    <details style="margin-top:8px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);font-size:12px;" onclick="event.stopPropagation()" ontoggle="if(this.open) checkPrice('${id}')">
+      <summary style="cursor:pointer;color:var(--gold);font-weight:600;">Check a price you found</summary>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+        <select id="chk-side-${id}" style="${inp}" onchange="prefillCheck('${id}')">
+          ${sides.map((s,i)=>`<option value="${i}">${s.label}</option>`).join('')}
+        </select>
+        <input id="chk-line-${id}" type="number" step="0.5" inputmode="decimal" style="${inp}width:70px;" value="${s0.best.line}" oninput="checkPrice('${id}')" aria-label="Line">
+        <input id="chk-odds-${id}" type="number" step="1" inputmode="numeric" style="${inp}width:70px;" value="${s0.best.odds}" oninput="checkPrice('${id}')" aria-label="Odds">
+        <select id="chk-book-${id}" style="${inp}" onchange="checkPrice('${id}')">
+          <option value="">Sportsbook</option><option value="novig">Novig</option><option value="kalshi">Kalshi</option>
+          <option value="polymarket">Polymarket</option><option value="prophetx">ProphetX</option>
+        </select>
+      </div>
+      <div id="chk-out-${id}" style="margin-top:8px;line-height:1.5;"></div>
+    </details>`;
+}
+function prefillCheck(id){
+  const s = CHECK_SIDES[id][+document.getElementById(`chk-side-${id}`).value];
+  document.getElementById(`chk-line-${id}`).value = s.best.line;
+  document.getElementById(`chk-odds-${id}`).value = s.best.odds;
+  checkPrice(id);
+}
+async function checkPrice(id){
+  const out = document.getElementById(`chk-out-${id}`);
+  try { await loadKeyNumbers(); } catch(e){ out.textContent = "Couldn't load the key-number tables -- try refreshing."; return; }
+  const s = CHECK_SIDES[id][+document.getElementById(`chk-side-${id}`).value];
+  const line = parseFloat(document.getElementById(`chk-line-${id}`).value);
+  const odds = parseFloat(document.getElementById(`chk-odds-${id}`).value);
+  const book = document.getElementById(`chk-book-${id}`).value;
+  if(isNaN(line) || isNaN(odds) || (odds > -100 && odds < 100)){ out.innerHTML = '<span style="color:var(--sage);">Enter a line and American odds (e.g. -115 or +105).</span>'; return; }
+  const [po, pu] = marketProbs(s.kind, s.anchor, s.q, s.toMarket(line));
+  const [win, loss] = s.side === 'over' ? [po, pu] : [pu, po];
+  const ev = win * netPayout(odds, book) - loss;
+  const k = kellyStake(ev, odds, book);
+  const stake = k > 0 ? (STAKE_SETTINGS.bankroll ? `$${(STAKE_SETTINGS.bankroll*k/100).toFixed(2)} (${k.toFixed(2)}%)` : `${k.toFixed(2)}%`) : '&mdash;';
+  const evCol = ev > 0 ? 'var(--good)' : 'var(--alert)';
+  let model = '';
+  if(s.model != null){
+    const mp = pmfAt(s.kind, s.model), L = s.toMarket(line);
+    const mo = Object.entries(mp).reduce((a,[kk,p]) => +kk > L ? a+p : a, 0), mu = Object.entries(mp).reduce((a,[kk,p]) => +kk < L ? a+p : a, 0);
+    const [mw, ml] = s.side === 'over' ? [mo, mu] : [mu, mo];
+    const mev = mw * netPayout(odds, book) - ml;
+    model = `<br><span class="model">Our model (${s.model.toFixed(1)}): EV ${mev>=0?'+':''}${(mev*100).toFixed(1)}% -- second opinion only</span>`;
+  }
+  const b = s.best, cmp = ev > b.ev ? 'better than' : 'not as good as';
+  out.innerHTML = `
+    <b style="color:${evCol};">EV ${ev>=0?'+':''}${(ev*100).toFixed(1)}%</b> &middot; win ${(win*100).toFixed(1)}%${win+loss<0.999?` &middot; push ${((1-win-loss)*100).toFixed(1)}%`:''} &middot; fair ${fmtOdds(oddsFromProb(win/(win+loss)))} &middot; stake ${stake}
+    <br><span style="color:var(--sage);">${cmp} the best listed: ${shopSideLabel(g_byId(id), b)} ${fmtOdds(b.odds)} @ ${bookLabel(b.book)} (${b.ev>=0?'+':''}${(b.ev*100).toFixed(1)}%)</span>${model}`;
+}
+const g_byId = id => GAMES.find(x => x.id === id);
+
 function shopSides(g, market, team){
   return (g.shop||[]).filter(e => e.market===market && (team==null || e.team===team));
 }
@@ -1818,7 +1931,8 @@ function renderFairLines(g){
       <span style="width:56px;">Fair line</span><span style="flex:1;">Fair odds</span>
     </div>
     ${rows.join('')}
-    ${betHtml}`;
+    ${betHtml}
+    ${renderPriceCheck(g)}`;
 }
 
 // Detail page: every side of every market -- fair odds, the price worth betting at, and the best
