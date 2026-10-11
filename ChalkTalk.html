@@ -1573,25 +1573,35 @@ function removeQbStatusOverride(team){
   delete data[team];
   setQbStatusOverrides(data);
 }
+// The QB picker lists every QB on that team's depth chart (Sleeper + nflverse, saved by the pipeline
+// as qb_options), so there's nothing to type or misspell; the pipeline also accepts a last name alone.
+function fillQbOverrideOptions(selected){
+  const team = document.getElementById('qbwatch-team').value;
+  const qbEl = document.getElementById('qbwatch-qbname');
+  const opts = (QB_DEPTH_CHART_STATUS[team] || {}).qb_options || [];
+  qbEl.innerHTML = !team ? '<option value="">Pick a team first</option>'
+    : opts.length ? opts.map(n => `<option value="${n}"${n===selected?' selected':''}>${n}</option>`).join('')
+    : '<option value="">No QB list yet -- runs on the next pipeline update</option>';
+}
 function addQbStatusOverride(){
   const teamEl = document.getElementById('qbwatch-team');
   const qbEl = document.getElementById('qbwatch-qbname');
   const reasonEl = document.getElementById('qbwatch-reason');
-  const team = teamAbbrFromAnyName(teamEl.value);
-  if(!team){ alert(`Didn't recognize "${teamEl.value}" as a real team.`); return; }
+  const team = teamEl.value;
+  if(!team){ alert('Pick a team first.'); return; }
   const qb_name = qbEl.value.trim();
-  if(!qb_name && !confirm("No QB name entered -- this will fall back to a generic, no-track-record backup penalty instead of that specific player's real numbers. Continue anyway?")) return;
+  if(!qb_name && !confirm("No QB picked -- this will fall back to a generic, no-track-record backup penalty instead of that specific player's real numbers. Continue anyway?")) return;
   const data = {...getQbStatusOverrides()};
   data[team] = {active: true, qb_name: qb_name || null, reason: reasonEl.value.trim(), set_at: new Date().toISOString()};
   setQbStatusOverrides(data);
-  teamEl.value = ''; qbEl.value = ''; reasonEl.value = '';
+  reasonEl.value = '';
 }
 function prefillQbOverride(team, qbName){
   const teamEl = document.getElementById('qbwatch-team');
-  const qbEl = document.getElementById('qbwatch-qbname');
-  if(teamEl) teamEl.value = team;
-  if(qbEl && qbName) qbEl.value = qbName;
-  if(teamEl) teamEl.focus();
+  if(!teamEl) return;
+  teamEl.value = team;
+  fillQbOverrideOptions(qbName);
+  teamEl.scrollIntoView({block:'center'});
 }
 
 function renderQbWatch(){
@@ -1610,7 +1620,7 @@ function renderQbWatch(){
         <span style="color:var(--sage);">${s.reason}</span><br>
         <span style="color:var(--sage);font-size:11px;">${s.penalty_epa>0?'+':''}${s.penalty_epa} EPA/play (${s.source})</span>
       </div>
-      <button class="btn" style="padding:3px 8px;font-size:10.5px;" onclick="prefillQbOverride('${team}','${(s.qb_name||'').replace(/'/g,"\\'")}')">Override</button>
+      <button class="btn" style="padding:3px 8px;font-size:10.5px;" onclick="prefillQbOverride('${team}','${(s.qb_full_name||s.qb_name||'').replace(/'/g,"\\'")}')">Override</button>
     </div>`).join('');
 
   // ---- Manual (escape hatch only now): a real, active override here always wins over the
@@ -1642,19 +1652,26 @@ function renderQbWatch(){
       <div style="font-size:11.5px;color:var(--sage);margin:8px 0 10px;">
         A team's rating only reflects a new starter once it has real games of their snaps to learn from -- this applies an
         EPA/play adjustment to just THIS week's game projection for a real starter change, never the season-long rating.
-        <b>Automated</b> below is the default: a real, free check (nflverse depth charts + injury reports, cross-checked
-        against who actually started the team's last real game) refreshed twice a real day, no typing required. The real
-        personal EPA number comes from that player's own career numbers, computed automatically. <b>Manual override</b> is
-        only for a genuine edge case automation can't call yet (breaking news with no real signal in either source) -- an
-        active manual entry always wins over the automated read for that team.
+        <b>Automated</b> below is the default: a free check of Sleeper's depth charts (fastest to update) with nflverse's
+        depth charts as backup, skipping anyone listed Out/Doubtful/IR, cross-checked against who actually started the
+        team's last game -- refreshed on every pipeline run, including free no-odds runs. The personal EPA number comes from
+        that player's own career numbers. <b>Manual override</b> is for breaking news neither source has yet: pick the
+        team and QB, and an active entry wins over the automated read. Both take effect on the next pipeline run. They change
+        our model's line and the game context only -- the fair lines and EV come from the betting market, which already
+        prices the news.
       </div>
       <div style="font-size:11px;color:var(--sage);text-transform:uppercase;font-weight:700;margin:10px 0 4px;">Automated</div>
       ${autoRows || '<div class="empty-note">No real starter changes detected right now.</div>'}
       <div style="font-size:11px;color:var(--sage);text-transform:uppercase;font-weight:700;margin:16px 0 4px;">Manual override (edge cases only)</div>
       ${rows || '<div class="empty-note">No manual overrides set.</div>'}
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-top:10px;">
-        <input id="qbwatch-team" placeholder="Team (e.g. CHI)" style="width:100px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
-        <input id="qbwatch-qbname" placeholder="QB (e.g. T.Bagent)" style="width:140px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
+        <select id="qbwatch-team" onchange="fillQbOverrideOptions()" style="width:100px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
+          <option value="">Team</option>
+          ${Object.keys(QB_DEPTH_CHART_STATUS).sort().map(t => `<option value="${t}">${t}</option>`).join('')}
+        </select>
+        <select id="qbwatch-qbname" style="width:170px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
+          <option value="">Pick a team first</option>
+        </select>
         <input id="qbwatch-reason" placeholder="Reason (who's out, why)" style="flex:1;min-width:220px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--chalk);padding:8px;font-family:inherit;font-size:12.5px;">
         <button class="btn" onclick="addQbStatusOverride()">Add</button>
       </div>

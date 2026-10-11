@@ -231,7 +231,24 @@ def get_neutral_game_ids():
 # every other dashboard_state read/write in this app).
 BACKUP_QB_EPA_PENALTY = -0.123
 
-def fetch_qb_status_overrides(season, current_season_pbp_path):
+MANUAL_QB_NAMES = {}   # team -> pbp short name of an ACTIVE manual override (filled by fetch_qb_status_overrides)
+
+
+def _resolve_qb_name(name, team, qb_status):
+    """'T.Bagent', 'Tyson Bagent' or just 'Bagent' -> pbp short name ('T.Bagent'), using that team's
+    QB list when only a last name was typed."""
+    name = str(name or "").strip()
+    if not name or "." in name:
+        return name or None
+    if " " in name:
+        return _full_name_to_pbp_short(name)
+    for full in (qb_status or {}).get(team, {}).get("qb_options", []):
+        if full.split()[-1].lower().rstrip(".") == name.lower() or (len(full.split()) > 2 and full.split()[-2].lower() == name.lower()):
+            return _full_name_to_pbp_short(full)
+    return name
+
+
+def fetch_qb_status_overrides(season, current_season_pbp_path, qb_status=None):
     import urllib.request
     url = "https://firestore.googleapis.com/v1/projects/stock-model-42fb2/databases/(default)/documents/dashboard_state/qb_status_overrides"
     try:
@@ -248,7 +265,9 @@ def fetch_qb_status_overrides(season, current_season_pbp_path):
         active = f.get("active", {}).get("booleanValue", False)
         if not active:
             continue
-        qb_name = f.get("qb_name", {}).get("stringValue") or None
+        qb_name = _resolve_qb_name(f.get("qb_name", {}).get("stringValue"), team, qb_status)
+        if qb_name:
+            MANUAL_QB_NAMES[team] = qb_name
         manual_penalty = f.get("penalty_epa", {}).get("doubleValue")
         reason = f.get("reason", {}).get("stringValue", "") or f.get("note", {}).get("stringValue", "")
 
@@ -354,6 +373,31 @@ def fetch_injury_report(season):
     return {str(n).lower().strip(): str(s).lower().strip() for n, s in zip(latest.full_name, latest.report_status)}
 
 
+# Sleeper's public player list (free, no key): each QB's team depth_chart_order + injury_status.
+# Primary depth source since 2026-10-10 -- it tracked CHI's T.Bagent at QB1 days before nflverse's
+# depth chart did (nflverse still had C.Williams #1, listed Questionable); across all 32 teams that
+# was the only real disagreement. nflverse stays the fallback if Sleeper can't be reached.
+SLEEPER_TEAM_MAP = {"LAR": "LA"}   # Sleeper abbreviation -> nflverse
+SLEEPER_OUT = {"out", "doubtful", "ir", "pup", "sus", "na", "cov", "dnr"}
+
+
+def fetch_sleeper_qbs():
+    """{team: [(depth_order, full_name, injury_status_lower), ...]} or None."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("https://api.sleeper.app/v1/players/nfl", timeout=60) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        print(f"  (Sleeper depth charts: couldn't fetch, using nflverse only -- {e})")
+        return None
+    out = defaultdict(list)
+    for p in data.values():
+        if p.get("position") == "QB" and p.get("team") and p.get("depth_chart_order") is not None and p.get("full_name"):
+            out[SLEEPER_TEAM_MAP.get(p["team"], p["team"])].append(
+                (int(p["depth_chart_order"]), p["full_name"], str(p.get("injury_status") or "").lower()))
+    return {t: sorted(v) for t, v in out.items()} or None
+
+
 def build_qb_depth_chart_status(season, current_season_pbp_path):
     """The real automated replacement for manually noticing a QB change -- including a
     starter RECLAIMING the job once they're healthy again, not just losing it.
@@ -381,8 +425,10 @@ def build_qb_depth_chart_status(season, current_season_pbp_path):
     """
     dc = fetch_depth_charts(season)
     injuries = fetch_injury_report(season)
-    if dc is None:
+    sleeper = fetch_sleeper_qbs()
+    if dc is None and not sleeper:
         return {}
+    dc_by_team = {t: rows.sort_values("pos_rank") for t, rows in dc.groupby("team")} if dc is not None else {}
 
     pbp_qb = pd.read_parquet(current_season_pbp_path,
                              columns=["play_type", "epa", "posteam", "passer_player_name", "week", "season_type"])
@@ -392,11 +438,22 @@ def build_qb_depth_chart_status(season, current_season_pbp_path):
         return injuries.get(str(full_name).lower().strip()) in UNAVAILABLE_INJURY_STATUSES
 
     out = {}
-    for team, rows in dc.groupby("team"):
-        rows = rows.sort_values("pos_rank")
-        healthy = [r.player_name for _, r in rows.iterrows() if not unavailable(r.player_name)]
-        candidate_full = healthy[0] if healthy else rows.iloc[0].player_name  # everyone flagged -- fall back to #1 anyway
+    for team in sorted(set(dc_by_team) | set(sleeper or {})):
+        rows = dc_by_team.get(team)
+        s_rows = (sleeper or {}).get(team) or []
+        s_healthy = [n for _, n, st in s_rows if st not in SLEEPER_OUT and not unavailable(n)]
+        if s_healthy:
+            candidate_full, depth_src = s_healthy[0], "Sleeper depth chart"
+        elif rows is not None:
+            healthy = [r.player_name for _, r in rows.iterrows() if not unavailable(r.player_name)]
+            candidate_full = healthy[0] if healthy else rows.iloc[0].player_name  # everyone flagged -- fall back to #1 anyway
+            depth_src = "nflverse depth chart"
+        else:
+            continue
         candidate_short = _full_name_to_pbp_short(candidate_full)
+        # every QB either source lists for this team, depth order -- the manual override's picker
+        qb_options = list(dict.fromkeys([n for _, n, _ in s_rows] + (list(rows.player_name) if rows is not None else [])))
+        injured = [f"{n} ({st})" for _, n, st in s_rows if st]
 
         last_game_short = primary_by_team.get(team)
         flag = bool(last_game_short) and (candidate_short != last_game_short)
@@ -404,16 +461,20 @@ def build_qb_depth_chart_status(season, current_season_pbp_path):
         if not flag:
             out[team] = {"flag": False, "qb_name": candidate_short, "qb_full_name": candidate_full,
                          "reason": "No change from last real game's starter.",
-                         "penalty_epa": 0.0, "source": "no change detected"}
+                         "penalty_epa": 0.0, "source": "no change detected",
+                         "depth_source": depth_src, "qb_options": qb_options}
             continue
 
         computed = qb_personal_penalty(candidate_short, season, current_season_pbp_path)
         penalty, source = (computed, "real personal EPA") if computed is not None else (BACKUP_QB_EPA_PENALTY, "generic fallback -- no real data on this player")
-        reason = (f"Real depth chart (injury-checked) now has {candidate_full} over last real game's starter ({last_game_short})."
+        reason = (f"{depth_src} (injury-checked) now has {candidate_full} over last real game's starter ({last_game_short})."
                   if last_game_short else
-                  f"No prior real game this season yet -- using the real depth chart's top healthy name, {candidate_full}.")
+                  f"No prior real game this season yet -- using the {depth_src}'s top healthy name, {candidate_full}.")
+        if injured:
+            reason += f" Injury report: {', '.join(injured)}."
         out[team] = {"flag": True, "qb_name": candidate_short, "qb_full_name": candidate_full,
-                     "reason": reason, "penalty_epa": round(penalty, 4), "source": source}
+                     "reason": reason, "penalty_epa": round(penalty, 4), "source": source,
+                     "depth_source": depth_src, "qb_options": qb_options}
         print(f"  AUTO QB change detected: {team} -> {candidate_full} ({candidate_short}) = {penalty:+.3f} EPA/play [{source}] -- {reason}")
 
     return out
@@ -1088,6 +1149,8 @@ def build_game_context(week_games, weather, season, qb_status):
         for team in (r.home_team, r.away_team):
             st = qb_status.get(team) or {}
             qb, qb_full = st.get("qb_name"), st.get("qb_full_name") or st.get("qb_name")
+            if MANUAL_QB_NAMES.get(team):          # an active manual override wins, same as in the model
+                qb = qb_full = MANUAL_QB_NAMES[team]
             usual = max(starts[team].items(), key=lambda kv: kv[1])[0] if starts[team] else None
             # a backup = this week's projected starter isn't the team's most-started QB this season
             # (a tie for most starts counts the current guy as the starter, not a backup)
@@ -2579,7 +2642,7 @@ if __name__ == "__main__":
     qb_status = build_qb_depth_chart_status(SEASON, fetch_pbp(SEASON)) if fetch_pbp(SEASON) else {}
     qb_auto = ({t: st["penalty_epa"] for t, st in qb_status.items() if st["flag"]} if qb_status
                else fetch_qb_depth_chart_status_dict(SEASON, fetch_pbp(SEASON)))
-    qb_manual = fetch_qb_status_overrides(SEASON, fetch_pbp(SEASON))
+    qb_manual = fetch_qb_status_overrides(SEASON, fetch_pbp(SEASON), qb_status)
     qb_overrides = {**qb_auto, **qb_manual}
     if qb_auto:
         print(f"  QB auto-detect: {len(qb_auto)} team(s) flagged ({', '.join(qb_auto)})" +
