@@ -384,8 +384,9 @@ def build_qb_depth_chart_status(season, current_season_pbp_path):
     if dc is None:
         return {}
 
-    primary_by_team = _primary_passer_by_team(pd.read_parquet(current_season_pbp_path,
-                                                                columns=["play_type", "epa", "posteam", "passer_player_name"]))
+    pbp_qb = pd.read_parquet(current_season_pbp_path,
+                             columns=["play_type", "epa", "posteam", "passer_player_name", "week", "season_type"])
+    primary_by_team = _primary_passer_by_team(pbp_qb[pbp_qb.season_type == "REG"])
 
     def unavailable(full_name):
         return injuries.get(str(full_name).lower().strip()) in UNAVAILABLE_INJURY_STATUSES
@@ -548,7 +549,14 @@ def _passer_epa_vs_league(pbp_df, passer_name, min_attempts):
     return p.epa.mean() - league_avg, len(p)
 
 def _primary_passer_by_team(pbp_df):
+    """Each team's primary passer in its MOST RECENT game when the frame has a week column (who
+    actually started last time), else across the whole frame. Fixed 2026-10-10: this used to count
+    the whole season, so CHI's "last starter" read as C.Williams (weeks 1-2) after T.Bagent had
+    thrown all 35 passes in week 4."""
     pass_plays = pbp_df[(pbp_df.play_type == "pass") & pbp_df.epa.notna() & pbp_df.passer_player_name.notna()]
+    if "week" in pass_plays.columns and len(pass_plays):
+        last_week = pass_plays.groupby("posteam")["week"].transform("max")
+        pass_plays = pass_plays[pass_plays.week == last_week]
     counts = pass_plays.groupby(["posteam", "passer_player_name"]).size().reset_index(name="att")
     if len(counts) == 0:
         return {}
@@ -1051,23 +1059,18 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
 CONTEXT_WIND_MPH = 10.0
 
 
-def build_game_context(week_games, weather, season):
-    import urllib.request
-    games = pd.read_csv(fetch_games_csv())
-    g = games[(games.season.astype(str) == str(season)) & (games.game_type == "REG") & games.result.notna()]
-    starts = defaultdict(lambda: defaultdict(int))     # team -> qb full name -> starts this season
-    for r in g.itertuples():
-        for team, qb in ((r.home_team, r.home_qb_name), (r.away_team, r.away_qb_name)):
-            if isinstance(qb, str):
-                starts[team][qb] += 1
-    try:   # this week's projected starters, as flagged by the depth-chart check (public-read doc)
-        url = "https://firestore.googleapis.com/v1/projects/stock-model-42fb2/databases/(default)/documents/qb_depth_chart_status/current"
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            teams = json.loads(resp.read()).get("fields", {}).get("teams", {}).get("mapValue", {}).get("fields", {})
-        qb_now = {t: e["mapValue"]["fields"] for t, e in teams.items()}
-    except Exception as e:
-        print(f"  (game context: couldn't read QB status -- {e}; skipping the backup-QB angle)")
-        qb_now = {}
+def build_game_context(week_games, weather, season, qb_status):
+    """qb_status: build_qb_depth_chart_status() output (this week's projected starter per team).
+    Starts are counted from play-by-play -- each game's primary passer -- because nflverse's schedule
+    file QB names can lag (it listed C.Keenum for CHI's 2026 week 4; T.Bagent threw all 35 passes)."""
+    starts = defaultdict(lambda: defaultdict(int))     # team -> qb (pbp short name) -> starts this season
+    pbp_path = fetch_pbp(season)
+    if pbp_path:
+        p = pd.read_parquet(pbp_path, columns=["week", "posteam", "passer_player_name", "play_type", "epa", "season_type"])
+        p = p[(p.season_type == "REG") & (p.play_type == "pass") & p.epa.notna() & p.passer_player_name.notna()]
+        att = p.groupby(["posteam", "week", "passer_player_name"]).size().reset_index(name="n")
+        for r in att.loc[att.groupby(["posteam", "week"])["n"].idxmax()].itertuples():
+            starts[r.posteam][r.passer_player_name] += 1
     today = pd.Timestamp.now(tz="America/New_York").normalize().tz_localize(None)
 
     out = {}
@@ -1083,15 +1086,16 @@ def build_game_context(week_games, weather, season):
         if getattr(r, "div_game", 0) == 1 and isinstance(r.gametime, str) and r.gametime >= "20:00":
             items.append({"type": "div_prime", "market": "total", "lean": "under", "text": "Division game in primetime"})
         for team in (r.home_team, r.away_team):
-            f = qb_now.get(team) or {}
-            if not f.get("flag", {}).get("booleanValue"):
-                continue
-            qb = f.get("qb_full_name", {}).get("stringValue")
+            st = qb_status.get(team) or {}
+            qb, qb_full = st.get("qb_name"), st.get("qb_full_name") or st.get("qb_name")
             usual = max(starts[team].items(), key=lambda kv: kv[1])[0] if starts[team] else None
-            if qb and usual and qb != usual:
+            # a backup = this week's projected starter isn't the team's most-started QB this season
+            # (a tie for most starts counts the current guy as the starter, not a backup)
+            if qb and usual and qb != usual and starts[team].get(qb, 0) < starts[team][usual]:
                 n = starts[team].get(qb, 0)
                 items.append({"type": "backup_qb", "market": "team_total", "team": team, "lean": "under",
-                              "text": f"{team}: backup QB {qb} starting ({'first start' if n == 0 else f'start #{n + 1}'} this season, usual starter {usual})"})
+                              "text": f"{team}: backup QB {qb_full} starting ({'first start' if n == 0 else f'start #{n + 1}'} "
+                                      f"this season; {usual} has {starts[team][usual]})"})
         if items:
             out[gid] = items
     return out
@@ -2568,7 +2572,13 @@ if __name__ == "__main__":
     # for that same team wins on top of it (dict union -- manual_overrides' keys take priority)
     # for the genuine edge cases automation can't call (breaking news with no real depth-chart/
     # injury-report signal yet).
-    qb_auto = fetch_qb_depth_chart_status_dict(SEASON, fetch_pbp(SEASON))
+    # Computed fresh every run from free nflverse depth charts + injuries + this season's play-by-play
+    # (the separate twice-daily qb_status_check workflow the dashboard used to rely on was never added
+    # to .github/workflows, so the saved status had been frozen since 2026-10-07). Written back below
+    # so QB Watch stays current; falls back to the saved doc only if the fresh build can't run.
+    qb_status = build_qb_depth_chart_status(SEASON, fetch_pbp(SEASON)) if fetch_pbp(SEASON) else {}
+    qb_auto = ({t: st["penalty_epa"] for t, st in qb_status.items() if st["flag"]} if qb_status
+               else fetch_qb_depth_chart_status_dict(SEASON, fetch_pbp(SEASON)))
     qb_manual = fetch_qb_status_overrides(SEASON, fetch_pbp(SEASON))
     qb_overrides = {**qb_auto, **qb_manual}
     if qb_auto:
@@ -2632,7 +2642,7 @@ if __name__ == "__main__":
     # on the card. No API credits -- only the lines already pulled or kept above.
     shop = build_shop_report(game_totals, team_totals_data, books, ratings["games_this_week"],
                              model_totals={g["id"]: g["model_total"] for g in games_out})
-    context = build_game_context(ratings["games_this_week"], weather, SEASON)
+    context = build_game_context(ratings["games_this_week"], weather, SEASON, qb_status)
     for g in games_out:
         g["shop"] = shop.get(g["id"], [])
         g["context"] = context.get(g["id"], [])
@@ -2794,6 +2804,9 @@ if __name__ == "__main__":
         # week's games/closing_results (both already accumulate automatically), so this
         # naturally grows correctly with zero extra data collection.
         record = build_model_season_record(fdb, SEASON)
+        if qb_status:
+            fdb.collection("qb_depth_chart_status").document("current").set({
+                "season": SEASON, "teams": qb_status, "updated_at": firestore.SERVER_TIMESTAMP})
         # +EV plays: log this pull's, grade any whose game is final (see log_ev_plays/grade_ev_log)
         log_ev_plays(fdb, SEASON, WEEK, games_out)
         ev_plays = grade_ev_log(fdb, SEASON, WEEK)
