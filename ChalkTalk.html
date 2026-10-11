@@ -1950,11 +1950,22 @@ function renderFairLines(g){
       </div>
     </details>`;
   }).join('');
+  // Context: only the angles that beat the closing line in the backtests (game-window wind, division
+  // primetime, a backup QB's start -- see build_game_context in the pipeline). Informational: they never
+  // change the fair price or the BET boxes. Pace/tempo/team stats are left out on purpose -- they showed
+  // no edge against the line.
+  const ctx = (g.context||[]);
+  const ctxHtml = ctx.length ? `
+    <div style="margin-top:6px;font-size:11.5px;color:var(--sage);line-height:1.5;">
+      <span style="text-transform:uppercase;font-weight:700;font-size:10.5px;">Context</span>
+      ${ctx.map(c => `<div>&bull; ${c.text} &rarr; <span style="color:var(--chalk);">leans ${c.team ? c.team+' TT ' : ''}${c.lean}</span></div>`).join('')}
+    </div>` : '';
   return `
     <div style="display:flex;gap:8px;font-size:10.5px;color:var(--sage);text-transform:uppercase;padding:0 0 2px 62px;font-weight:700;">
       <span style="width:56px;">Fair line</span><span style="flex:1;">Fair odds</span>
     </div>
     ${rows.join('')}
+    ${ctxHtml}
     ${betHtml}
     ${renderPriceCheck(g)}`;
 }
@@ -4542,6 +4553,7 @@ function evPlaysSection(ev){
         ${row('All', ev.all)}
         ${Object.entries(ev.by_market||{}).map(([k,x]) => row(names[k]||k, x)).join('')}
         ${Object.entries(ev.by_bucket||{}).map(([k,x]) => row(k, x)).join('')}
+        ${ev.by_context ? [['with','Context agrees'],['against','Context against'],['none','No context']].map(([k,l]) => row(l, ev.by_context[k])).join('') : ''}
       </tbody>
     </table></div></div>`;
 }

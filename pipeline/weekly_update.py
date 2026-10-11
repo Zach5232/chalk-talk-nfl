@@ -1040,6 +1040,73 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
     return out
 
 
+# ---------- Game context: the only angles that beat the CLOSING line in the 2026-10-10 backtests ----------
+# Shown next to the fair lines for context; never changes the fair price or the bet flag.
+#   wind:      outdoor stadium, forecast game-window wind >= 10 mph -> unders 58.5% (2022-25, vs the close)
+#   div_prime: division game in primetime -> unders 54-56% in every era since 2010
+#   backup_qb: a backup's start (not the usual starter returning) -> that team's total under ~55%,
+#              fading to ~53% in 2020-25 -- a lean, not a bet by itself
+# Pace/tempo, plays per game, success rate, aDOT, EPA etc. were tested too and had no edge vs the line,
+# so they're deliberately left out rather than shown as "supporting" a bet.
+CONTEXT_WIND_MPH = 10.0
+
+
+def build_game_context(week_games, weather, season):
+    import urllib.request
+    games = pd.read_csv(fetch_games_csv())
+    g = games[(games.season.astype(str) == str(season)) & (games.game_type == "REG") & games.result.notna()]
+    starts = defaultdict(lambda: defaultdict(int))     # team -> qb full name -> starts this season
+    for r in g.itertuples():
+        for team, qb in ((r.home_team, r.home_qb_name), (r.away_team, r.away_qb_name)):
+            if isinstance(qb, str):
+                starts[team][qb] += 1
+    try:   # this week's projected starters, as flagged by the depth-chart check (public-read doc)
+        url = "https://firestore.googleapis.com/v1/projects/stock-model-42fb2/databases/(default)/documents/qb_depth_chart_status/current"
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            teams = json.loads(resp.read()).get("fields", {}).get("teams", {}).get("mapValue", {}).get("fields", {})
+        qb_now = {t: e["mapValue"]["fields"] for t, e in teams.items()}
+    except Exception as e:
+        print(f"  (game context: couldn't read QB status -- {e}; skipping the backup-QB angle)")
+        qb_now = {}
+    today = pd.Timestamp.now(tz="America/New_York").normalize().tz_localize(None)
+
+    out = {}
+    for r in week_games.itertuples():
+        gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
+        items = []
+        wx = weather.get(gid) or {}
+        if wx.get("roof") == "outdoor" and wx.get("game_wind_mph") is not None and wx["game_wind_mph"] >= CONTEXT_WIND_MPH:
+            days = int((pd.Timestamp(r.gameday) - today).days) if pd.notna(r.gameday) else None
+            items.append({"type": "wind", "market": "total", "lean": "under", "mph": wx["game_wind_mph"], "days_out": days,
+                          "text": f"Wind {wx['game_wind_mph']:.0f} mph during the game"
+                                  + (" (game-day forecast)" if days == 0 else f" (forecast {days} day{'s' if days != 1 else ''} out -- firmer on game day)" if days else "")})
+        if getattr(r, "div_game", 0) == 1 and isinstance(r.gametime, str) and r.gametime >= "20:00":
+            items.append({"type": "div_prime", "market": "total", "lean": "under", "text": "Division game in primetime"})
+        for team in (r.home_team, r.away_team):
+            f = qb_now.get(team) or {}
+            if not f.get("flag", {}).get("booleanValue"):
+                continue
+            qb = f.get("qb_full_name", {}).get("stringValue")
+            usual = max(starts[team].items(), key=lambda kv: kv[1])[0] if starts[team] else None
+            if qb and usual and qb != usual:
+                n = starts[team].get(qb, 0)
+                items.append({"type": "backup_qb", "market": "team_total", "team": team, "lean": "under",
+                              "text": f"{team}: backup QB {qb} starting ({'first start' if n == 0 else f'start #{n + 1}'} this season, usual starter {usual})"})
+        if items:
+            out[gid] = items
+    return out
+
+
+def _context_tag(play, context):
+    """'with' if a context angle leans the same way as this bet, 'against' if it leans the other way."""
+    tags = []
+    for c in context or []:
+        if c["market"] != play["market"] or (c.get("team") and c["team"] != play["team"]):
+            continue
+        tags.append("with" if c["lean"] == play["side"] else "against")
+    return "against" if "against" in tags else "with" if tags else None
+
+
 # ---------- +EV play log: every flagged offer, graded against the close and the final score ----------
 # Every +EV offer (best book AND every "also" book) is logged the first time a pull sees it, at the price
 # it was first available -- what you'd have gotten by betting it then. After the game: win/loss/push,
@@ -1062,9 +1129,11 @@ def _ev_play_rows(games_out):
                 if o["ev"] <= 0:
                     continue
                 key = f"{g['id']}|{e['market']}|{e['team'] or ''}|{e['side']}|{o['book']}|{o['line']}"
-                yield key, {"game": g["id"], "home": g["home"], "away": g["away"], "market": e["market"],
-                            "team": e["team"], "side": e["side"], "book": o["book"], "line": o["line"],
-                            "odds": o["odds"], "ev": o["ev"]}
+                row = {"game": g["id"], "home": g["home"], "away": g["away"], "market": e["market"],
+                       "team": e["team"], "side": e["side"], "book": o["book"], "line": o["line"],
+                       "odds": o["odds"], "ev": o["ev"]}
+                row["context"] = _context_tag(row, g.get("context"))
+                yield key, row
 
 
 def log_ev_plays(db, season, week, games_out):
@@ -1172,7 +1241,11 @@ def grade_ev_log(db, season, through_week):
                 "avg_close_ev": round(float(np.mean(clv)), 4) if clv else None,
                 "beat_close_pct": round(100 * sum(c > 0 for c in clv) / len(clv), 1) if clv else None}
 
-    summary = {"all": summarize(every), "by_market": {}, "by_bucket": {}}
+    summary = {"all": summarize(every), "by_market": {}, "by_bucket": {},
+               # do the backtested angles add anything on top of +EV? (see build_game_context)
+               "by_context": {"with": summarize([p for p in every if p.get("context") == "with"]),
+                              "against": summarize([p for p in every if p.get("context") == "against"]),
+                              "none": summarize([p for p in every if not p.get("context")])}}
     for m in ("spread", "total", "team_total"):
         summary["by_market"][m] = summarize([p for p in every if p["market"] == m])
     for lo, hi, label in EV_BUCKETS:
@@ -1520,6 +1593,7 @@ def pull_weather_for_week(games_this_week):
         game_date = pd.to_datetime(r.gameday).strftime("%Y-%m-%d")
         url = (f"https://api.open-meteo.com/v1/forecast?latitude={stad['lat']}&longitude={stad['lon']}"
                f"&daily=temperature_2m_max,temperature_2m_min,windspeed_10m_max,precipitation_probability_max"
+               f"&hourly=wind_speed_10m"
                f"&temperature_unit=fahrenheit&windspeed_unit=mph&timezone=America%2FNew_York"
                f"&start_date={game_date}&end_date={game_date}")
         out_path = os.path.join(CACHE_DIR, f"wx_{r.home_team}_{r.week}.json")
@@ -1538,6 +1612,15 @@ def pull_weather_for_week(games_this_week):
                 "wind_mph": daily["windspeed_10m_max"][0],
                 "precip_pct": daily["precipitation_probability_max"][0],
             }
+            # Average wind from kickoff through 3 hours in -- the window the 2022-25 forecast backtest
+            # found matters (game-window >= 10 mph -> unders 58.5% vs the close), not the day's max.
+            hourly = d.get("hourly", {})
+            kick = pd.Timestamp(f"{game_date} {r.gametime}").floor("h") if pd.notna(r.gametime) else None
+            if kick is not None and hourly.get("time"):
+                win = [w for t, w in zip(hourly["time"], hourly.get("wind_speed_10m", []))
+                       if w is not None and kick <= pd.Timestamp(t) <= kick + pd.Timedelta(hours=3)]
+                if win:
+                    weather[gid]["game_wind_mph"] = round(float(np.mean(win)), 1)
         except (KeyError, IndexError):
             weather[gid] = {"roof": stad["roof"], "error": "forecast not available yet (too far out) -- try again closer to game day"}
     return weather
@@ -2549,8 +2632,15 @@ if __name__ == "__main__":
     # on the card. No API credits -- only the lines already pulled or kept above.
     shop = build_shop_report(game_totals, team_totals_data, books, ratings["games_this_week"],
                              model_totals={g["id"]: g["model_total"] for g in games_out})
+    context = build_game_context(ratings["games_this_week"], weather, SEASON)
     for g in games_out:
         g["shop"] = shop.get(g["id"], [])
+        g["context"] = context.get(g["id"], [])
+    if context:
+        print(f"\n--- GAME CONTEXT: {sum(len(v) for v in context.values())} angles across {len(context)} games ---")
+        for gid, items in context.items():
+            for c in items:
+                print(f"  {gid:9s} {c['text']} -> leans {c['team'] + ' TT ' if c.get('team') else ''}{c['lean']}")
     flagged = [(gid, e) for gid, sides in shop.items() for e in sides if e["bet"]]
     print(f"\n--- LINE SHOPPING: {sum(len(v) for v in shop.values())} sides priced against the fair line, "
           f"{len(flagged)} +EV ({sum(1 for _, e in flagged if e['strong'])} past the strong bar) ---")
