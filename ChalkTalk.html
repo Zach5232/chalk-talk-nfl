@@ -266,6 +266,7 @@
   <div id="view-week" class="view">
     <div class="section-label" id="spread-zone-label">Spread Zone &middot; Week 1, 2026</div>
     <div id="qb-watch" style="margin-bottom:16px;"></div>
+    <div id="next-odds-pull" style="font-size:12px;color:var(--sage);margin:0 0 8px;"></div>
     <div id="stake-settings" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0 0 12px;font-size:12px;color:var(--sage);">
       <label style="display:flex;align-items:center;gap:6px;">Bankroll $
         <input id="stake-bankroll" type="number" inputmode="decimal" min="0" step="50" placeholder="optional"
@@ -1678,8 +1679,29 @@ function renderQbWatch(){
     </details>`;
 }
 
+// Next scheduled odds pulls, from .github/workflows/weekly-update.yml's crons (UTC): Tue 14:00
+// (spreads + totals + team totals) and Sun 14:45 (spreads + totals). Keep in sync with that file.
+// GitHub often starts scheduled runs 5-20 min late.
+const ODDS_PULL_SCHEDULE = [
+  {dow: 2, h: 14, m: 0, what: 'spreads, totals, team totals'},
+  {dow: 0, h: 14, m: 45, what: 'spreads + game totals'},
+];
+function renderNextOddsPull(){
+  const el = document.getElementById('next-odds-pull');
+  if(!el) return;
+  const now = new Date();
+  const next = ODDS_PULL_SCHEDULE.map(sc => {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), sc.h, sc.m));
+    d.setUTCDate(d.getUTCDate() + ((sc.dow - d.getUTCDay() + 7) % 7));
+    if(d <= now) d.setUTCDate(d.getUTCDate() + 7);
+    return {d, what: sc.what};
+  }).sort((a,b) => a.d - b.d);
+  const fmt = d => d.toLocaleString('en-US', {timeZone:'America/New_York', weekday:'short', hour:'numeric', minute:'2-digit'});
+  el.innerHTML = `Next odds pull: <b style="color:var(--chalk);">${fmt(next[0].d)} ET</b> (${next[0].what}) &middot; then ${fmt(next[1].d)} ET. Scheduled runs can start 5-20 min late; run it manually for anything sooner.`;
+}
 function renderGamesList(){
   initStakeSettings();
+  renderNextOddsPull();
   renderQbWatch();
   const el = document.getElementById('games-list');
   // Spread Zone is for games still to be decided -- once real, a game moves to Results'
@@ -1846,7 +1868,7 @@ function renderPriceCheck(g){
         </span>
         <span style="display:inline-flex;gap:3px;">
           <button type="button" style="${pm}" onclick="flipSign('chk-odds-${id}','${id}')" aria-label="Flip odds sign">&plusmn;</button>
-          <input id="chk-odds-${id}" type="text" inputmode="decimal" autocomplete="off" style="${inp}width:62px;" value="${s0.best.odds}" oninput="checkPrice('${id}')" aria-label="Odds">
+          <input id="chk-odds-${id}" type="text" inputmode="decimal" autocomplete="off" placeholder="-110/48¢" style="${inp}width:62px;" value="${s0.best.odds}" oninput="checkPrice('${id}')" aria-label="Odds">
         </span>
         <select id="chk-book-${id}" style="${inp}" onchange="checkPrice('${id}')">
           <option value="">Sportsbook</option><option value="novig">Novig</option><option value="kalshi">Kalshi</option>
@@ -1863,6 +1885,22 @@ function flipSign(inputId, id){
 }
 // accepts "-115", "+105", "105", "−115" (typographic minus); anything else = NaN
 const parseSigned = v => parseFloat(String(v).trim().replace(/^[−–]/, '-').replace(/^\+/, ''));
+// Odds box: American (-115, +108, 108), cents (48, 48c, 48¢), a % chance (48.1%) or a multiplier /
+// decimal odds (2.08x, 2.08). Returns {american, label} or null. A bare whole number 1-99 reads as cents.
+function parseOddsInput(raw){
+  const t = String(raw).trim().toLowerCase().replace(/\s/g, '').replace(/^[−–]/, '-');
+  if(!t) return null;
+  const fromProb = p => p > 0 && p < 1 ? (p < 0.5 ? Math.round(100*(1-p)/p) : -Math.round(100*p/(1-p))) : null;
+  let m;
+  if((m = t.match(/^(\d*\.?\d+)(¢|c|%)$/))){ const a = fromProb(+m[1]/100); return a == null ? null : {american:a, label:`${m[1]}${m[2]==='%'?'%':'¢'}`}; }
+  if((m = t.match(/^(\d*\.?\d+)x$/))){ const d = +m[1]; return d > 1 ? {american: d >= 2 ? Math.round((d-1)*100) : -Math.round(100/(d-1)), label:`${m[1]}x`} : null; }
+  const n = parseSigned(t);
+  if(isNaN(n)) return null;
+  if(t.startsWith('-') || t.startsWith('+') || Math.abs(n) >= 100) return Math.abs(n) >= 100 ? {american:n, label:null} : null;
+  if(n > 1 && n < 100 && Number.isInteger(n)) { const a = fromProb(n/100); return {american:a, label:`${n}¢`}; }
+  if(n > 1 && n <= 20) return {american: n >= 2 ? Math.round((n-1)*100) : -Math.round(100/(n-1)), label:`${n}x`};
+  return null;
+}
 function prefillCheck(id){
   const s = CHECK_SIDES[id][+document.getElementById(`chk-side-${id}`).value];
   document.getElementById(`chk-line-${id}`).value = s.best.line;
@@ -1874,9 +1912,10 @@ async function checkPrice(id){
   try { await loadKeyNumbers(); } catch(e){ out.textContent = "Couldn't load the key-number tables -- try refreshing."; return; }
   const s = CHECK_SIDES[id][+document.getElementById(`chk-side-${id}`).value];
   const line = parseSigned(document.getElementById(`chk-line-${id}`).value);
-  const odds = parseSigned(document.getElementById(`chk-odds-${id}`).value);
+  const parsed = parseOddsInput(document.getElementById(`chk-odds-${id}`).value);
+  const odds = parsed ? parsed.american : NaN;
   const book = document.getElementById(`chk-book-${id}`).value;
-  if(isNaN(line) || isNaN(odds) || (odds > -100 && odds < 100)){ out.innerHTML = '<span style="color:var(--sage);">Enter a line and American odds (e.g. -115 or +105).</span>'; return; }
+  if(isNaN(line) || isNaN(odds) || (odds > -100 && odds < 100)){ out.innerHTML = '<span style="color:var(--sage);">Enter a line and a price: American (-115, +105), cents (48 or 48¢), % (48.1%) or a multiplier (2.08x).</span>'; return; }
   const [po, pu] = marketProbs(s.kind, s.anchor, s.q, s.toMarket(line));
   const [win, loss] = s.side === 'over' ? [po, pu] : [pu, po];
   const ev = win * netPayout(odds, book) - loss;
@@ -1892,7 +1931,7 @@ async function checkPrice(id){
     model = `<br><span class="model">Our model (${s.model.toFixed(1)}): EV ${mev>=0?'+':''}${(mev*100).toFixed(1)}% -- second opinion only</span>`;
   }
   const b = s.best, cmp = ev > b.ev ? 'better than' : 'not as good as';
-  out.innerHTML = `
+  out.innerHTML = `${parsed.label ? `<span style="color:var(--sage);">${parsed.label} = ${fmtOdds(odds)}</span><br>` : ''}
     <b style="color:${evCol};">EV ${ev>=0?'+':''}${(ev*100).toFixed(1)}%</b> &middot; win ${(win*100).toFixed(1)}%${win+loss<0.999?` &middot; push ${((1-win-loss)*100).toFixed(1)}%`:''} &middot; fair ${fmtOdds(oddsFromProb(win/(win+loss)))} &middot; stake ${stake}
     <br><span style="color:var(--sage);">${cmp} the best listed: ${shopSideLabel(g_byId(id), b)} ${fmtOdds(b.odds)} @ ${bookLabel(b.book)} (${b.ev>=0?'+':''}${(b.ev*100).toFixed(1)}%)</span>${model}`;
 }
@@ -1900,6 +1939,16 @@ const g_byId = id => GAMES.find(x => x.id === id);
 
 function shopSides(g, market, team){
   return (g.shop||[]).filter(e => e.market===market && (team==null || e.team===team));
+}
+// Prediction-market apps show a price, not American odds: Kalshi/Polymarket in cents per $1 contract,
+// Novig as a % chance. Shown next to the odds so the card matches what's on the app's button.
+// (American -> implied: plus odds 100/(odds+100), minus odds |odds|/(|odds|+100).)
+const PRICE_IN_CENTS = {kalshi: '¢', polymarket: '¢', novig: '%'};
+function oddsWithBookPrice(odds, book){
+  const unit = PRICE_IN_CENTS[book];
+  if(!unit || odds == null) return fmtOdds(odds);
+  const p = 100 * probFromOdds(odds);
+  return `${fmtOdds(odds)} (${unit === '¢' ? Math.round(p*10)/10 + '¢' : p.toFixed(1) + '%'})`;
 }
 function shopSideLabel(g, e){
   if(e.market==='spread') return `${e.team} ${fmtPts(e.line)}`;
@@ -1952,7 +2001,7 @@ function renderFairLines(g){
   };
   const betHtml = bets.map(e => {
     const also = e.also || [];
-    const head = `${e.strong?'&#9733; ':''}BET ${shopSideLabel(g,e)} ${fmtOdds(e.odds)} @ ${bookLabel(e.book)} &middot; ${evTxt(e.ev)} EV${stakeTxt(e)}`;
+    const head = `${e.strong?'&#9733; ':''}BET ${shopSideLabel(g,e)} ${oddsWithBookPrice(e.odds, e.book)} @ ${bookLabel(e.book)} &middot; ${evTxt(e.ev)} EV${stakeTxt(e)}`;
     const box = 'margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(95,191,122,0.12);color:var(--good);font-size:12px;font-weight:600;';
     if(!also.length) return `<div style="${box}">${head}</div>`;
     return `
@@ -1961,7 +2010,7 @@ function renderFairLines(g){
       <div style="margin-top:6px;font-weight:500;">
         ${also.map(o => `
           <div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;">
-            <span>${bookLabel(o.book)} &middot; ${shopSideLabel(g,{...e, line:o.line})} ${fmtOdds(o.odds)}</span>
+            <span>${bookLabel(o.book)} &middot; ${shopSideLabel(g,{...e, line:o.line})} ${oddsWithBookPrice(o.odds, o.book)}</span>
             <span>${evTxt(o.ev)}${stakeTxt(o)}</span>
           </div>`).join('')}
       </div>
@@ -2006,7 +2055,7 @@ function renderFairLinesDetail(g){
             <td>${fairSide}</td>
             <td>${fmtOdds(e.consensus_fair_odds)}</td>
             <td>${fmtOdds(e.target_odds)}</td>
-            <td class="${e.bet?'best':''}">${shopSideLabel(g,e)} ${fmtOdds(e.odds)} ${bookLabel(e.book)}</td>
+            <td class="${e.bet?'best':''}">${shopSideLabel(g,e)} ${oddsWithBookPrice(e.odds, e.book)} ${bookLabel(e.book)}</td>
             <td style="color:${e.ev>=0?'var(--good)':'var(--sage)'};">${e.ev>=0?'+':''}${(e.ev*100).toFixed(1)}%</td>
           </tr>`;
         }).join('')}
