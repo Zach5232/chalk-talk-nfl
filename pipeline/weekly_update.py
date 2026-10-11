@@ -1080,8 +1080,26 @@ def log_ev_plays(db, season, week, games_out):
         else:
             plays[key] = {**row, "first_seen": now, "last_seen": now, "last_odds": row["odds"], "last_ev": row["ev"]}
             new += 1
+    # One side per market in the log too: if both sides of the same spread / total / team total got logged
+    # (two books off in opposite directions -- logged before the one-side rule, or the better side flipped
+    # between pulls), keep only the side whose best logged EV is higher. Graded plays are never touched.
+    groups = defaultdict(list)
+    for key, p in plays.items():
+        groups[(p["game"], p["market"], p["team"] if p["market"] == "team_total" else None)].append((key, p))
+    dropped = 0
+    for rows in groups.values():
+        best_ev = defaultdict(float)
+        for _, p in rows:
+            best_ev[p["side"]] = max(best_ev[p["side"]], p["ev"])
+        if len(best_ev) > 1:
+            keep = max(best_ev, key=best_ev.get)
+            for key, p in rows:
+                if p["side"] != keep and p.get("result") is None:
+                    del plays[key]
+                    dropped += 1
     ref.set({"season": season, "week": week, "plays": plays})
-    print(f"  +EV log: {new} new plays this pull, {len(plays)} logged for week {week}")
+    print(f"  +EV log: {new} new plays this pull, {len(plays)} logged for week {week}"
+          f"{f' ({dropped} opposite-side plays removed)' if dropped else ''}")
 
 
 def _close_ev(play, game_row):
