@@ -1917,7 +1917,15 @@ function renderFairLines(g){
   // One green box per +EV side (every one, however small -- a star marks the stronger per-market bar:
   // 2% spreads/totals, 3% team totals); tapping it drops down every other book still +EV on that same
   // side (stopPropagation so it opens the list instead of the game page).
-  const bets = (g.shop||[]).filter(e=>e.bet).sort((a,b)=>b.ev-a.ev);
+  // Only one side per market: when both sides of the same spread/total/team total price +EV (two books
+  // off in opposite directions), betting both just pays the vig twice -- show only the better one.
+  const sideKey = e => e.market === 'team_total' ? `tt-${e.team}` : e.market;
+  const bestPerMarket = {};
+  for(const e of (g.shop||[]).filter(e=>e.bet)){
+    const k = sideKey(e);
+    if(!bestPerMarket[k] || e.ev > bestPerMarket[k].ev) bestPerMarket[k] = e;
+  }
+  const bets = Object.values(bestPerMarket).sort((a,b)=>b.ev-a.ev);
   const evTxt = ev => `${ev>=0?'+':''}${(ev*100).toFixed(1)}%`;
   const stakeTxt = o => {
     const k = kellyStake(o.ev, o.odds, o.book);

@@ -1025,6 +1025,16 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
                                   "model_fair_odds": m["fair_odds"], "model_ev": m["ev"],
                                   "model_consensus_fair_odds": _american(mw / max(mw + ml, 1e-9))})
                 sides.append(entry)
+        # One side per market: if both sides of the same spread / total / team total are +EV (two books
+        # off in opposite directions), only the better one is a bet -- taking both just pays the vig twice
+        # (and a total landing between the two lines loses both). The other side stays priced, unflagged.
+        by_market = defaultdict(list)
+        for e in sides:
+            by_market[(e["market"], e["team"] if e["market"] == "team_total" else None)].append(e)
+        for group in by_market.values():
+            flagged = [e for e in group if e["bet"]]
+            for e in sorted(flagged, key=lambda e: -e["ev"])[1:]:
+                e.update({"bet": False, "strong": False, "other_side_better": True})
         if sides:
             out[gid] = sides
     return out
