@@ -1174,6 +1174,111 @@ def _context_tag(play, context):
     return "against" if "against" in tags else "with" if tags else None
 
 
+# ---------- Wong teasers: 6-point teaser legs through both 3 and 7 ----------
+# Backtest 2010-2025 (nflverse closing lines, 2026-10-11): Wong legs (favorite -7.5..-8.5 teased to
+# -1.5..-2.5, underdog +1.5..+2.5 teased to +7.5..+8.5) won 75.7% (dogs 77.0%, favs 73.2%; 2018-25 75.0%),
+# and every real 2-team pair from different games went 910-630 = +8.3% ROI at -120. Totals of 49+ were
+# the weak spot (69.6%). This keeps the same record for the current season, on closing lines, so the
+# dashboard shows whether it's still holding. Free -- games.csv only.
+WONG_FAV, WONG_DOG = (-8.5, -7.5), (1.5, 2.5)
+
+
+def wong_leg(spread):
+    return WONG_FAV[0] <= spread <= WONG_FAV[1] or WONG_DOG[0] <= spread <= WONG_DOG[1]
+
+
+def wong_teaser_record(season):
+    games = pd.read_csv(fetch_games_csv())
+    g = games[(games.season.astype(str) == str(season)) & games.result.notna() & games.spread_line.notna()]
+    legs = []
+    for r in g.itertuples():
+        for side in ("home", "away"):
+            spread = -r.spread_line if side == "home" else r.spread_line
+            if not wong_leg(spread):
+                continue
+            m = r.result if side == "home" else -r.result
+            legs.append({"week": int(r.week), "game": f"{r.away_team.lower()}-{r.home_team.lower()}",
+                         "team": r.home_team if side == "home" else r.away_team, "spread": float(spread),
+                         "total": float(r.total_line) if pd.notna(r.total_line) else None,
+                         "result": "win" if m + spread + 6 > 0 else "push" if m + spread + 6 == 0 else "loss"})
+    pw = pl = 0
+    by_week = defaultdict(list)
+    for leg in legs:
+        by_week[leg["week"]].append(leg)
+    for wk in by_week.values():
+        for i in range(len(wk)):
+            for j in range(i + 1, len(wk)):
+                a, b = wk[i], wk[j]
+                if a["game"] == b["game"]:
+                    continue
+                res = [x["result"] for x in (a, b) if x["result"] != "push"]
+                if "loss" in res: pl += 1
+                elif len(res) == 2: pw += 1
+    lw = sum(x["result"] == "win" for x in legs); ll = sum(x["result"] == "loss" for x in legs)
+    roi = lambda price: round((pw * (100 / -price) - pl) / (pw + pl), 4) if pw + pl else None
+    return {"legs": legs, "leg_wins": lw, "leg_losses": ll, "pair_wins": pw, "pair_losses": pl,
+            "roi_120": roi(-120), "roi_130": roi(-130),
+            "backtest": {"legs": "75.7% (2010-25), dogs 77.0%, favs 73.2%", "pairs": "910-630, +8.3% ROI at -120"}}
+
+
+def _fs_value(v):
+    """Firestore REST value -> plain Python."""
+    if "mapValue" in v: return {k: _fs_value(x) for k, x in v["mapValue"].get("fields", {}).items()}
+    if "arrayValue" in v: return [_fs_value(x) for x in v["arrayValue"].get("values", [])]
+    if "integerValue" in v: return int(v["integerValue"])
+    if "doubleValue" in v: return float(v["doubleValue"])
+    if "nullValue" in v: return None
+    return next(iter(v.values()))
+
+
+def grade_parlay_log(season):
+    """Parlays logged from the dashboard's checker (dashboard_state/parlay_log, public read), graded on
+    nflverse results matched by season + week + game. A pushed leg drops out, as books grade it; the
+    reduced payout isn't known, so those parlays are counted as 'reduced' and left out of units."""
+    import urllib.request
+    url = "https://firestore.googleapis.com/v1/projects/stock-model-42fb2/databases/(default)/documents/dashboard_state/parlay_log"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            log = _fs_value(json.loads(resp.read())["fields"]["value"]) or []
+    except Exception as e:
+        print(f"  (parlay log: nothing to grade -- {e})")
+        return None
+    games = pd.read_csv(fetch_games_csv())
+    g = games[games.result.notna()]
+    by = {(int(r.season), int(r.week), f"{r.away_team.lower()}-{r.home_team.lower()}"): r for r in g.itertuples()}
+    results, w, l, red, units, evs = {}, 0, 0, 0, 0.0, []
+    for p in log:
+        if any(int(x.get("season") or 0) != int(season) for x in p["legs"]):
+            continue
+        evs.append(p.get("ev") or 0)
+        legs = []
+        for x in p["legs"]:
+            r = by.get((int(x["season"]), int(x["week"]), x["game"]))
+            if r is None:
+                legs = None; break
+            if x["kind"] == "spread":
+                m = r.result if x["team"] == r.home_team else -r.result
+                d = m + x["line"]
+            elif x["kind"] == "total":
+                d = (r.home_score + r.away_score - x["line"]) * (1 if x["side"] == "over" else -1)
+            else:
+                pts = r.home_score if x["team"] == r.home_team else r.away_score
+                d = (pts - x["line"]) * (1 if x["side"] == "over" else -1)
+            legs.append("win" if d > 0 else "loss" if d < 0 else "push")
+        if legs is None:
+            continue
+        res = "loss" if "loss" in legs else "reduced" if "push" in legs else "win"
+        results[p["id"]] = res
+        if res == "win":
+            w += 1; units += _payout(p["price"], p.get("book") or None)
+        elif res == "loss":
+            l += 1; units -= 1
+        else:
+            red += 1
+    return {"logged": len(evs), "wins": w, "losses": l, "reduced": red, "units": round(units, 2),
+            "avg_ev": round(float(np.mean(evs)), 4) if evs else None, "results": results}
+
+
 # ---------- +EV play log: every flagged offer, graded against the close and the final score ----------
 # Every +EV offer (best book AND every "also" book) is logged the first time a pull sees it, at the price
 # it was first available -- what you'd have gotten by betting it then. After the game: win/loss/push,
@@ -2873,8 +2978,13 @@ if __name__ == "__main__":
         # +EV plays: log this pull's, grade any whose game is final (see log_ev_plays/grade_ev_log)
         log_ev_plays(fdb, SEASON, WEEK, games_out)
         ev_plays = grade_ev_log(fdb, SEASON, WEEK)
+        teasers = wong_teaser_record(SEASON)
+        print(f"  Wong teasers {SEASON}: legs {teasers['leg_wins']}-{teasers['leg_losses']}, "
+              f"2-team pairs {teasers['pair_wins']}-{teasers['pair_losses']}")
+        parlays = grade_parlay_log(SEASON)
         fdb.collection("model_season_record").document("current").set({
-            **record, "ev_plays": ev_plays, "updated_at": firestore.SERVER_TIMESTAMP,
+            **record, "ev_plays": ev_plays, "teasers": teasers, "parlays": parlays,
+            "updated_at": firestore.SERVER_TIMESTAMP,
         })
         print(f"\n--- MODEL SEASON RECORD: {record['wins']}-{record['losses']}"
               f"{'-'+str(record['pushes']) if record['pushes'] else ''} ATS"

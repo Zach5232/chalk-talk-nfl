@@ -281,6 +281,8 @@
       </label>
       <span style="flex-basis:100%;font-size:11px;">Saved only in this browser on this device -- never uploaded, so nobody else sees it.</span>
     </div>
+    <div id="teaser-finder" style="margin-bottom:12px;"></div>
+    <div id="parlay-builder" style="margin-bottom:16px;"></div>
     <div id="games-list"></div>
   </div>
 
@@ -1699,9 +1701,204 @@ function renderNextOddsPull(){
   const fmt = d => d.toLocaleString('en-US', {timeZone:'America/New_York', weekday:'short', hour:'numeric', minute:'2-digit'});
   el.innerHTML = `Next odds pull: <b style="color:var(--chalk);">${fmt(next[0].d)} ET</b> (${next[0].what}) &middot; then ${fmt(next[1].d)} ET. Scheduled runs can start 5-20 min late; run it manually for anything sooner.`;
 }
+// ---- Wong teasers -------------------------------------------------------------------------------
+// 6-point teaser legs through both 3 and 7: favorite -7.5..-8.5 -> -1.5..-2.5, underdog +1.5..+2.5 ->
+// +7.5..+8.5. 2010-2025 closing lines (pipeline wong_teaser_record + the 2026-10-11 backtest): legs 75.7%
+// (dogs 77.0%, favs 73.2%), real 2-team pairs from different games 910-630 = +8.3% ROI at -120; totals
+// of 49+ only 69.6%, so those are skipped. Pair win chance = product of the two leg rates (different
+// games are independent -- measured same-week correlation ~0).
+const WONG_RATE = {dog: 0.770, fav: 0.732}, WONG_MAX_TOTAL = 48.5;
+let TEASER_PRICE = -120;
+try { const t = parseFloat(localStorage.getItem('chalktalk_teaser_price')); if(t <= -100 || t >= 100) TEASER_PRICE = t; } catch(e) {}
+function wongLegs(){
+  const legs = [];
+  for(const g of GAMES.filter(g => !finalScoreFor(g))){
+    const tot = shopSides(g, 'total').find(e => e.side === 'over');
+    for(const e of shopSides(g, 'spread')){
+      const L = e.consensus_line, fav = L >= -8.5 && L <= -7.5, dog = L >= 1.5 && L <= 2.5;
+      if(!fav && !dog) continue;
+      legs.push({game: g.id, team: e.team, line: L, teased: L + 6, kind: fav ? 'fav' : 'dog',
+                 total: tot ? tot.consensus_line : null, p: WONG_RATE[fav ? 'fav' : 'dog'],
+                 skip: tot && tot.consensus_line > WONG_MAX_TOTAL});
+    }
+  }
+  return legs;
+}
+function setTeaserPrice(v){
+  const r = parseOddsInput(v);
+  if(r && Math.abs(r.american) >= 100){ TEASER_PRICE = r.american; try { localStorage.setItem('chalktalk_teaser_price', String(r.american)); } catch(e) {} }
+  renderTeaserFinder(false);
+}
+function renderTeaserFinder(rebuild = true){
+  const el = document.getElementById('teaser-finder');
+  if(!el) return;
+  const legs = wongLegs(), good = legs.filter(l => !l.skip);
+  const pay = netPayout(TEASER_PRICE, '');
+  const pairs = [];
+  for(let i = 0; i < good.length; i++) for(let j = i + 1; j < good.length; j++){
+    const a = good[i], b = good[j];
+    if(a.game === b.game) continue;
+    const p = a.p * b.p, ev = p * pay - (1 - p);
+    pairs.push({a, b, p, ev, stake: kellyStake(ev, TEASER_PRICE, '')});
+  }
+  pairs.sort((x, y) => y.p - x.p);
+  const rec = (MODEL_SEASON_RECORD || {}).teasers;
+  const recLine = rec ? `This season (closing lines): legs ${rec.leg_wins}-${rec.leg_losses}, 2-team pairs ${rec.pair_wins}-${rec.pair_losses}${rec.roi_120 != null ? ` (${rec.roi_120 >= 0 ? '+' : ''}${(rec.roi_120*100).toFixed(1)}% at -120)` : ''} &middot; ` : '';
+  const legRow = l => `<div style="padding:2px 0;${l.skip ? 'opacity:.5;' : ''}">${l.team} ${fmtPts(l.line)} &rarr; <b>${fmtPts(l.teased)}</b>
+      <span style="color:var(--sage);">(${l.kind === 'dog' ? 'underdog' : 'favorite'} leg, ~${(l.p*100).toFixed(0)}%${l.total != null ? `, total ${l.total}` : ''}${l.skip ? ' -- skip: total 49+' : ''})</span></div>`;
+  const stakeStr = k => k > 0 ? (STAKE_SETTINGS.bankroll ? `$${(STAKE_SETTINGS.bankroll*k/100).toFixed(2)}` : `${k.toFixed(2)}%`) : '&mdash;';
+  const pairRow = x => `<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-top:1px solid var(--line);">
+      <span>${x.a.team} ${fmtPts(x.a.teased)} + ${x.b.team} ${fmtPts(x.b.teased)}</span>
+      <span style="white-space:nowrap;color:${x.ev > 0 ? 'var(--good)' : 'var(--alert)'};">${(x.p*100).toFixed(1)}% &middot; EV ${x.ev >= 0 ? '+' : ''}${(x.ev*100).toFixed(1)}% &middot; ${stakeStr(x.stake)}</span></div>`;
+  const inp = 'width:70px;padding:4px 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--chalk);font-size:13px;';
+  const wasOpen = el.querySelector('details') ? el.querySelector('details').open : false;
+  el.innerHTML = `
+    <details ${wasOpen ? 'open' : ''} style="background:var(--panel);border-radius:10px;padding:10px 12px;">
+      <summary class="section-label" style="cursor:pointer;margin:0;">Wong teasers &middot; ${good.length} leg${good.length === 1 ? '' : 's'} this week</summary>
+      <div style="font-size:11.5px;color:var(--sage);margin:8px 0;">6-point teasers through 3 and 7: favorites -7.5 to -8.5, underdogs +1.5 to +2.5.
+        ${recLine}2010-25: legs 75.7%, 2-team pairs +8.3% at -120. Lines are from the last odds pull -- check your book still has the leg in range, and price matters: -120 good, -130 thin, -140 no edge.</div>
+      <div style="font-size:12.5px;">${legs.length ? legs.map(legRow).join('') : '<div class="empty-note">No Wong legs on the board right now.</div>'}</div>
+      ${pairs.length ? `
+      <div style="display:flex;align-items:center;gap:8px;margin:10px 0 4px;font-size:12px;color:var(--sage);">
+        2-team teaser price <button type="button" class="btn" style="padding:3px 8px;font-size:12px;" onclick="(i=>{i.value=String(-parseFloat(i.value)||'');setTeaserPrice(i.value)})(this.nextElementSibling)">&plusmn;</button>
+        <input type="text" inputmode="decimal" style="${inp}" value="${TEASER_PRICE}" onchange="setTeaserPrice(this.value)">
+        <span>(break-even ${(Math.sqrt(1/(1+pay))*100).toFixed(1)}% per leg)</span></div>
+      <div style="font-size:12.5px;">${pairs.map(pairRow).join('')}</div>` : ''}
+    </details>`;
+}
+
+// ---- Parlay / same-game parlay / boost checker -----------------------------------------------------
+// Each leg's fair win chance comes from the same fair-line pricing as "check a price" (pushes left out).
+// Different games multiply (same-week correlation between games measured ~0). Two legs from the SAME game
+// use the correlation measured on 2010-2025 closing lines + results (pipeline backtest 2026-10-11):
+const LEG_RHO = {'fav_cover|over': 0.0, 'fav_cover|fav_tt': 0.477, 'dog_tt|fav_cover': -0.512,
+                 'fav_tt|over': 0.549, 'dog_tt|over': 0.519, 'dog_tt|fav_tt': 0.047};
+let PARLAY_LEGS = [];
+try { PARLAY_LEGS = JSON.parse(localStorage.getItem('chalktalk_parlay_legs') || '[]'); } catch(e) {}
+const saveParlayLegs = () => { try { localStorage.setItem('chalktalk_parlay_legs', JSON.stringify(PARLAY_LEGS)); } catch(e) {} };
+function legEvent(g, s){
+  const spH = shopSides(g, 'spread').find(e => e.side === 'home');
+  const fav = spH && spH.consensus_line > 0 ? g.away : g.home;
+  if(s.kind === 'spread') return {ev: 'fav_cover', sign: s.best.team === fav ? 1 : -1};
+  if(s.kind === 'total') return {ev: 'over', sign: s.side === 'over' ? 1 : -1};
+  return {ev: s.best.team === fav ? 'fav_tt' : 'dog_tt', sign: s.side === 'over' ? 1 : -1};
+}
+function legProb(leg){
+  const g = g_byId(leg.game); if(!g || !KEY_NUMBERS) return null;
+  const s = buildCheckSides(g)[leg.idx]; if(!s) return null;
+  const [po, pu] = marketProbs(s.kind, s.anchor, s.q, s.toMarket(leg.line));
+  const [w, l] = s.side === 'over' ? [po, pu] : [pu, po];
+  return {p: w / Math.max(w + l, 1e-9), s, g};
+}
+function parlayProb(legs){
+  const byGame = {};
+  for(const leg of legs){ const x = legProb(leg); if(!x) return null; (byGame[leg.game] = byGame[leg.game] || []).push({...x, ...legEvent(x.g, x.s)}); }
+  let P = 1, indep = 1, warn = '';
+  for(const grp of Object.values(byGame)){
+    let gp = grp.reduce((a, x) => a * x.p, 1);
+    indep *= gp;
+    for(let i = 0; i < grp.length; i++) for(let j = i + 1; j < grp.length; j++){
+      const a = grp[i], b = grp[j];
+      let joint;
+      if(a.ev === b.ev) joint = a.sign === b.sign ? Math.min(a.p, b.p) : 0;       // same bet twice / contradiction
+      else {
+        const rho = (LEG_RHO[[a.ev, b.ev].sort().join('|')] || 0) * a.sign * b.sign;
+        joint = Math.min(Math.max(a.p * b.p + rho * Math.sqrt(a.p*(1-a.p)*b.p*(1-b.p)), 0), Math.min(a.p, b.p));
+      }
+      gp *= joint / (a.p * b.p);       // exact for 2 legs; an approximation for 3+ from one game
+    }
+    if(grp.length > 2) warn = 'Three or more legs from one game: the correlation is approximated pairwise.';
+    P *= gp;
+  }
+  return {P, indep, warn};
+}
+function renderParlayBuilder(){
+  const el = document.getElementById('parlay-builder');
+  if(!el) return;
+  const games = GAMES.filter(g => !finalScoreFor(g) && (g.shop||[]).length);
+  const wasOpen = el.querySelector('details') ? el.querySelector('details').open : false;
+  const inp = 'padding:5px 6px;border-radius:6px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:13px;';
+  el.innerHTML = `
+    <details ${wasOpen || PARLAY_LEGS.length ? 'open' : ''} style="background:var(--panel);border-radius:10px;padding:10px 12px;" ontoggle="if(this.open) updateParlay()">
+      <summary class="section-label" style="cursor:pointer;margin:0;">Parlay / boost checker${PARLAY_LEGS.length ? ` &middot; ${PARLAY_LEGS.length} leg${PARLAY_LEGS.length>1?'s':''}` : ''}</summary>
+      <div style="font-size:11.5px;color:var(--sage);margin:8px 0;">Add legs, then enter the parlay price or boost the book offers. Fair odds use each leg's fair line; two legs from the same game use the correlation measured on 2010-25 results (team totals move with the game total and the spread; spread and total don't).</div>
+      <div id="parlay-legs" style="font-size:12.5px;"></div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+        <select id="pl-game" style="${inp}" onchange="fillParlaySides()">${games.map(g => `<option value="${g.id}">${g.away} @ ${g.home}</option>`).join('')}</select>
+        <select id="pl-side" style="${inp}" onchange="fillParlayLine()"></select>
+        <span style="display:inline-flex;gap:3px;"><button type="button" class="btn" style="padding:3px 8px;font-size:12px;" onclick="flipSign('pl-line')">&plusmn;</button>
+          <input id="pl-line" type="text" inputmode="decimal" style="${inp}width:56px;" aria-label="Line"></span>
+        <button class="btn" onclick="addParlayLeg()">Add leg</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px;font-size:12px;color:var(--sage);">
+        Parlay price <span style="display:inline-flex;gap:3px;"><button type="button" class="btn" style="padding:3px 8px;font-size:12px;" onclick="flipSign('pl-price','')">&plusmn;</button>
+        <input id="pl-price" type="text" inputmode="decimal" placeholder="+264 / 2.5x" style="${inp}width:76px;" oninput="updateParlay()"></span>
+        <select id="pl-book" style="${inp}" onchange="updateParlay()"><option value="">Sportsbook</option><option value="novig">Novig</option><option value="kalshi">Kalshi</option><option value="polymarket">Polymarket</option><option value="prophetx">ProphetX</option></select>
+      </div>
+      <div id="parlay-out" style="margin-top:8px;font-size:12.5px;line-height:1.5;"></div>
+    </details>`;
+  fillParlaySides();
+  updateParlay();
+}
+function fillParlaySides(){
+  const gid = (document.getElementById('pl-game') || {}).value, g = gid && g_byId(gid);
+  const sel = document.getElementById('pl-side'); if(!sel) return;
+  sel.innerHTML = g ? buildCheckSides(g).map((s, i) => `<option value="${i}">${s.label}</option>`).join('') : '';
+  fillParlayLine();
+}
+function fillParlayLine(){
+  const gid = document.getElementById('pl-game').value, g = gid && g_byId(gid), i = +document.getElementById('pl-side').value;
+  const s = g && buildCheckSides(g)[i];
+  if(s) document.getElementById('pl-line').value = s.best.consensus_line ?? s.best.line;
+}
+function addParlayLeg(){
+  const gid = document.getElementById('pl-game').value, g = g_byId(gid), idx = +document.getElementById('pl-side').value;
+  const line = parseSigned(document.getElementById('pl-line').value), s = g && buildCheckSides(g)[idx];
+  if(!s || isNaN(line)) return;
+  PARLAY_LEGS.push({game: gid, idx, line, label: `${s.label.replace(' spread','')} ${s.kind === 'spread' ? fmtPts(line) : line}`,
+                    kind: s.kind, side: s.side, team: s.best.team || null, week: g.week, season: g.season});
+  saveParlayLegs(); updateParlay();
+}
+function removeParlayLeg(i){ PARLAY_LEGS.splice(i, 1); saveParlayLegs(); updateParlay(); }
+async function updateParlay(){
+  const legsEl = document.getElementById('parlay-legs'), out = document.getElementById('parlay-out');
+  if(!legsEl) return;
+  try { await loadKeyNumbers(); } catch(e) { out.textContent = "Couldn't load the key-number tables -- try refreshing."; return; }
+  PARLAY_LEGS = PARLAY_LEGS.filter(l => g_byId(l.game) && !finalScoreFor(g_byId(l.game)));
+  legsEl.innerHTML = PARLAY_LEGS.map((l, i) => { const x = legProb(l);
+    return `<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>${l.label} <span style="color:var(--sage);">(${l.game})</span></span>
+      <span>${x ? (x.p*100).toFixed(1)+'%' : '?'} <button class="btn" style="padding:1px 7px;font-size:11px;" onclick="removeParlayLeg(${i})">&times;</button></span></div>`; }).join('')
+    || '<div class="empty-note">No legs yet.</div>';
+  if(PARLAY_LEGS.length < 2){ out.innerHTML = ''; return; }
+  const r = parlayProb(PARLAY_LEGS); if(!r){ out.textContent = ''; return; }
+  const fairOdds = r.P > 0 ? oddsFromProb(r.P) : null;
+  const priceIn = parseOddsInput(document.getElementById('pl-price').value), book = document.getElementById('pl-book').value;
+  let evLine = '<span style="color:var(--sage);">Enter the book\'s parlay price or boost to see the EV.</span>';
+  if(priceIn && Math.abs(priceIn.american) >= 100){
+    const ev = r.P * netPayout(priceIn.american, book) - (1 - r.P), k = kellyStake(ev, priceIn.american, book);
+    const stake = k > 0 ? (STAKE_SETTINGS.bankroll ? `$${(STAKE_SETTINGS.bankroll*k/100).toFixed(2)} (${k.toFixed(2)}%)` : `${k.toFixed(2)}%`) : '&mdash;';
+    evLine = `${priceIn.label ? priceIn.label + ' = ' : ''}${fmtOdds(priceIn.american)}: <b style="color:${ev > 0 ? 'var(--good)' : 'var(--alert)'};">EV ${ev>=0?'+':''}${(ev*100).toFixed(1)}%</b> &middot; stake ${stake}
+      <button class="btn" style="padding:2px 8px;font-size:11px;margin-left:6px;" onclick="logParlay(${priceIn.american}, '${book}', ${r.P}, ${ev})">Log it</button>`;
+  }
+  const corrNote = Math.abs(r.P - r.indep) > 0.001 ? ` &middot; <span style="color:var(--sage);">${r.P > r.indep ? 'legs move together' : 'legs work against each other'}: ${(r.indep*100).toFixed(1)}% if unrelated</span>` : '';
+  out.innerHTML = `Fair chance <b>${(r.P*100).toFixed(1)}%</b> = fair odds <b>${fmtOdds(fairOdds)}</b>${corrNote}<br>${evLine}${r.warn ? `<br><span style="color:var(--sage);">${r.warn}</span>` : ''}`;
+}
+// Logged parlays live in dashboard_state/parlay_log (the dashboard's shared, public-read state -- legs
+// and price only, never a bankroll) and are graded by the pipeline (grade_parlay_log) against nflverse
+// results by season + week, so a repeat matchup from an earlier season can't be mistaken for this one.
+function logParlay(price, book, fairP, ev){
+  const log = [...getState('parlay_log', [])];
+  log.push({id: Date.now().toString(36), at: new Date().toISOString(), price, book, fair_prob: +fairP.toFixed(4), ev: +ev.toFixed(4),
+            legs: PARLAY_LEGS.map(({game, kind, side, team, line, label, week, season}) => ({game, kind, side, team, line, label, week, season}))});
+  setState('parlay_log', log);
+  document.getElementById('parlay-out').insertAdjacentHTML('beforeend', '<br><span style="color:var(--good);">Logged -- graded on Results after the games.</span>');
+}
+
 function renderGamesList(){
   initStakeSettings();
   renderNextOddsPull();
+  renderTeaserFinder();
+  renderParlayBuilder();
   renderQbWatch();
   const el = document.getElementById('games-list');
   // Spread Zone is for games still to be decided -- once real, a game moves to Results'
@@ -1881,7 +2078,8 @@ function renderPriceCheck(g){
 function flipSign(inputId, id){
   const el = document.getElementById(inputId), v = el.value.trim();
   el.value = v.startsWith('-') ? v.slice(1) : (v.startsWith('+') ? '-' + v.slice(1) : '-' + v);
-  checkPrice(id);
+  if(id) checkPrice(id);
+  else if(inputId.startsWith('pl-')) updateParlay();
 }
 // accepts "-115", "+105", "105", "−115" (typographic minus); anything else = NaN
 const parseSigned = v => parseFloat(String(v).trim().replace(/^[−–]/, '-').replace(/^\+/, ''));
@@ -4591,7 +4789,25 @@ function renderModelSeasonRecord(){
       <div class="empty-note">Not graded yet -- accumulates from here forward.</div>
     </div>`;
 
-  el.innerHTML = spreadSection + totalSection + teamTotalSection + evPlaysSection(r.ev_plays);
+  el.innerHTML = spreadSection + totalSection + teamTotalSection + evPlaysSection(r.ev_plays) + teaserParlaySection(r.teasers, r.parlays);
+}
+
+// Wong teaser record this season (pipeline wong_teaser_record, closing lines) and the parlays logged
+// from Spread Zone's checker (pipeline grade_parlay_log).
+function teaserParlaySection(t, pl){
+  const pct = (w, l) => w + l ? ` (${(100*w/(w+l)).toFixed(1)}%)` : '';
+  const roi = v => v == null ? '&mdash;' : `${v>=0?'+':''}${(v*100).toFixed(1)}%`;
+  const teaser = t ? `
+    <div style="font-size:12.5px;line-height:1.6;">Wong legs <b>${t.leg_wins}-${t.leg_losses}</b>${pct(t.leg_wins, t.leg_losses)} &middot;
+      every 2-team pair <b>${t.pair_wins}-${t.pair_losses}</b>${pct(t.pair_wins, t.pair_losses)} &middot; ROI ${roi(t.roi_120)} at -120, ${roi(t.roi_130)} at -130</div>
+    <div style="font-size:11.5px;color:var(--sage);">Closing lines, every qualifying leg whether bet or not. Break-even per leg: 73.9% at -120. 2010-25: legs 75.7%, pairs +8.3% at -120.</div>`
+    : '<div class="empty-note">Fills in on the next pipeline run.</div>';
+  const parl = pl && pl.logged ? `
+    <div style="font-size:12.5px;line-height:1.6;">${pl.logged} logged &middot; <b>${pl.wins}-${pl.losses}</b>${pl.reduced ? ` (${pl.reduced} reduced by a push)` : ''} &middot;
+      <span style="color:${pl.units>=0?'var(--good)':'var(--alert)'};">${pl.units>=0?'+':''}${pl.units} units</span> &middot; avg EV when logged ${roi(pl.avg_ev)}</div>`
+    : '<div class="empty-note">No parlays logged yet -- use "Log it" in Spread Zone\'s parlay checker.</div>';
+  return `<div style="padding:8px 0;border-top:1px solid var(--line);"><div class="section-label">Wong teasers (this season)</div>${teaser}</div>
+    <div style="padding:8px 0;border-top:1px solid var(--line);"><div class="section-label">Logged parlays</div>${parl}</div>`;
 }
 
 // +EV play tracking (grade_ev_log in the pipeline): every +EV offer the line shopper flagged, at the
