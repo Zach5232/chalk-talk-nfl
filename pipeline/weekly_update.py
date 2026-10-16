@@ -2656,10 +2656,28 @@ if __name__ == "__main__":
         saved_books, saved_totals, saved_tt = load_saved_odds(
             os.environ.get("FIREBASE_CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
             SEASON, WEEK, ratings["games_this_week"])
+    # Smart books: every event gets one full 13-book scan; later pulls use Pinnacle + the 9 books most
+    # often near the best price (half the credits). State lives in Firestore odds_state/nfl.
+    import odds_books
+    _cred = os.environ.get("FIREBASE_CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    _state_doc = (get_firestore_client(_cred).collection("odds_state").document("nfl")
+                  if (_FIREBASE_AVAILABLE and _cred and MODE == "live") else None)
+    odds_state = (_state_doc.get().to_dict() or {}) if _state_doc else {}
+    scan_mode = "full"
+    if MODE == "live" and API_KEY and (ODDS & {"spreads", "totals", "team_totals"}):
+        try:
+            scan_mode, ODDS_BOOKS, scan_why = odds_books.choose(
+                odds_state, odds_books.upcoming_event_ids("americanfootball_nfl", API_KEY), SHARP_BOOK, BET_BOOKS,
+                force_full=os.environ.get("CHALKTALK_FULL_SCAN", "").lower() == "true")
+            print(f"--- BOOKS: {scan_mode} scan, {len(ODDS_BOOKS)} books ({scan_why}) ---")
+        except Exception as e:  # noqa: BLE001 -- fall back to every book
+            print(f"--- BOOKS: full scan (selection failed: {e}) ---")
     # spreads and game totals ride the same all-games call (1 credit per market)
     bulk_markets = [m for m in ("spreads", "totals") if m in ODDS]
     odds_data = (pull_week_odds(MODE, API_KEY, HIST_DATE, markets=",".join(bulk_markets), bookmakers=ODDS_BOOKS)
                  if bulk_markets else [])
+    if scan_mode == "full" and odds_data:
+        odds_state = odds_books.record_full_scan(odds_state, odds_data, BET_BOOKS)
     if "spreads" in ODDS:
         books = build_books_for_week(odds_data, ratings["games_this_week"])
     else:
@@ -2820,6 +2838,30 @@ if __name__ == "__main__":
             for c in items:
                 print(f"  {gid:9s} {c['text']} -> leans {c['team'] + ' TT ' if c.get('team') else ''}{c['lean']}")
     flagged = [(gid, e) for gid, sides in shop.items() for e in sides if e["bet"]]
+    # Discord: every starred BET (past the strong bar: +2% spreads/totals, +3% team totals) posts once to the
+    # team channel, and again only if its price improves.
+    _kick = {f"{r.away_team.lower()}-{r.home_team.lower()}": (r.gameday, r.gametime)
+             for r in ratings["games_this_week"].itertuples()}
+    plays = []
+    for gid, e in flagged:
+        if not e.get("strong"):
+            continue
+        day, tm = _kick.get(gid, (None, None))
+        when = (pd.Timestamp(f"{day} {tm}").strftime("%a %-I:%M %p ET") if day and isinstance(tm, str) else "")
+        what = {"spread": f"{e['team']} {e['line']:+g}", "total": f"{e['side'].title()} {e['line']:g}",
+                "team_total": f"{e['team']} TT {e['side'].title()} {e['line']:g}"}[e["market"]]
+        also = ", ".join(f"{odds_books.BOOK_NAMES.get(a['book'], a['book'])} {a['odds']:+d}" for a in (e.get("also") or [])[:3])
+        plays.append({"key": f"{SEASON}-wk{WEEK}:{gid}:{e['market']}:{e.get('team')}:{e['side']}:{e['line']}",
+                      "dec": 1 + (e["odds"] / 100 if e["odds"] > 0 else 100 / -e["odds"]),
+                      "text": (f"🏈 **NFL** · {gid.upper().replace('-', ' @ ')}" + (f" · {when}" if when else "") + "\n"
+                               f"★ **BET {what} {e['odds']:+d}** @ {odds_books.BOOK_NAMES.get(e['book'], e['book'])}"
+                               f" · EV {e['ev']:+.1%} · fair {e['consensus_fair_odds']:+d} ({e['fair_source']})"
+                               + (f"\nAlso +EV: {also}" if also else ""))})
+    if MODE == "live" and plays:
+        odds_state = odds_books.post_plays(os.environ.get("DISCORD_WEBHOOK_URL", ""), plays, odds_state)
+    if _state_doc:
+        odds_state["sent"] = dict(list(odds_state.get("sent", {}).items())[-500:])
+        _state_doc.set(odds_state)
     print(f"\n--- LINE SHOPPING: {sum(len(v) for v in shop.values())} sides priced against the fair line, "
           f"{len(flagged)} +EV ({sum(1 for _, e in flagged if e['strong'])} past the strong bar) ---")
     for gid, e in sorted(flagged, key=lambda x: -x[1]["ev"])[:25]:
