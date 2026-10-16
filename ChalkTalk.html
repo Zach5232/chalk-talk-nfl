@@ -2197,14 +2197,23 @@ function renderFairLines(g){
     const pct = `${k < 0.01 ? '&lt;0.01' : k.toFixed(2)}%`;
     return STAKE_SETTINGS.bankroll ? ` &middot; Stake $${(STAKE_SETTINGS.bankroll * k / 100).toFixed(2)} (${pct})` : ` &middot; Stake ${pct}`;
   };
+  // Tiers: ★ BET clears the bar against the consensus fair line AND Pinnacle alone (what the Discord channel
+  // gets); LEAN clears it against only one of them; +EV is positive but under the bar.
+  const tier = e => e.strong ? {tag:'&#9733; BET', bg:'rgba(95,191,122,0.12)', fg:'var(--good)'}
+    : e.lean ? {tag:`LEAN (${e.lean_by} only)`, bg:'rgba(91,155,245,0.13)', fg:'var(--gold)'}
+    : {tag:'+EV', bg:'rgba(255,255,255,0.05)', fg:'var(--sage)'};
   const betHtml = bets.map(e => {
     const also = e.also || [];
-    const head = `${e.strong?'&#9733; ':''}BET ${shopSideLabel(g,e)} ${oddsWithBookPrice(e.odds, e.book)} @ ${bookLabel(e.book)} &middot; ${evTxt(e.ev)} EV${stakeTxt(e)}`;
-    const box = 'margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(95,191,122,0.12);color:var(--good);font-size:12px;font-weight:600;';
-    if(!also.length) return `<div style="${box}">${head}</div>`;
+    const t = tier(e);
+    const pin = e.ev_pinnacle != null ? ` &middot; Pinnacle ${evTxt(e.ev_pinnacle)}` : '';
+    const goodTo = e.strong && e.target_odds != null
+      ? `<div style="font-weight:500;margin-top:2px;">Good to ${fmtOdds(e.target_odds)}${e.target_ev != null ? ` &middot; ${evTxt(e.target_ev)} EV${stakeTxt({ev:e.target_ev, odds:e.target_odds, book:''})}` : ''}</div>` : '';
+    const head = `${t.tag} ${shopSideLabel(g,e)} ${oddsWithBookPrice(e.odds, e.book)} @ ${bookLabel(e.book)} &middot; ${evTxt(e.ev)} EV${pin}${stakeTxt(e)}`;
+    const box = `margin-top:6px;padding:6px 8px;border-radius:6px;background:${t.bg};color:${t.fg};font-size:12px;font-weight:600;`;
+    if(!also.length) return `<div style="${box}">${head}${goodTo}</div>`;
     return `
     <details style="${box}" onclick="event.stopPropagation()">
-      <summary style="cursor:pointer;">${head} <span style="opacity:.75;font-weight:500;">&middot; +${also.length} more book${also.length>1?'s':''}</span></summary>
+      <summary style="cursor:pointer;">${head} <span style="opacity:.75;font-weight:500;">&middot; +${also.length} more book${also.length>1?'s':''}</span>${goodTo}</summary>
       <div style="margin-top:6px;font-weight:500;">
         ${also.map(o => `
           <div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;">
@@ -2244,7 +2253,7 @@ function renderFairLinesDetail(g){
     <div class="section-label">Fair lines &middot; shop for "bet at" or better</div>
     <div class="table-wrap">
     <table class="books-table">
-      <thead><tr><th>Side</th><th>Fair</th><th>&#9733; at</th><th>Best offer</th><th>EV</th></tr></thead>
+      <thead><tr><th>Side</th><th>Fair</th><th>&#9733; at</th><th>Best offer</th><th>EV</th><th>Pinnacle</th></tr></thead>
       <tbody>
         ${rows.map(e => {
           const fairSide = e.market==='spread' ? `${e.team} ${fmtPts(e.consensus_line)}`
@@ -2255,6 +2264,7 @@ function renderFairLinesDetail(g){
             <td>${fmtOdds(e.target_odds)}</td>
             <td class="${e.bet?'best':''}">${shopSideLabel(g,e)} ${oddsWithBookPrice(e.odds, e.book)} ${bookLabel(e.book)}</td>
             <td style="color:${e.ev>=0?'var(--good)':'var(--sage)'};">${e.ev>=0?'+':''}${(e.ev*100).toFixed(1)}%</td>
+            <td style="color:${(e.ev_pinnacle||0)>=0?'var(--good)':'var(--sage)'};">${e.ev_pinnacle!=null ? `${e.ev_pinnacle>=0?'+':''}${(e.ev_pinnacle*100).toFixed(1)}%` : '&ndash;'}</td>
           </tr>`;
         }).join('')}
       </tbody>
@@ -2262,7 +2272,7 @@ function renderFairLinesDetail(g){
     </div>
     ${(() => { const t = g.shop.find(e=>e.market==='total' && e.model_line!=null && e.side==='over');
       return t ? `<p class="empty-note" style="margin-top:6px;">Our total: ${t.model_line.toFixed(1)} (fair O ${t.consensus_line} ${fmtOdds(t.model_consensus_fair_odds)}). Second opinion only -- the model was ~52-53% on over/unders in backtests, so the bet flag uses the market's fair price, not ours.</p>` : ''; })()}
-    <p class="empty-note" style="margin-top:6px;">Fair = Pinnacle's line with the vig removed (the sharp reference -- never flagged as a bet), or the books' consensus when Pinnacle has no line${(() => { const src = [...new Set(g.shop.map(e=>e.fair_source).filter(Boolean))]; return src.length ? ` (this game: ${src.join(' / ')})` : ''; })()}. Kalshi, Polymarket and ProphetX EV is after their fees. Every +EV offer gets a green BET box; &#9733; = past the stronger bar (+2% spreads/totals, +3% team totals), and "&#9733; at" is the worst price on that exact line that still clears it. Other lines are priced using how often real games land on each number (key numbers).</p>`;
+    <p class="empty-note" style="margin-top:6px;">Fair = a consensus of every book: each book's price with the vig removed, moved to the line being priced, then averaged with Pinnacle counted 3x, the exchanges (Novig, ProphetX, Kalshi, Polymarket) 2x and the other books 1x. The book being checked is always left out of its own fair price${(() => { const src = [...new Set(g.shop.map(e=>e.fair_source).filter(Boolean))]; return src.length ? ` (this game: ${src.join(' / ')})` : ''; })()}. Kalshi, Polymarket and ProphetX EV is after their fees. &#9733; BET (green) = past the bar (+2% spreads/totals, +3% team totals) against the consensus <b>and</b> against Pinnacle alone -- these are the plays posted to Discord. LEAN (blue) = past the bar against only one of the two. +EV (grey) = positive but under the bar. "&#9733; at" / "Good to" is the worst price on that exact line that still clears both. Stake = your Kelly fraction of the EV (1/8 by default, capped at 2%). Other lines are priced using how often real games land on each number (key numbers).</p>`;
 }
 
 function renderGameCard(g){
