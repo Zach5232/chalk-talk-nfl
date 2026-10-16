@@ -79,8 +79,9 @@ def what(p):
 
 def _bet_line(p):
     tgt = f" · good to {_odds(p['target_odds'])}" if p.get("target_odds") is not None else ""
+    pin = f" · Pinnacle EV {p['ev_pinnacle']:+.1%}" if p.get("ev_pinnacle") is not None else ""
     return (f"★ **{what(p)} {_odds(p['odds'])}** @ {BOOK_NAMES.get(p['book'], p['book'])} · EV {p['ev']:+.1%}"
-            f" · fair {_odds(p['fair_odds'])} ({p['fair_source']}){tgt}")
+            f" · fair {_odds(p['fair_odds'])} ({p['fair_source']}){pin}{tgt}")
 
 
 def _wk(week_id):

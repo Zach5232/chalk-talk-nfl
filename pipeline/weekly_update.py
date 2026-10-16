@@ -905,8 +905,11 @@ def fetch_team_totals_for_week(api_key, week_games):
 
 
 # ---------- Line shopping: fair line from every book, then which book's offer actually beats it ----------
-# The fair line is the market's own consensus (each book's over/under devigged, then the single center
-# that best fits all of them) -- NOT our model's projection. The backtests (2026-10-10, 2021-2025
+# The fair line is the market's own consensus -- NOT our model's projection. Every book is devigged at its
+# own line, moved to the line being priced through the real score distribution, and averaged with weights
+# (CONSENSUS_WEIGHTS: Pinnacle 3, exchanges 2, other books 1), leaving out the book being checked so an
+# outlier can't drag the fair price toward itself. A starred BET has to clear the bar against BOTH that
+# consensus and Pinnacle alone (when Pinnacle has the market); clearing only one is a +EV lean. The backtests (2026-10-10, 2021-2025
 # team totals and 2024-2025 game totals) found the market's closing number more accurate than any
 # version of our model, so the honest reference point for "is this book's offer good" is the market
 # itself. Win probabilities come from real historical scores near that center (2015 on), which is
@@ -916,7 +919,9 @@ SHOP_MIN_EV = 0.0      # show every offer that's +EV at the fair price, however 
 # the stronger bar per market (starred on the card): team totals get a higher one because Pinnacle takes
 # smaller bets there, so its fair price is less reliable than on spreads/game totals
 SHOP_STRONG_EV = {"spread": 0.02, "total": 0.02, "team_total": 0.03}
-SHOP_MIN_BOOKS = 3     # need at least this many books to call a consensus a consensus
+SHOP_MIN_BOOKS = 3     # need at least this many books to price a market at all
+CONSENSUS_MIN_BOOKS = 4  # books (other than the one being checked) needed for a consensus fair line
+CONSENSUS_WEIGHTS = {"pinnacle": 3.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}  # others 1
 _SCORE_HIST = None
 
 
@@ -982,6 +987,40 @@ def _market_pricer(kind, books):
         po = min(max(po, 0.0), 1.0)
         return po, max(1.0 - po - float(pmf.get(line, 0.0)), 0.0)
     return cons, source, price
+
+
+def _book_pricer(kind, b):
+    """One book's own fair view: its devigged price at its line, moved to any other line by the real
+    chance of landing on each number in between. fn(line) -> (p_over, p_under)."""
+    cons = float(b["line"])
+    q = _american_to_prob(b["over"]) / (_american_to_prob(b["over"]) + _american_to_prob(b["under"]))
+    pmf = _pmf(kind, cons)
+    k = pmf.index.values
+    over_c = q * (1 - float(pmf.get(cons, 0.0)))
+
+    def price(line):
+        if line >= cons:
+            po = over_c - float(pmf[(k > cons) & (k <= line)].sum())
+        else:
+            po = over_c + float(pmf[(k > line) & (k <= cons)].sum())
+        po = min(max(po, 0.0), 1.0)
+        return po, max(1.0 - po - float(pmf.get(line, 0.0)), 0.0)
+    return price
+
+
+def _consensus(kind, books):
+    """Weighted consensus over every book's own fair view. Returns (fn(line, without=None) -> (p_over,
+    p_under) or None when fewer than CONSENSUS_MIN_BOOKS books are left, number of books)."""
+    views = [(b["book"], CONSENSUS_WEIGHTS.get(b["book"], 1.0), _book_pricer(kind, b)) for b in books]
+
+    def price(line, without=None):
+        use = [(w, f) for bk, w, f in views if bk != without]
+        if len(use) < CONSENSUS_MIN_BOOKS:
+            return None
+        tw = sum(w for w, _ in use)
+        ps = [(w, f(line)) for w, f in use]
+        return sum(w * p[0] for w, p in ps) / tw, sum(w * p[1] for w, p in ps) / tw
+    return price, len(views)
 
 
 def _payout(odds, book=None):
@@ -1055,10 +1094,34 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
 
         sides = []
         for kind, team, books in markets:
-            cons, source, price = _market_pricer(kind, books)
-            po, pu = price(cons)
+            cons, pin_source, pin_price = _market_pricer(kind, books)
+            has_pin = pin_source == "Pinnacle"
+            cprice, n_cons = _consensus(kind, books)
+            bar = SHOP_STRONG_EV[kind]
+            whole = cprice(cons)
+            if whole is None:  # too few books for a consensus: fall back to the Pinnacle/mode pricer
+                po, pu = pin_price(cons)
+                source = pin_source
+            else:
+                po, pu = whole
+                source = f"consensus of {n_cons} books"
             for side in ("over", "under"):
-                offers = _price_offers(price, books, side)
+                offers = []
+                for b in books:
+                    if b["book"] == SHARP_BOOK:
+                        continue  # a reference, not a place to bet
+                    pay = _payout(b[side], b["book"])
+                    cp = cprice(b["line"], without=b["book"])
+                    if cp is None:
+                        cp = pin_price(b["line"])
+                    win, loss = (cp[0], cp[1]) if side == "over" else (cp[1], cp[0])
+                    pp = pin_price(b["line"])
+                    pwin, ploss = (pp[0], pp[1]) if side == "over" else (pp[1], pp[0])
+                    offers.append({"book": b["book"], "line": b["line"], "odds": b[side],
+                                   "win_prob": round(win, 4), "push_prob": round(max(1 - win - loss, 0.0), 4),
+                                   "fair_odds": _american(win / max(win + loss, 1e-9)),
+                                   "ev": round(win * pay - loss, 4),
+                                   "ev_pinnacle": round(pwin * pay - ploss, 4) if has_pin else None})
                 if not offers:
                     continue  # only the reference book has this market -- nothing to bet
                 best = max(offers, key=lambda o: o["ev"])
@@ -1067,14 +1130,26 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
                 also = [{k: o[k] for k in ("book", "line", "odds", "ev")}
                         for o in sorted(offers, key=lambda o: -o["ev"]) if o is not best and o["ev"] > 0][:10]
                 pw, pl = (po, pu) if side == "over" else (pu, po)
+                ppo, ppu = pin_price(cons)
+                pinw, pinl = (ppo, ppu) if side == "over" else (ppu, ppo)
+                # the worst price at the fair line still worth the starred bar against BOTH fair lines
+                need = max((bar + pl) / max(pw, 1e-9), (bar + pinl) / max(pinw, 1e-9) if has_pin else 0.0)
+                cons_ok = best["ev"] >= bar
+                pin_ok = (best["ev_pinnacle"] or 0) >= bar if has_pin else True
                 entry = {"market": kind, "team": team, "side": side, "fair_source": source,
                          "consensus_line": cons, "consensus_fair_odds": _american(pw / max(pw + pl, 1e-9)),
                          # unrounded, so the dashboard's "check a price" box prices off exactly this
                          "consensus_fair_prob": round(pw / max(pw + pl, 1e-9), 5),
-                         # the worst price at the consensus line still worth SHOP_MIN_EV -- what to shop for
-                         "target_odds": _odds_for_payout((SHOP_STRONG_EV[kind] + pl) / max(pw, 1e-9)),
-                         "n_books": len(books), **best, "bet": best["ev"] > SHOP_MIN_EV,
-                         "strong": best["ev"] >= SHOP_STRONG_EV[kind], "also": also}
+                         "pinnacle_fair_odds": _american(pinw / max(pinw + pinl, 1e-9)) if has_pin else None,
+                         "target_odds": _odds_for_payout(need),
+                         "n_books": len(books), **best,
+                         "bet": best["ev"] > SHOP_MIN_EV or (pin_ok and has_pin and not cons_ok),
+                         # starred BET: clears the bar against the consensus AND Pinnacle alone
+                         "strong": cons_ok and pin_ok,
+                         # +EV lean: clears the bar against only one of them
+                         "lean": (cons_ok != pin_ok) and has_pin,
+                         "lean_by": ("consensus" if cons_ok else "Pinnacle") if (cons_ok != pin_ok and has_pin) else None,
+                         "also": also}
                 if kind == "spread":
                     # back to normal spread terms: side = team, line = that team's own spread
                     entry["side"] = "home" if side == "over" else "away"
@@ -1103,7 +1178,7 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
         for group in by_market.values():
             flagged = [e for e in group if e["bet"]]
             for e in sorted(flagged, key=lambda e: -e["ev"])[1:]:
-                e.update({"bet": False, "strong": False, "other_side_better": True})
+                e.update({"bet": False, "strong": False, "lean": False, "other_side_better": True})
         if sides:
             out[gid] = sides
     return out
@@ -1305,6 +1380,9 @@ def _ev_play_rows(games_out):
                        "team": e["team"], "side": e["side"], "book": o["book"], "line": o["line"],
                        "odds": o["odds"], "ev": o["ev"]}
                 row["context"] = _context_tag(row, g.get("context"))
+                if o is e:  # the best offer: both fair lines, so the tracker can grade BETs vs leans
+                    row.update({"ev_pinnacle": e.get("ev_pinnacle"), "fair_source": e.get("fair_source"),
+                                "tier": "bet" if e.get("strong") else "lean" if e.get("lean") else "ev"})
                 yield key, row
 
 
@@ -2854,7 +2932,7 @@ if __name__ == "__main__":
                 "gid": gid, "matchup": f"{away} @ {home}", "kick": kick, "market": e["market"], "team": e.get("team"),
                 "side": e["side"], "line": e["line"], "odds": e["odds"], "book": e["book"], "ev": e["ev"],
                 "fair_odds": e["consensus_fair_odds"], "fair_source": e["fair_source"],
-                "target_odds": e.get("target_odds"),
+                "target_odds": e.get("target_odds"), "ev_pinnacle": e.get("ev_pinnacle"),
                 "ev_key": f"{gid}|{e['market']}|{e.get('team') or ''}|{e['side']}|{e['book']}|{e['line']}"}
 
     discord_plays = [_discord_play(gid, e) for gid, e in flagged if e.get("strong")]
@@ -2865,6 +2943,16 @@ if __name__ == "__main__":
             discord_best[d["id"]] = d
     if _state_doc:
         _state_doc.set(odds_state)
+    _old_rule = [(gid, e) for gid, e in flagged if (e.get("ev_pinnacle") if e.get("ev_pinnacle") is not None else e["ev"])
+                 >= SHOP_STRONG_EV[e["market"]]]
+    print(f"\n--- FAIR LINE CHECK: {sum(1 for _, e in flagged if e['strong'])} starred BETs (consensus AND Pinnacle), "
+          f"{sum(1 for _, e in flagged if e.get('lean'))} leans, vs {len(_old_rule)} under the old Pinnacle-only rule ---")
+    for gid, e in sorted(flagged, key=lambda x: -x[1]["ev"]):
+        if e["strong"] or e.get("lean") or (gid, e) in _old_rule:
+            pin = f"{e['ev_pinnacle']:+.1%}" if e.get("ev_pinnacle") is not None else "  n/a"
+            tag = "BET " if e["strong"] else f"lean ({e['lean_by']})" if e.get("lean") else "old-only"
+            print(f"  {tag:18s} {gid:9s} {e['market']:10s} {e['team'] or '':4s} {e['side']:5s} {e['line']:>6} "
+                  f"{e['odds']:>+5} @ {e['book']:12s} consensus EV {e['ev']:+.1%}  Pinnacle EV {pin}  ({e['fair_source']})")
     print(f"\n--- LINE SHOPPING: {sum(len(v) for v in shop.values())} sides priced against the fair line, "
           f"{len(flagged)} +EV ({sum(1 for _, e in flagged if e['strong'])} past the strong bar) ---")
     for gid, e in sorted(flagged, key=lambda x: -x[1]["ev"])[:25]:

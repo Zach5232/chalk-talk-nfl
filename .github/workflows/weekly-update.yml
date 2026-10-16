@@ -50,6 +50,10 @@ on:
         description: "Scan all 13 books (default: full only for games not yet fully scanned, else top 10 = half the credits)"
         type: boolean
         default: false
+      post_discord:
+        description: "Post updates to Discord (untick for a quiet test run)"
+        type: boolean
+        default: true
 
 jobs:
   update:
@@ -85,7 +89,7 @@ jobs:
           CHALKTALK_ODDS: ${{ github.event_name == 'schedule' && (github.event.schedule == '45 14 * * 0' && 'spreads,totals' || 'spreads,totals,team_totals') || format('{0},{1},{2},{3}', inputs.pull_spreads && 'spreads' || '', inputs.pull_totals && 'totals' || '', inputs.pull_team_totals && 'team_totals' || '', inputs.pull_props && 'props' || '') }}
           CHALKTALK_TT_GAMES: ${{ github.event.inputs.team_total_games || '' }}
           CHALKTALK_FULL_SCAN: ${{ inputs.full_scan || 'false' }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ (github.event_name == 'schedule' || inputs.post_discord) && secrets.DISCORD_WEBHOOK_URL || '' }}
         run: |
           # An unfilled manual-trigger input arrives here as an empty string, not unset --
           # and int("") in weekly_update.py would crash, so blank ones get unset entirely
