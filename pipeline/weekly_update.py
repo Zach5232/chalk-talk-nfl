@@ -1121,7 +1121,8 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
                                    "win_prob": round(win, 4), "push_prob": round(max(1 - win - loss, 0.0), 4),
                                    "fair_odds": _american(win / max(win + loss, 1e-9)),
                                    "ev": round(win * pay - loss, 4),
-                                   "ev_pinnacle": round(pwin * pay - ploss, 4) if has_pin else None})
+                                   "ev_pinnacle": round(pwin * pay - ploss, 4) if has_pin else None,
+                                   "pin_win_prob": round(pwin, 4), "pin_push_prob": round(max(1 - pwin - ploss, 0.0), 4)})
                 if not offers:
                     continue  # only the reference book has this market -- nothing to bet
                 best = max(offers, key=lambda o: o["ev"])
@@ -1132,8 +1133,10 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
                 pw, pl = (po, pu) if side == "over" else (pu, po)
                 ppo, ppu = pin_price(cons)
                 pinw, pinl = (ppo, ppu) if side == "over" else (ppu, ppo)
-                # the worst price at the fair line still worth the starred bar against BOTH fair lines
-                need = max((bar + pl) / max(pw, 1e-9), (bar + pinl) / max(pinw, 1e-9) if has_pin else 0.0)
+                # the worst price at the best offer's own line still worth the starred bar against BOTH fair lines
+                bw, bl = best["win_prob"], 1 - best["win_prob"] - best["push_prob"]
+                bpw, bpl = best["pin_win_prob"], 1 - best["pin_win_prob"] - best["pin_push_prob"]
+                need = max((bar + bl) / max(bw, 1e-9), (bar + bpl) / max(bpw, 1e-9) if has_pin else 0.0)
                 cons_ok = best["ev"] >= bar
                 pin_ok = (best["ev_pinnacle"] or 0) >= bar if has_pin else True
                 entry = {"market": kind, "team": team, "side": side, "fair_source": source,
@@ -1142,6 +1145,10 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
                          "consensus_fair_prob": round(pw / max(pw + pl, 1e-9), 5),
                          "pinnacle_fair_odds": _american(pinw / max(pinw + pinl, 1e-9)) if has_pin else None,
                          "target_odds": _odds_for_payout(need),
+                         "target_ev": round(bw * need - bl, 4),
+                         # bet size, % of bankroll: 1/8 Kelly capped at 2% (same as the page and the NHL model)
+                         "stake": round(min(2.0, 100 * 0.125 * max(best["ev"], 0.0) / _payout(best["odds"], best["book"])), 2),
+                         "target_stake": round(min(2.0, 100 * 0.125 * max(bw * need - bl, 0.0) / need), 2),
                          "n_books": len(books), **best,
                          "bet": best["ev"] > SHOP_MIN_EV or (pin_ok and has_pin and not cons_ok),
                          # starred BET: clears the bar against the consensus AND Pinnacle alone
@@ -2933,6 +2940,7 @@ if __name__ == "__main__":
                 "side": e["side"], "line": e["line"], "odds": e["odds"], "book": e["book"], "ev": e["ev"],
                 "fair_odds": e["consensus_fair_odds"], "fair_source": e["fair_source"],
                 "target_odds": e.get("target_odds"), "ev_pinnacle": e.get("ev_pinnacle"),
+                "stake": e.get("stake"), "target_ev": e.get("target_ev"), "target_stake": e.get("target_stake"),
                 "ev_key": f"{gid}|{e['market']}|{e.get('team') or ''}|{e['side']}|{e['book']}|{e['line']}"}
 
     discord_plays = [_discord_play(gid, e) for gid, e in flagged if e.get("strong")]

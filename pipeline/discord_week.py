@@ -81,9 +81,14 @@ def what(p):
 def _bet_line(p):
     if p.get("line_text"):
         return p["line_text"]
-    tgt = f" · good to {_odds(p['target_odds'])}" if p.get("target_odds") is not None else ""
+    tgt = ""
+    if p.get("target_odds") is not None:
+        at = (f" (EV {p['target_ev']:+.1%}, bet {p['target_stake']:.2f}%)"
+              if p.get("target_ev") is not None and p.get("target_stake") is not None else "")
+        tgt = f"\ngood to {_odds(p['target_odds'])}{at}"
+    bet = f" · **bet {p['stake']:.2f}%**" if p.get("stake") is not None else ""
     pin = f" · Pinnacle EV {p['ev_pinnacle']:+.1%}" if p.get("ev_pinnacle") is not None else ""
-    return (f"★ **{what(p)} {_odds(p['odds'])}** @ {BOOK_NAMES.get(p['book'], p['book'])} · EV {p['ev']:+.1%}"
+    return (f"★ **{what(p)} {_odds(p['odds'])}** @ {BOOK_NAMES.get(p['book'], p['book'])} · EV {p['ev']:+.1%}{bet}"
             f" · fair {_odds(p['fair_odds'])} ({p['fair_source']}){pin}{tgt}")
 
 
