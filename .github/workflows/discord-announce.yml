@@ -1,0 +1,35 @@
+name: Post announcement to Discord
+
+# Manual only: posts announcements/<name>.md to the NFL plays channel (DISCORD_WEBHOOK_URL), one message per
+# file. For channel notes like "how plays work" -- the pipeline never runs this.
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: "Announcement file names in announcements/, comma-separated, posted in order"
+        required: true
+        type: string
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: announcements
+      - name: Post
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FILES: ${{ inputs.files }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          for name in [f.strip() for f in os.environ["FILES"].split(",") if f.strip()]:
+              text = open(os.path.join("announcements", os.path.basename(name))).read().strip()
+              assert len(text) <= 2000, f"{name} is {len(text)} characters (Discord's limit is 2,000)"
+              req = urllib.request.Request(os.environ["DISCORD_WEBHOOK_URL"], data=json.dumps({"content": text}).encode(),
+                                           headers={"Content-Type": "application/json", "User-Agent": "model-alerts"})
+              urllib.request.urlopen(req, timeout=15)
+              print(f"posted {name} ({len(text)} chars)")
+              time.sleep(1)
+          PY
