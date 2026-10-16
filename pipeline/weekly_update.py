@@ -2945,14 +2945,17 @@ if __name__ == "__main__":
         _state_doc.set(odds_state)
     _old_rule = [(gid, e) for gid, e in flagged if (e.get("ev_pinnacle") if e.get("ev_pinnacle") is not None else e["ev"])
                  >= SHOP_STRONG_EV[e["market"]]]
-    print(f"\n--- FAIR LINE CHECK: {sum(1 for _, e in flagged if e['strong'])} starred BETs (consensus AND Pinnacle), "
-          f"{sum(1 for _, e in flagged if e.get('lean'))} leans, vs {len(_old_rule)} under the old Pinnacle-only rule ---")
+    fair_line_check = [f"\n--- FAIR LINE CHECK: {sum(1 for _, e in flagged if e['strong'])} starred BETs (consensus AND "
+                       f"Pinnacle), {sum(1 for _, e in flagged if e.get('lean'))} leans, vs {len(_old_rule)} under the old "
+                       f"Pinnacle-only rule ---"]
     for gid, e in sorted(flagged, key=lambda x: -x[1]["ev"]):
-        if e["strong"] or e.get("lean") or (gid, e) in _old_rule:
+        if e["strong"] or e.get("lean") or any(e is x for _, x in _old_rule):
             pin = f"{e['ev_pinnacle']:+.1%}" if e.get("ev_pinnacle") is not None else "  n/a"
             tag = "BET " if e["strong"] else f"lean ({e['lean_by']})" if e.get("lean") else "old-only"
-            print(f"  {tag:18s} {gid:9s} {e['market']:10s} {e['team'] or '':4s} {e['side']:5s} {e['line']:>6} "
-                  f"{e['odds']:>+5} @ {e['book']:12s} consensus EV {e['ev']:+.1%}  Pinnacle EV {pin}  ({e['fair_source']})")
+            fair_line_check.append(f"  {tag:18s} {gid:9s} {e['market']:10s} {e['team'] or '':4s} {e['side']:5s} {e['line']:>6} "
+                                   f"{e['odds']:>+5} @ {e['book']:12s} consensus EV {e['ev']:+.1%}  Pinnacle EV {pin}  "
+                                   f"({e['fair_source']})")
+    print("\n".join(fair_line_check))
     print(f"\n--- LINE SHOPPING: {sum(len(v) for v in shop.values())} sides priced against the fair line, "
           f"{len(flagged)} +EV ({sum(1 for _, e in flagged if e['strong'])} past the strong bar) ---")
     for gid, e in sorted(flagged, key=lambda x: -x[1]["ev"])[:25]:
@@ -3151,5 +3154,6 @@ if __name__ == "__main__":
         odds_state["posted"] = {k: v for k, v in odds_state.get("posted", {}).items() if k.startswith(f"{SEASON}-")}
         odds_state.pop("sent", None)
         _state_doc.set(odds_state)
+    print("\n".join(fair_line_check))  # again at the very end, where it's easy to find in the Actions log
 
 
