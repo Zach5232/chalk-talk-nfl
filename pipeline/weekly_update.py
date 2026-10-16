@@ -2838,29 +2838,32 @@ if __name__ == "__main__":
             for c in items:
                 print(f"  {gid:9s} {c['text']} -> leans {c['team'] + ' TT ' if c.get('team') else ''}{c['lean']}")
     flagged = [(gid, e) for gid, sides in shop.items() for e in sides if e["bet"]]
-    # Discord: every starred BET (past the strong bar: +2% spreads/totals, +3% team totals) posts once to the
-    # team channel, and again only if its price improves.
+    # Discord (pipeline/discord_week.py): starred BETs (past the strong bar: +2% spreads/totals, +3% team totals)
+    # as this pull's plays; posted after grading below, so the weekly recap can go out on the same run.
     _kick = {f"{r.away_team.lower()}-{r.home_team.lower()}": (r.gameday, r.gametime)
              for r in ratings["games_this_week"].itertuples()}
-    plays = []
-    for gid, e in flagged:
-        if not e.get("strong"):
-            continue
+    _home = {f"{r.away_team.lower()}-{r.home_team.lower()}": (r.away_team, r.home_team)
+             for r in ratings["games_this_week"].itertuples()}
+
+    def _discord_play(gid, e):
         day, tm = _kick.get(gid, (None, None))
-        when = (pd.Timestamp(f"{day} {tm}").strftime("%a %-I:%M %p ET") if day and isinstance(tm, str) else "")
-        what = {"spread": f"{e['team']} {e['line']:+g}", "total": f"{e['side'].title()} {e['line']:g}",
-                "team_total": f"{e['team']} TT {e['side'].title()} {e['line']:g}"}[e["market"]]
-        also = ", ".join(f"{odds_books.BOOK_NAMES.get(a['book'], a['book'])} {a['odds']:+d}" for a in (e.get("also") or [])[:3])
-        plays.append({"key": f"{SEASON}-wk{WEEK}:{gid}:{e['market']}:{e.get('team')}:{e['side']}:{e['line']}",
-                      "dec": 1 + (e["odds"] / 100 if e["odds"] > 0 else 100 / -e["odds"]),
-                      "text": (f"🏈 **NFL** · {gid.upper().replace('-', ' @ ')}" + (f" · {when}" if when else "") + "\n"
-                               f"★ **BET {what} {e['odds']:+d}** @ {odds_books.BOOK_NAMES.get(e['book'], e['book'])}"
-                               f" · EV {e['ev']:+.1%} · fair {e['consensus_fair_odds']:+d} ({e['fair_source']})"
-                               + (f"\nAlso +EV: {also}" if also else ""))})
-    if MODE == "live" and plays:
-        odds_state = odds_books.post_plays(os.environ.get("DISCORD_WEBHOOK_URL", ""), plays, odds_state)
+        kick = (pd.Timestamp(f"{day} {tm}", tz="America/New_York").to_pydatetime()
+                if day and isinstance(tm, str) else None)
+        away, home = _home.get(gid, (gid, ""))
+        return {"id": f"{SEASON}-wk{WEEK}:{gid}:{e['market']}:{e.get('team') or ''}:{e['side']}",
+                "gid": gid, "matchup": f"{away} @ {home}", "kick": kick, "market": e["market"], "team": e.get("team"),
+                "side": e["side"], "line": e["line"], "odds": e["odds"], "book": e["book"], "ev": e["ev"],
+                "fair_odds": e["consensus_fair_odds"], "fair_source": e["fair_source"],
+                "target_odds": e.get("target_odds"),
+                "ev_key": f"{gid}|{e['market']}|{e.get('team') or ''}|{e['side']}|{e['book']}|{e['line']}"}
+
+    discord_plays = [_discord_play(gid, e) for gid, e in flagged if e.get("strong")]
+    discord_best = {}
+    for gid, sides in shop.items():
+        for e in sides:
+            d = _discord_play(gid, e)
+            discord_best[d["id"]] = d
     if _state_doc:
-        odds_state["sent"] = dict(list(odds_state.get("sent", {}).items())[-500:])
         _state_doc.set(odds_state)
     print(f"\n--- LINE SHOPPING: {sum(len(v) for v in shop.values())} sides priced against the fair line, "
           f"{len(flagged)} +EV ({sum(1 for _, e in flagged if e['strong'])} past the strong bar) ---")
@@ -2997,6 +3000,7 @@ if __name__ == "__main__":
     # service-account key), so a bare local run with no setup still just prints the numbers
     # like it always has -- nothing breaks for a quick manual sanity check.
     cred_path = os.environ.get("FIREBASE_CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    prev_week_graded = {}  # last week's graded +EV log, for the Discord recap
     if _FIREBASE_AVAILABLE and cred_path:
         fdb = get_firestore_client(cred_path)
         write_firestore(
@@ -3020,6 +3024,8 @@ if __name__ == "__main__":
         # +EV plays: log this pull's, grade any whose game is final (see log_ev_plays/grade_ev_log)
         log_ev_plays(fdb, SEASON, WEEK, games_out)
         ev_plays = grade_ev_log(fdb, SEASON, WEEK)
+        _prev = fdb.collection("model_season_record").document(f"ev_log_{SEASON}_wk{WEEK - 1}").get()
+        prev_week_graded = ((_prev.to_dict() or {}).get("plays", {}) if _prev.exists else {})
         teasers = wong_teaser_record(SEASON)
         print(f"  Wong teasers {SEASON}: legs {teasers['leg_wins']}-{teasers['leg_losses']}, "
               f"2-team pairs {teasers['pair_wins']}-{teasers['pair_losses']}")
@@ -3034,5 +3040,28 @@ if __name__ == "__main__":
     else:
         reason = "firebase-admin not installed" if not _FIREBASE_AVAILABLE else "no credentials configured (FIREBASE_CREDENTIALS_PATH / GOOGLE_APPLICATION_CREDENTIALS)"
         print(f"\n(Skipped Firestore write -- {reason}. Numbers above are still real, just not persisted this run.)")
+
+    # ---- Discord: week card / new / better number / off the board / game-day list, then last week's recap.
+    # Only on runs that pulled odds (manual runs included); the closing-line capture never posts.
+    _hook = os.environ.get("DISCORD_WEBHOOK_URL", "")
+    if MODE == "live" and _hook and _state_doc:
+        import discord_week
+        pulled = ODDS & {"spreads", "totals", "team_totals"}
+
+        def _repulled(p):
+            if p["market"] == "team_total":
+                return "team_totals" in ODDS and (not TT_GAMES or bool({p["gid"], *p["gid"].split("-")} & TT_GAMES))
+            return {"spread": "spreads", "total": "totals"}[p["market"]] in ODDS
+
+        odds_state = _state_doc.get().to_dict() or {}
+        if pulled and API_KEY:
+            odds_state = discord_week.update(_hook, odds_state, "🏈 **NFL**", f"{SEASON}-wk{WEEK}",
+                                             discord_plays, discord_best, _repulled)
+        if WEEK > 1:
+            odds_state = discord_week.recap(_hook, odds_state, "🏈 **NFL**", f"{SEASON}-wk{WEEK - 1}",
+                                            prev_week_graded, f"{SEASON}-")
+        odds_state["posted"] = {k: v for k, v in odds_state.get("posted", {}).items() if k.startswith(f"{SEASON}-")}
+        odds_state.pop("sent", None)
+        _state_doc.set(odds_state)
 
 
