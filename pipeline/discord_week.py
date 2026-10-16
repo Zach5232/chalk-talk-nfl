@@ -1,5 +1,5 @@
 """
-Discord updates for a weekly market (NFL; CFB can use the same module). Every play appears once; after
+Discord updates for a weekly market (shared by the NFL and CFB models; keep the copies in sync). Every play appears once; after
 that only real changes post. Runs only after an odds pull (the caller decides), never on closing captures.
 
   1. Week card    first odds run of the week: every starred BET, grouped by game day
@@ -13,6 +13,7 @@ A play here is a dict:
   id         stable identity across pulls: season-week:game:market:team:side (no line/book/price)
   gid, matchup, kick (aware datetime), market, team, side, line, odds, book, ev,
   fair_odds, fair_source, target_odds (worst price that still clears the BET bar), ev_key (tracker key)
+  optional: kind (recap group, default "ev"), noun ("BET" / "GO"), line_text (replaces the standard bet line)
 
 State (a dict the caller loads/saves): posted {id: play-as-posted + status/result}, cards [week ids], recaps.
 """
@@ -78,6 +79,8 @@ def what(p):
 
 
 def _bet_line(p):
+    if p.get("line_text"):
+        return p["line_text"]
     tgt = f" · good to {_odds(p['target_odds'])}" if p.get("target_odds") is not None else ""
     pin = f" · Pinnacle EV {p['ev_pinnacle']:+.1%}" if p.get("ev_pinnacle") is not None else ""
     return (f"★ **{what(p)} {_odds(p['odds'])}** @ {BOOK_NAMES.get(p['book'], p['book'])} · EV {p['ev']:+.1%}"
@@ -99,7 +102,7 @@ def _store(p, status="on"):
     return keep
 
 
-def update(url, state, sport, week_id, plays, best_now, repulled, now=None):
+def update(url, state, sport, week_id, plays, best_now, repulled, now=None, allow_card=True):
     """plays: every starred BET from this pull. best_now: {id: best offer for that side now, starred or not}.
     repulled(play) -> True if this pull re-priced that play's market (so 'off the board' is a real call)."""
     if not url:
@@ -109,15 +112,17 @@ def update(url, state, sport, week_id, plays, best_now, repulled, now=None):
     cards = state.setdefault("cards", [])
     current = {p["id"]: p for p in plays if not p.get("kick") or p["kick"] > now}
 
+    if week_id not in cards and not allow_card:  # e.g. a game-day run before the week's card: post plays singly
+        cards.append(week_id)
     if week_id not in cards:
         days = {}
         for p in sorted(current.values(), key=lambda p: (p.get("kick") or now, p["matchup"])):
             day = p["kick"].strftime("%a %b %-d") if p.get("kick") else "TBD"
             days.setdefault(day, []).append(f"{p['matchup']} · {p['kick'].strftime('%-I:%M %p') if p.get('kick') else ''}\n"
                                             f"{_bet_line(p)}")
-        head = f"{sport} **{_wk(week_id)} card** · {len(current)} BET{'s' if len(current) != 1 else ''}"
+        head = f"{sport} **{_wk(week_id)} card** · {len(current)} play{'s' if len(current) != 1 else ''}"
         if not current:
-            head += "\nNo starred BETs yet. New ones post here as lines move."
+            head += "\nNo plays yet. New ones post here as lines move."
         blocks = [f"\n__**{d}**__\n" + "\n\n".join(items) for d, items in days.items()]
         if _post_chunks(url, head + "\n_Each play posts once; after this only new plays, better numbers and "
                                    "plays that come off the board._", blocks):
@@ -132,7 +137,7 @@ def update(url, state, sport, week_id, plays, best_now, repulled, now=None):
     for pid, p in current.items():
         old = posted.get(pid)
         if old is None or old.get("status") == "off":
-            tag = "🔁 **Back on**" if old else "🆕 **New BET**"
+            tag = "🔁 **Back on**" if old else f"🆕 **New {p.get('noun', 'BET')}**"
             if _post(url, f"{sport} {tag} · {p['matchup']} · {_when(p)}\n{_bet_line(p)}"):
                 posted[pid] = _store(p)
                 just.add(pid)
@@ -166,12 +171,16 @@ def update(url, state, sport, week_id, plays, best_now, repulled, now=None):
         if (kick and kick <= now) or not repulled(old):
             continue
         b = best_now.get(pid)
-        now_txt = (f"best now {what(b)} {_odds(b['odds'])} @ {BOOK_NAMES.get(b['book'], b['book'])}, EV {b['ev']:+.1%}"
+        now_txt = (b["now_text"] if b and b.get("now_text") else
+                   f"best now {what(b)} {_odds(b['odds'])} @ {BOOK_NAMES.get(b['book'], b['book'])}, EV {b['ev']:+.1%}"
                    if b else "no longer offered")
         if _post(url, f"{sport} ❌ **Off the board** · {old['matchup']}\n~~{what(old)} {_odds(old['odds'])}~~ "
-                      f"no longer a BET ({now_txt}). Skip it if you haven't bet it."):
+                      f"no longer a {old.get('noun', 'BET')} ({now_txt}). Skip it if you haven't bet it."):
             old["status"] = "off"
     return state
+
+
+KIND_LABEL = {"ev": "★ EV plays", "model": "🎯 Model totals (GO)"}
 
 
 def recap(url, state, sport, week_id, graded, season_prefix):
@@ -203,7 +212,12 @@ def recap(url, state, sport, week_id, graded, season_prefix):
              + (" _(went off the board)_" if p.get("status") == "off" else "")
              for p in sorted(week, key=lambda p: p.get("kick") or "")]
     season = [p for pid, p in posted.items() if pid.startswith(season_prefix) and "result" in p]
+    kinds = sorted({p.get("kind", "ev") for p in season})
     head = f"📊 {sport} **{_wk(week_id)} recap** · {rec(week)} _(1u risked per play)_"
-    if _post_chunks(url, head, lines + [f"Season (posted plays): {rec(season)}"]):
+    tail = [f"Season (posted plays): {rec(season)}"]
+    if len(kinds) > 1:  # separate records for each kind of play (CFB: EV plays vs model totals)
+        tail += [f"{KIND_LABEL.get(k, k)}: week {rec([p for p in week if p.get('kind', 'ev') == k]) if any(p.get('kind', 'ev') == k for p in week) else '-'}"
+                 f" · season {rec([p for p in season if p.get('kind', 'ev') == k])}" for k in kinds]
+    if _post_chunks(url, head, lines + tail):
         state["recaps"] = (state["recaps"] + [week_id])[-40:]
     return state
