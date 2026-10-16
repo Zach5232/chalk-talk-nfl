@@ -28,16 +28,18 @@ BOOK_PRIORITY = ["novig", "prophetx", "kalshi", "polymarket", "betonlineag", "ba
                  "williamhill_us", "betmgm", "espnbet", "fanduel", "draftkings"]
 
 
-def upcoming_event_ids(sport_key, api_key, days=8):
-    """Event ids starting within `days` (free endpoint, no credits)."""
+def upcoming_event_ids(sport_key, api_key, days=8, start=None, end=None):
+    """Event ids that haven't started, kicking off before now+days (or inside [start, end) when given).
+    Free endpoint, no credits."""
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/?apiKey={api_key}"
     with urllib.request.urlopen(url, timeout=20) as r:
         events = json.load(r)
     now = datetime.now(timezone.utc)
+    lo, hi = max(now, start or now), end or now + timedelta(days=days)
     out = []
     for e in events:
         t = datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00"))
-        if now < t <= now + timedelta(days=days):
+        if lo < t <= hi:
             out.append(e["id"])
     return out
 
