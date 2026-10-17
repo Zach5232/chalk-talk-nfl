@@ -1063,6 +1063,21 @@ def _price_offers(price, books, side):
     return offers
 
 
+# Drop broken quotes before pricing: a dead or stale market (e.g. a Polymarket spread at +20.5 -9900 while every
+# other book hangs -5.5) would otherwise sit in the consensus and invent edges. Prices past +/-1000, or a line
+# more than MAX_LINE_GAP points from the median line, are left out of the fair line and the best-offer search.
+MAX_LINE_GAP = 3.0
+
+
+def clean_books(books):
+    ok = [b for b in books if all(isinstance(b.get(s), (int, float)) and 100 <= abs(float(b[s])) <= 1000
+                                  for s in ("over", "under"))]
+    if not ok:
+        return ok
+    mid = float(np.median([float(b["line"]) for b in ok]))
+    return [b for b in ok if abs(float(b["line"]) - mid) <= MAX_LINE_GAP]
+
+
 def build_shop_report(game_totals, team_totals_data, spread_books, week_games, model_totals=None):
     """Per game: the fair market line for the spread, the game total and each team total, plus the
     best offer on each side with its real win probability, fair odds and EV at that fair line.
@@ -1082,13 +1097,15 @@ def build_shop_report(game_totals, team_totals_data, spread_books, week_games, m
         sp = [{"book": b["book"], "line": -b["home_pt"], "over": b["home_odds"], "under": b["away_odds"]}
               for b in (spread_books.get(gid) or {}).get("books", [])
               if b.get("home_odds") is not None and b.get("away_odds") is not None]
+        sp = clean_books(sp)
         if len(sp) >= SHOP_MIN_BOOKS:
             markets.append(("spread", None, sp))
-        if len(game_totals.get(gid) or []) >= SHOP_MIN_BOOKS:
-            markets.append(("total", None, game_totals[gid]))
+        gt = clean_books(game_totals.get(gid) or [])
+        if len(gt) >= SHOP_MIN_BOOKS:
+            markets.append(("total", None, gt))
         tt_books = (team_totals_data.get(gid) or {}).get("books") or []
         for tside, team in (("home", r.home_team), ("away", r.away_team)):
-            rows = [b for b in tt_books if b["team"] == tside]
+            rows = clean_books([b for b in tt_books if b["team"] == tside])
             if len(rows) >= SHOP_MIN_BOOKS:
                 markets.append(("team_total", team, rows))
 
