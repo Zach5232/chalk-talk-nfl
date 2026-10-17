@@ -96,8 +96,13 @@ def _wk(week_id):
     return "Week " + week_id.rsplit("wk", 1)[-1]
 
 
+def _et(dt):
+    """Kickoff in Eastern time, whatever zone it came in (CFB start times arrive in UTC)."""
+    return dt.astimezone(ET)
+
+
 def _when(p):
-    return p["kick"].strftime("%a %-I:%M %p ET") if p.get("kick") else ""
+    return _et(p["kick"]).strftime("%a %-I:%M %p ET") if p.get("kick") else ""
 
 
 def _store(p, status="on"):
@@ -122,8 +127,8 @@ def update(url, state, sport, week_id, plays, best_now, repulled, now=None, allo
     if week_id not in cards:
         days = {}
         for p in sorted(current.values(), key=lambda p: (p.get("kick") or now, p["matchup"])):
-            day = p["kick"].strftime("%a %b %-d") if p.get("kick") else "TBD"
-            days.setdefault(day, []).append(f"{p['matchup']} · {p['kick'].strftime('%-I:%M %p') if p.get('kick') else ''}\n"
+            day = _et(p["kick"]).strftime("%a %b %-d") if p.get("kick") else "TBD"
+            days.setdefault(day, []).append(f"{p['matchup']} · {_et(p['kick']).strftime('%-I:%M %p ET') if p.get('kick') else ''}\n"
                                             f"{_bet_line(p)}")
         head = f"{sport} **{_wk(week_id)} card** · {len(current)} play{'s' if len(current) != 1 else ''}"
         if not current:
@@ -161,7 +166,7 @@ def update(url, state, sport, week_id, plays, best_now, repulled, now=None, allo
         todays = [p for pid, p in current.items() if p.get("kick") and p["kick"].astimezone(ET).date() == today
                   and posted.get(pid, {}).get("status") == "on" and pid not in just]
         if todays:
-            blocks = [f"{p['matchup']} · {p['kick'].strftime('%-I:%M %p')}\n{_bet_line(p)}"
+            blocks = [f"{p['matchup']} · {_et(p['kick']).strftime('%-I:%M %p ET')}\n{_bet_line(p)}"
                       for p in sorted(todays, key=lambda p: (p["kick"], p["matchup"]))]
             if _post_chunks(url, f"{sport} **Still good today · {today.strftime('%a %b %-d')}** · {len(todays)} "
                                  f"BET{'s' if len(todays) != 1 else ''} at the best price right now", blocks, "\n\n"):
