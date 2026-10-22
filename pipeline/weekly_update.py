@@ -796,6 +796,23 @@ def pull_week_odds(mode, api_key, hist_date=None, markets="spreads", bookmakers=
     return d.get("data", d) if isinstance(d, dict) else d
 
 
+def _kicked_off(event):
+    t = event.get("commence_time")
+    return bool(t) and datetime.fromisoformat(t.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+
+
+def drop_started_games(odds_data):
+    """The Odds API keeps returning a game after kickoff with LIVE in-game lines (e.g. a 65.5 total mid-game).
+    Those aren't pregame prices: they'd show as fake +EV plays, get logged to the tracker, and overwrite the
+    last pregame line that team totals are graded on. Drop them; the caller keeps the saved pregame lines."""
+    keep = [e for e in odds_data if not _kicked_off(e)]
+    gone = [f"{e.get('away_team')} @ {e.get('home_team')}" for e in odds_data if _kicked_off(e)]
+    if gone:
+        print(f"  odds: {len(gone)} game(s) already kicked off -- live lines ignored, saved pregame lines kept: "
+              + "; ".join(gone))
+    return keep
+
+
 def build_books_for_week(odds_data, week_games):
     books_out = {}
     for _, r in week_games.iterrows():
@@ -868,6 +885,8 @@ def fetch_team_totals_for_week(api_key, week_games):
         gid = f"{r.away_team.lower()}-{r.home_team.lower()}"
         if TT_GAMES and not ({gid, r.home_team.lower(), r.away_team.lower()} & TT_GAMES):
             continue  # not one of the games picked for this run -- no credit spent on it
+        if _kicked_off(event):
+            continue  # in progress: live in-game lines, not a pregame price (the saved pregame lines are kept)
         url = (f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event['id']}/odds"
                f"?apiKey={api_key}&bookmakers={','.join(ODDS_BOOKS)}&markets=team_totals&oddsFormat=american")
         try:
@@ -2752,12 +2771,10 @@ if __name__ == "__main__":
     ratings = run_ratings(SEASON, WEEK, prior_season_pbp_path=prior_season_pbp_path_val)
 
     print(f"--- ODDS PULLS THIS RUN: {', '.join(sorted(ODDS)) or 'none'} ---")
-    if ODDS >= {"spreads", "totals", "team_totals"} and not TT_GAMES:
-        saved_books, saved_totals, saved_tt = {}, {}, {}
-    else:
-        saved_books, saved_totals, saved_tt = load_saved_odds(
-            os.environ.get("FIREBASE_CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
-            SEASON, WEEK, ratings["games_this_week"])
+    # Saved lines fill in markets this run skips, and games that already kicked off (live lines are ignored).
+    saved_books, saved_totals, saved_tt = load_saved_odds(
+        os.environ.get("FIREBASE_CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
+        SEASON, WEEK, ratings["games_this_week"])
     # Smart books: every event gets one full 13-book scan; later pulls use Pinnacle + the 9 books most
     # often near the best price (half the credits). State lives in Firestore odds_state/nfl.
     import odds_books
@@ -2778,15 +2795,18 @@ if __name__ == "__main__":
     bulk_markets = [m for m in ("spreads", "totals") if m in ODDS]
     odds_data = (pull_week_odds(MODE, API_KEY, HIST_DATE, markets=",".join(bulk_markets), bookmakers=ODDS_BOOKS)
                  if bulk_markets else [])
+    if MODE == "live" and odds_data:
+        odds_data = drop_started_games(odds_data)
     if scan_mode == "full" and odds_data:
         odds_state = odds_books.record_full_scan(odds_state, odds_data, BET_BOOKS)
     if "spreads" in ODDS:
-        books = build_books_for_week(odds_data, ratings["games_this_week"])
+        # games that already kicked off keep their saved pregame lines
+        books = {**saved_books, **build_books_for_week(odds_data, ratings["games_this_week"])}
     else:
         books = saved_books
         print(f"  spreads: not pulled -- kept the saved lines for {len(books)} games")
     if "totals" in ODDS:
-        game_totals = build_totals_for_week(odds_data, ratings["games_this_week"])
+        game_totals = {**saved_totals, **build_totals_for_week(odds_data, ratings["games_this_week"])}
         print(f"\n--- GAME TOTALS: every book's line fetched for {len(game_totals)} of {len(ratings['games_this_week'])} games ---")
     else:
         game_totals = saved_totals
