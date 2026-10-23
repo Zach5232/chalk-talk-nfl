@@ -2906,7 +2906,9 @@ if __name__ == "__main__":
         away_off = ratings["off"][a] + qb_overrides.get(a, 0.0)
         home_net = home_off - ratings["deft"][a]
         away_net = away_off - ratings["deft"][h]
-        model_home_favored = (home_net - away_net + ratings["hfa"]) * ratings["pts_per_epa"]
+        # neutral-site games (London, Paris, ...) get no home field, same as the fit (hfa 0 for them)
+        hfa_g = 0.0 if r.game_id in get_neutral_game_ids() else ratings["hfa"]
+        model_home_favored = (home_net - away_net + hfa_g) * ratings["pts_per_epa"]
         gid = f"{a.lower()}-{h.lower()}"
         book_entry = books.get(gid)
         market_home_favored = -float(book_entry["books"][0]["home_pt"]) if book_entry else None
