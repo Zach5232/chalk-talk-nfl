@@ -166,10 +166,17 @@ def update(url, state, sport, week_id, plays, best_now, repulled, now=None, allo
         todays = [p for pid, p in current.items() if p.get("kick") and p["kick"].astimezone(ET).date() == today
                   and posted.get(pid, {}).get("status") == "on" and pid not in just]
         if todays:
-            blocks = [f"{p['matchup']} · {_et(p['kick']).strftime('%-I:%M %p ET')}\n{_bet_line(p)}"
-                      for p in sorted(todays, key=lambda p: (p["kick"], p["matchup"]))]
+            blocks = []
+            kinds = [k for k in ("model", "ev") if any(p.get("kind", "ev") == k for p in todays)]
+            for k in kinds:  # GO totals and starred BETs in their own sections, so one isn't read as the other
+                rows = [p for p in todays if p.get("kind", "ev") == k]
+                items = [f"{p['matchup']} · {_et(p['kick']).strftime('%-I:%M %p ET')}\n{_bet_line(p)}"
+                         for p in sorted(rows, key=lambda p: (p["kick"], p["matchup"]))]
+                if len(kinds) > 1:
+                    items[0] = f"__**{SECTION[k]}**__\n" + items[0]
+                blocks += items
             if _post_chunks(url, f"{sport} **Still good today · {today.strftime('%a %b %-d')}** · {len(todays)} "
-                                 f"BET{'s' if len(todays) != 1 else ''} at the best price right now", blocks, "\n\n"):
+                                 f"play{'s' if len(todays) != 1 else ''} at the best price right now", blocks, "\n\n"):
                 state["gameday"] = today.isoformat()
         else:
             state["gameday"] = today.isoformat()
@@ -191,6 +198,7 @@ def update(url, state, sport, week_id, plays, best_now, repulled, now=None, allo
 
 
 KIND_LABEL = {"ev": "★ EV plays", "model": "🎯 Model totals (GO)"}
+SECTION = {"model": "🎯 GO totals (1 unit)", "ev": "★ BETs (half unit, separate bets from the GOs)"}
 
 
 def recap(url, state, sport, week_id, graded, season_prefix):
