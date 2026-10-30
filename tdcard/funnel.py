@@ -53,10 +53,12 @@ S = S.assign(wind=[wind(g) for g in S.game_id])
 windy = S.pos.isin(["WR", "TE"]) & (S.wind.fillna(0) >= 15)
 S = S[~windy]; steps.append(("No pass catchers in 15+ mph wind", len(S)))
 S = S.assign(score=S.vb + 0.03 * (S.dvp > .15) - 0.03 * (S.dvp < -.15)).sort_values("score", ascending=False)
-S = S.groupby("team", sort=False).head(2); steps.append(("Max 2 per team (spread across games)", len(S)))
+NO_LIMIT = os.environ.get("TD_NO_LIMIT") == "1"  # preview: show everything that passes the filters
+if not NO_LIMIT:
+    S = S.groupby("team", sort=False).head(2); steps.append(("Max 2 per team (spread across games)", len(S)))
 if len(S) < MIN_PICKS and len(cut_script):  # top up from the last cut so the card isn't empty
     S = pd.concat([S, cut_script.sort_values("vb", ascending=False).head(MIN_PICKS - len(S))])
-S = S.head(MAX_PICKS); steps.append(("Card (best first)", len(S)))
+S = S if NO_LIMIT else S.head(MAX_PICKS); steps.append(("Card (best first)", len(S)))
 
 os.makedirs(f"{HERE}/picks", exist_ok=True)
 S.assign(stake=STAKE)[["game_id", "kick", "pid", "name", "pos", "team", "opp", "best", "bestbook", "p", "pb", "vb",
