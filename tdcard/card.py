@@ -91,6 +91,10 @@ for _, grp in C.groupby(["game_id", "team", "pos"]):
         C.loc[healthy, "lam2"] += 0.8 * lost * C.loc[healthy, "lam"] / C.loc[healthy, "lam"].sum()
 C["boosted"] = C.lam2 > C.lam * 1.05
 C.loc[C.status == "Questionable", "lam2"] *= 0.88
+# a team's players can't add up to more TDs than the team is expected to score (usage-share smoothing overshoots)
+team_tds = {t: max(a_pts + b_pts * i, 0.3) for t, i in C.groupby("team").implied.first().items()}
+over = C.groupby("team").lam2.sum() / C.team.map(team_tds).groupby(C.team).first()
+C["lam2"] = C.lam2 / C.team.map(over.clip(lower=1.0))
 C["p2"] = 1 - np.exp(-C.lam2)
 C = C[~out].copy()
 

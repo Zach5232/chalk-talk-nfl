@@ -41,7 +41,8 @@ def wind(gid):
 
 steps = []
 S = C.copy(); steps.append(("Every priced player", len(S)))
-S = S[(S.value >= .10) & (S.best >= 200) & (S.best < 600)]; steps.append(("Model value 10%+ at +200 to +600", len(S)))
+S = S[S.pos != "QB"]; steps.append(("Not a QB (the model overrates QB rushing TDs: backtest 6.5% hit vs 9.6% priced)", len(S)))
+S = S[S.value >= .10]; steps.append(("Model value 10%+ (any price)", len(S)))
 S = S.assign(pb=0.5 * S.p + 0.5 * S.mkt * 0.87)
 S = S.assign(vb=S.pb * S.best.map(dec) - 1)
 S = S[S.vb >= .08]; steps.append(("Still 8%+ after blending with the books", len(S)))
@@ -74,7 +75,18 @@ for r in S.itertuples():
         why.append(f"soft D vs {r.pos}s")
     lines.append(f"**{r.name}** ({r.team} vs {r.opp}, {k}) · **{int(r.best):+d}** @ {BOOKS.get(r.bestbook, r.bestbook)} · "
                  f"fair {amer(r.pb)} · {', '.join(why)}")
-lines += ["", "How we got here: " + " → ".join(f"{n}" for _, n in steps)]
+# 3+ picks from one team usually means we and the books disagree about WHO scores there, not how much: say so
+notes = []
+for tm, grp in S.groupby("team"):
+    if len(grp) < 3:
+        continue
+    fav = C[C.team == tm].sort_values("mkt", ascending=False).iloc[0]
+    best = grp.sort_values("vb", ascending=False).iloc[0]
+    notes.append(f"⚠️ **{len(grp)} {tm} picks:** books see {tm}'s TDs going to **{fav['name']}** ({int(fav.best):+d}, "
+                 f"{fav.mkt*100:.0f}%) while we have him at {fav.p*100:.0f}% and spread them to the others. "
+                 f"If you only want one {tm}: **{best['name']}**.")
+if notes:
+    lines += [""] + notes
 open(f"{HERE}/discord_card.txt", "w").write("\n".join(lines) + "\n")
 print("\n".join(f"{n:4}  {lab}" for lab, n in steps))
 print("\n".join(lines))
