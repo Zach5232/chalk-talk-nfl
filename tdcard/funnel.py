@@ -5,7 +5,7 @@ message and the picks file used for Monday's grading.
 python3 tdcard/funnel.py <season> <week>     (reads tdcard/card_<season>_wk<week>.csv from card.py)
 Writes tdcard/discord_card.txt and tdcard/picks/<season>_wk<week>.csv. Fun money: no proven edge.
 """
-import json, os, sys, urllib.request
+import json, math, os, re, sys, urllib.parse, urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -18,7 +18,7 @@ MAX_PICKS, MIN_PICKS = 20, 5
 STAKE = 5  # dollars per pick, shown on the card
 BOOKS = {"draftkings": "DraftKings", "fanduel": "FanDuel", "betmgm": "BetMGM", "williamhill_us": "Caesars",
          "espnbet": "ESPN BET", "betrivers": "BetRivers", "fanatics": "Fanatics", "ballybet": "Bally Bet",
-         "betonlineag": "BetOnline", "hardrockbet": "Hard Rock", "bovada": "Bovada"}
+         "betonlineag": "BetOnline", "hardrockbet": "Hard Rock", "bovada": "Bovada", "kalshi": "Kalshi (fee incl.)"}
 dec = lambda a: 1 + a / 100 if a > 0 else 1 + 100 / -a
 amer = lambda p: f"{(1/p-1)*100:+.0f}" if p < .5 else f"{-100/(1/p-1):.0f}"
 C = pd.read_csv(f"{HERE}/card_{SEASON}_wk{WEEK}.csv")
@@ -38,6 +38,44 @@ def wind(gid):
         return None
     return None
 
+
+def norm(n):
+    n = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b\.?", "", str(n).lower())
+    return re.sub(r"[^a-z]", "", n)
+
+
+def kalshi_td():
+    """Kalshi anytime-TD buy prices ('<Player>: 1+ touchdowns'), fee included: {norm name: (prob, $ available)}.
+    Kalshi's taker fee is 7% x p x (1-p) per contract, rounded up to the cent. Empty if Kalshi can't be reached."""
+    out, cursor = {}, None
+    try:
+        for _ in range(20):
+            q = dict(series_ticker="KXNFLTD", status="open", limit=1000, **({"cursor": cursor} if cursor else {}))
+            req = urllib.request.Request("https://api.elections.kalshi.com/trade-api/v2/markets?" + urllib.parse.urlencode(q),
+                                         headers={"User-Agent": "td-card"})
+            d = json.load(urllib.request.urlopen(req, timeout=20))
+            for m in d.get("markets", []):
+                ask = float(m.get("yes_ask_dollars") or 0)
+                if m["title"].endswith(": 1+ touchdowns") and 0 < ask < 1:
+                    eff = ask + math.ceil(round(7 * ask * (1 - ask), 6)) / 100
+                    out[norm(m["title"][:-14])] = (eff, ask * float(m.get("yes_ask_size_fp") or 0))
+            cursor = d.get("cursor")
+            if not cursor or not d.get("markets"):
+                break
+    except Exception as e:  # noqa: BLE001 -- Kalshi is an extra price, never a blocker
+        print(f"kalshi: {e}")
+    return out
+
+
+# Kalshi as one more "book": bet wherever pays more (needs $20+ available at the ask to count)
+K = kalshi_td()
+print(f"kalshi: {len(K)} anytime-TD prices")
+kp = C.name.map(lambda n: K.get(norm(n), (None, 0)))
+C["k_p"], C["k_avail"] = [x[0] for x in kp], [x[1] for x in kp]
+use_k = C.k_p.notna() & (C.k_avail >= 20) & (1 / C.k_p > C.best.map(dec))
+C.loc[use_k, "best"] = [round((1 / x - 1) * 100) if x < .5 else round(-100 / (1 / x - 1)) for x in C.k_p[use_k]]
+C.loc[use_k, "bestbook"] = "kalshi"
+C["value"] = C.p * C.best.map(dec) - 1
 
 steps = []
 S = C.copy(); steps.append(("Every priced player", len(S)))
@@ -67,12 +105,15 @@ S.assign(stake=STAKE)[["game_id", "kick", "pid", "name", "pos", "team", "opp", "
 
 ET = ZoneInfo("America/New_York")
 lines = [f"🏈 **Anytime TD card · Week {WEEK}** · {len(S)} picks · ${STAKE} each (${STAKE*len(S)} total)",
-         "_Fun money: long odds, lots of misses, a hit or two pays the card. Not a proven edge yet, graded every Monday._", ""]
+         "_Fun money: long odds, lots of misses, a hit or two pays the card. Not a proven edge yet, graded every Monday._",
+         "_Price shown is the best of the sportsbooks and Kalshi (Kalshi after its fee). Kalshi usually has a smaller cut on TDs._", ""]
 for r in S.itertuples():
     k = datetime.strptime(r.kick, "%Y-%m-%d %H:%M").strftime("%a %-I:%M %p")
     why = [f"{r.snap*100:.0f}% snaps", f"team total {r.implied:.1f}"]
     if r.dvp > .15:
         why.append(f"soft D vs {r.pos}s")
+    if r.bestbook != "kalshi" and pd.notna(r.k_p):
+        why.append(f"Kalshi {amer(r.k_p)}")
     lines.append(f"**{r.name}** ({r.team} vs {r.opp}, {k}) · **{int(r.best):+d}** @ {BOOKS.get(r.bestbook, r.bestbook)} · "
                  f"fair {amer(r.pb)} · {', '.join(why)}")
 # 3+ picks from one team usually means we and the books disagree about WHO scores there, not how much: say so
