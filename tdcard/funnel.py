@@ -54,7 +54,7 @@ S = S.assign(wind=[wind(g) for g in S.game_id])
 windy = S.pos.isin(["WR", "TE"]) & (S.wind.fillna(0) >= 15)
 S = S[~windy]; steps.append(("No pass catchers in 15+ mph wind", len(S)))
 S = S.assign(score=S.vb + 0.03 * (S.dvp > .15) - 0.03 * (S.dvp < -.15)).sort_values("score", ascending=False)
-NO_LIMIT = os.environ.get("TD_NO_LIMIT") == "1"  # preview: show everything that passes the filters
+NO_LIMIT = os.environ.get("TD_LIMIT") != "1"  # default: no per-team cap or 20-pick max (set TD_LIMIT=1 to cap)
 if not NO_LIMIT:
     S = S.groupby("team", sort=False).head(2); steps.append(("Max 2 per team (spread across games)", len(S)))
 if len(S) < MIN_PICKS and len(cut_script):  # top up from the last cut so the card isn't empty
