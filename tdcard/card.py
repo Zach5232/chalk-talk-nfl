@@ -49,14 +49,14 @@ share = (0.35 * (agg.wi10 + .3) / (agg.wti10 + 3) + 0.25 * (agg.wrz + .5) / (agg
 lastteam = past.sort_values(["season", "week"]).groupby("pid").posteam.last()
 recent = past[(past.season == SEASON) & (past.age <= 3)].pid.unique()
 
-# team TDs per implied point, from all completed games
-hist = []
-for y in (SEASON - 2, SEASON - 1, SEASON):
-    g = games[(games.season == y) & games.result.notna() & (games.game_type == "REG")]
-    for x in g.itertuples():
-        hist += [((x.total_line + x.spread_line) / 2, x.home_score), ((x.total_line - x.spread_line) / 2, x.away_score)]
-hp = np.array(hist, float)
-b_pts, a_pts = np.polyfit(hp[:, 0], hp[:, 1] / 7.0 * 0.92, 1)  # ~points -> offensive TDs
+# offensive (rush + receiving) TDs per implied point, fit on actual team games -- points/7 overstates TDs by ~20%
+gl = games[games.result.notna() & (games.game_type == "REG")].set_index("game_id")
+tt = team.reset_index()
+tt = tt[tt.game_id.isin(gl.index)]
+home = tt.posteam.values == gl.loc[tt.game_id, "home_team"].values
+sp, tot = gl.loc[tt.game_id, "spread_line"].values, gl.loc[tt.game_id, "total_line"].values
+b_pts, a_pts = np.polyfit(np.where(home, (tot + sp) / 2, (tot - sp) / 2), tt.team_tds.values, 1)
+print(f"team TDs = {a_pts:.2f} + {b_pts:.3f} x implied points ({len(tt)} team games)")
 
 weekly = pd.concat([pd.read_parquet(f"{D}/data/weekly_{y}.parquet") for y in (SEASON - 1, SEASON)], ignore_index=True)
 info = weekly.sort_values(["season", "week"]).drop_duplicates("player_id", keep="last").set_index("player_id")
