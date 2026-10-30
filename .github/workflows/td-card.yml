@@ -44,8 +44,13 @@ jobs:
           today=dt.date.today().isoformat()
           print(int(g[g.gameday>=today].week.min()) if '$MODE'=='card' else int(g[g.gameday<today].week.max()))")
           fi
+          # the outside timer usually posts the card first; a late GitHub cron must not post it again
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$MODE" = card ] && [ -f "tdcard/picks/2026_wk$(printf %02d $WEEK).csv" ]; then
+            echo "week $WEEK card already posted -- skipping"; MODE=skip
+          fi
           echo "mode=$MODE" >> $GITHUB_OUTPUT; echo "week=$WEEK" >> $GITHUB_OUTPUT; echo "card/grade: $MODE week $WEEK"
       - name: nflverse data
+        if: steps.wk.outputs.mode != 'skip'
         run: |
           mkdir -p tdcard/data && cp /tmp/games.csv.gz tdcard/data/
           for y in 2025 2026; do
@@ -67,11 +72,12 @@ jobs:
         if: steps.wk.outputs.mode == 'grade'
         run: python3 tdcard/grade.py 2026 ${{ steps.wk.outputs.week }}
       - name: Post to Discord
-        if: github.event_name == 'schedule' || inputs.post
+        if: steps.wk.outputs.mode != 'skip' && (github.event_name == 'schedule' || inputs.post)
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python3 tdcard/post.py tdcard/discord_${{ steps.wk.outputs.mode == 'card' && 'card' || 'results' }}.txt
       - name: Save picks / results
+        if: steps.wk.outputs.mode != 'skip'
         run: |
           git config user.name "td-bot"; git config user.email "td-bot@users.noreply.github.com"
           git add tdcard/picks && git commit -qm "TD card ${{ steps.wk.outputs.mode }}: week ${{ steps.wk.outputs.week }}" && git push || echo "nothing to save"
