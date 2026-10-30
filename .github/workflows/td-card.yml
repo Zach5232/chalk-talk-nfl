@@ -1,0 +1,77 @@
+name: TD card
+
+# Weekly anytime-TD card for the NFL Discord channel (fun money, graded every Monday).
+#   card:  Friday ~5 PM ET (after the final injury report) -- live odds are used in memory and never saved;
+#          only the picks are committed (tdcard/picks/) so Monday can grade them.
+#   grade: Monday/Tuesday once weekly stats are posted.
+# Triggered on time by an outside timer (workflow_dispatch); the crons are a late backup.
+on:
+  schedule:
+    - cron: '0 21 * * 5'    # Fri 5 PM ET (EDT) card
+    - cron: '0 15 * * 2'    # Tue 11 AM ET grade
+  workflow_dispatch:
+    inputs:
+      mode: {description: "card or grade", required: true, default: "card", type: choice, options: [card, grade]}
+      week: {description: "NFL week (blank = auto)", required: false, default: ""}
+      post: {description: "Post to Discord", type: boolean, default: true}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: td-card
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install pandas pyarrow numpy requests
+      - name: Season, week and mode
+        id: wk
+        run: |
+          MODE="${{ inputs.mode || '' }}"
+          [ -z "$MODE" ] && { [ "${{ github.event.schedule }}" = "0 15 * * 2" ] && MODE=grade || MODE=card; }
+          curl -sSL -o /tmp/games.csv.gz https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv.gz
+          WEEK="${{ inputs.week || '' }}"
+          if [ -z "$WEEK" ]; then
+            WEEK=$(python3 -c "
+          import pandas as pd, datetime as dt
+          g=pd.read_csv('/tmp/games.csv.gz'); g=g[(g.season==2026)&(g.game_type=='REG')]
+          today=dt.date.today().isoformat()
+          print(int(g[g.gameday>=today].week.min()) if '$MODE'=='card' else int(g[g.gameday<today].week.max()))")
+          fi
+          echo "mode=$MODE" >> $GITHUB_OUTPUT; echo "week=$WEEK" >> $GITHUB_OUTPUT; echo "card/grade: $MODE week $WEEK"
+      - name: nflverse data
+        run: |
+          mkdir -p tdcard/data && cp /tmp/games.csv.gz tdcard/data/
+          for y in 2025 2026; do
+            curl -sSL -o tdcard/data/pbp_$y.parquet https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_$y.parquet
+            curl -sSL -o tdcard/data/weekly_$y.parquet https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_$y.parquet
+          done
+          curl -sSL -o tdcard/data/inj_2026.parquet https://github.com/nflverse/nflverse-data/releases/download/injuries/injuries_2026.parquet
+          curl -sSL -o tdcard/data/snaps_2026.parquet https://github.com/nflverse/nflverse-data/releases/download/snap_counts/snap_counts_2026.parquet
+      - name: Card
+        if: steps.wk.outputs.mode == 'card'
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_OUT: /tmp/td_odds.json
+        run: |
+          python3 tdcard/pull_td_odds.py 2026 ${{ steps.wk.outputs.week }} 4
+          python3 tdcard/card.py 2026 ${{ steps.wk.outputs.week }} /tmp/td_odds.json
+          python3 tdcard/funnel.py 2026 ${{ steps.wk.outputs.week }}
+      - name: Grade
+        if: steps.wk.outputs.mode == 'grade'
+        run: python3 tdcard/grade.py 2026 ${{ steps.wk.outputs.week }}
+      - name: Post to Discord
+        if: github.event_name == 'schedule' || inputs.post
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python3 tdcard/post.py tdcard/discord_${{ steps.wk.outputs.mode == 'card' && 'card' || 'results' }}.txt
+      - name: Save picks / results
+        run: |
+          git config user.name "td-bot"; git config user.email "td-bot@users.noreply.github.com"
+          git add tdcard/picks && git commit -qm "TD card ${{ steps.wk.outputs.mode }}: week ${{ steps.wk.outputs.week }}" && git push || echo "nothing to save"

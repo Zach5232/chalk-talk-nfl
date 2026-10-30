@@ -15,3 +15,6 @@ odds_pull/
 
 # OS/editor noise
 .DS_Store
+tdcard/data/
+tdcard/card_*.csv
+tdcard/discord_*.txt
