@@ -11,7 +11,7 @@ on:
     - cron: '0 15 * * 2'    # Tue 11 AM ET grade
   workflow_dispatch:
     inputs:
-      mode: {description: "card or grade", required: true, default: "card", type: choice, options: [card, grade]}
+      mode: {description: "card or grade", required: true, default: "card", type: choice, options: [card, grade, edge]}
       week: {description: "NFL week (blank = auto)", required: false, default: ""}
       post: {description: "Post to Discord", type: boolean, default: true}
 
@@ -50,7 +50,7 @@ jobs:
           fi
           echo "mode=$MODE" >> $GITHUB_OUTPUT; echo "week=$WEEK" >> $GITHUB_OUTPUT; echo "card/grade: $MODE week $WEEK"
       - name: nflverse data
-        if: steps.wk.outputs.mode != 'skip'
+        if: steps.wk.outputs.mode == 'card' || steps.wk.outputs.mode == 'grade'
         run: |
           mkdir -p tdcard/data && cp /tmp/games.csv.gz tdcard/data/
           for y in 2025 2026; do
@@ -68,16 +68,24 @@ jobs:
           python3 tdcard/pull_td_odds.py 2026 ${{ steps.wk.outputs.week }} 4
           python3 tdcard/card.py 2026 ${{ steps.wk.outputs.week }} /tmp/td_odds.json
           python3 tdcard/funnel.py 2026 ${{ steps.wk.outputs.week }}
+      - name: Kalshi edges (print only, no post or save)
+        if: steps.wk.outputs.mode == 'edge'
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_OUT: /tmp/td_odds.json
+        run: |
+          python3 tdcard/pull_td_odds.py 2026 ${{ steps.wk.outputs.week }} 1
+          python3 tdcard/kalshi_edge.py /tmp/td_odds.json 0.05
       - name: Grade
         if: steps.wk.outputs.mode == 'grade'
         run: python3 tdcard/grade.py 2026 ${{ steps.wk.outputs.week }}
       - name: Post to Discord
-        if: steps.wk.outputs.mode != 'skip' && (github.event_name == 'schedule' || inputs.post)
+        if: (steps.wk.outputs.mode == 'card' || steps.wk.outputs.mode == 'grade') && (github.event_name == 'schedule' || inputs.post)
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python3 tdcard/post.py tdcard/discord_${{ steps.wk.outputs.mode == 'card' && 'card' || 'results' }}.txt
       - name: Save picks / results
-        if: steps.wk.outputs.mode != 'skip'
+        if: steps.wk.outputs.mode == 'card' || steps.wk.outputs.mode == 'grade'
         run: |
           git config user.name "td-bot"; git config user.email "td-bot@users.noreply.github.com"
           git add tdcard/picks && git commit -qm "TD card ${{ steps.wk.outputs.mode }}: week ${{ steps.wk.outputs.week }}" && git push || echo "nothing to save"
