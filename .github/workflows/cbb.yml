@@ -1,0 +1,45 @@
+name: CBB price plays
+
+# Log-only for now: plays go to Firestore (cbb_plays), nothing is posted anywhere.
+#   pull  -- 10 AM, 1 PM, 4 PM, 6:30 PM ET: Odds API pull (6 credits each), log starred plays, refresh closing lines
+#   fast  -- every 10 minutes, 10 AM to midnight ET: Kalshi moneylines vs the last fair line (free)
+#   grade -- 8:30 AM ET: finals, profit, closing-line value (2 credits)
+# Times are UTC (ET + 5 in winter).
+on:
+  schedule:
+    - cron: '0 15,18,21 * * *'
+    - cron: '30 23 * * *'
+    - cron: '5,15,25,35,45,55 15-23,0-4 * * *'
+    - cron: '30 13 * * *'
+  workflow_dispatch:
+    inputs:
+      mode: {description: "pull, fast or grade", required: true, default: "pull", type: choice, options: [pull, fast, grade]}
+
+concurrency:
+  group: cbb
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install requests google-auth
+      - name: Run
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          MODE="${{ inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            case "${{ github.event.schedule }}" in
+              "30 13 * * *") MODE=grade ;;
+              "0 15,18,21 * * *"|"30 23 * * *") MODE=pull ;;
+              *) MODE=fast ;;
+            esac
+          fi
+          echo "mode: $MODE"
+          python3 cbb/cbb.py $MODE
