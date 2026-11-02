@@ -7,4 +7,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 cbbprobe/probe.py
+      - run: pip install requests google-auth
+      - name: Dry run (no Firestore)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          CBB_DRY: "1"
+        run: |
+          python3 cbbprobe/cbb.py pull
+          python3 cbbprobe/cbb.py fast
+          python3 - <<'PY'
+          import json, glob
+          f = json.load(open("/tmp/cbb_dry/cbb_state__fair.json"))
+          g = f["games"]; print(len(g), "games with fair lines;", sum("h2h" in x["fair"] for x in g.values()), "with moneyline")
+          for k, x in list(g.items())[:5]: print(" ", x["away"], "@", x["home"], x["tip"], x["fair"])
+          print(len(glob.glob("/tmp/cbb_dry/cbb_plays__*")), "plays logged")
+          PY
