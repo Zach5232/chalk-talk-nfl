@@ -33,6 +33,7 @@ BET_BOOKS = ["betonlineag", "espnbet", "williamhill_us", "betrivers", "betmgm", 
 WEIGHTS = {"pinnacle": 3.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
 FEES = {"kalshi": ("parabolic", 0.07), "polymarket": ("parabolic", 0.07), "prophetx": ("winnings", 0.02)}
 STAR_EV = 0.02          # vs consensus AND vs Pinnacle
+MAX_EV = 0.15           # above this it's almost always a stale quote or a mismatched game, not value: skip it
 MIN_BOOKS = 4           # books left in the consensus after removing the one being checked
 MAX_MOVE = 2.5          # only move a book's price this many points to another line
 SD = {"spread": 11.0, "total": 16.0}   # CBB result spread around the market number (margin, total points)
@@ -144,7 +145,7 @@ def shop(event):
             for side, odds, pw, ppw in (("a", r["a"], pa, pp), ("b", r["b"], 1 - pa, 1 - pp)):
                 ev = pw * payout(odds, r["book"]) - (1 - pw)
                 ev_pin = ppw * payout(odds, r["book"]) - (1 - ppw)
-                if ev >= STAR_EV and ev_pin >= STAR_EV:
+                if STAR_EV <= ev <= MAX_EV and ev_pin >= STAR_EV:
                     # "good to": the worst price that still clears the bar vs the consensus
                     good = american(1 / (1 + (1 + STAR_EV) / pw - 1)) if pw > 0 else None
                     plays.append(dict(kind=kind, side=side, line=r["line"], book=r["book"], odds=int(odds),
@@ -311,6 +312,16 @@ def kalshi_markets(series):
     return ms
 
 
+def kalshi_date(event_ticker):
+    """'KXNCAAMBSPREAD-26NOV02CHSTEX' -> '2026-11-02' (Kalshi's game date, Eastern)."""
+    t = re.search(r"-(\d{2})([A-Z]{3})(\d{2})", event_ticker or "")
+    return datetime.strptime("".join(t.groups()), "%y%b%d").strftime("%Y-%m-%d") if t else None
+
+
+def tip_date(g):
+    return datetime.fromisoformat(g["tip"].replace("Z", "+00:00")).astimezone(ET).strftime("%Y-%m-%d")
+
+
 def match_team(name, games):
     """(game id, game, 'a' if the team is home else 'b') for a Kalshi team name, or None if not exactly one match."""
     n = norm(name)
@@ -327,45 +338,51 @@ def ladder(fresh, seen, now):
     No = the other team +N. Priced off the saved fair spread moved along the margin distribution."""
     ms = kalshi_markets("KXNCAAMBSPREAD")
     games = {gid: g for gid, g in fresh.items() if "spread" in g.get("fair", {})}
-    new = rungs = 0
+    # a Kalshi game must match one of our games on the same date, and every team named in its ladder must be in it
+    # (teams play several times a week, so a name alone can point at the wrong game)
+    by_event = {}
     for m in ms:
         t = re.match(r"^(.*) wins by over ([\d.]+) points?", m.get("title") or "")
-        if not t:
+        if t:
+            by_event.setdefault(m["event_ticker"], []).append((m, t.group(1), float(t.group(2))))
+    new = rungs = 0
+    for et, rows in by_event.items():
+        day = kalshi_date(et)
+        same_day = {gid: g for gid, g in games.items() if tip_date(g) == day}
+        hits = {name: match_team(name, same_day) for name in {r[1] for r in rows}}
+        if not hits or any(h is None for h in hits.values()) or len({h[0] for h in hits.values()}) != 1:
             continue
-        hit = match_team(t.group(1), games)
-        if not hit:
-            continue
-        gid, g, team_side = hit
-        n = float(t.group(2))
-        fs = g["fair"]["spread"]
-        home_cover = mover("spread", fs["line"], fs["p_a"])      # P(home covers at home handicap h)
-        # (side, home handicap) for Yes (team -n) and No (other team +n)
-        yes = ("a", -n) if team_side == "a" else ("b", n)
-        no = ("b", -n) if team_side == "a" else ("a", n)
-        yb, ya = float(m.get("yes_bid_dollars") or 0), float(m.get("yes_ask_dollars") or 0)
-        for (side, line), ask, size in ((yes, ya, float(m.get("yes_ask_size_fp") or 0)),
-                                        (no, 1 - yb if yb > 0 else 0, float(m.get("yes_bid_size_fp") or 0))):
-            if not 0.02 < ask < 0.98 or abs(line - fs["line"]) > LADDER_MAX_MOVE or size * ask < 20:
-                continue
-            rungs += 1
-            pa = home_cover(line)
-            pw = pa if side == "a" else 1 - pa
-            odds = american(ask)
-            ev = pw * payout(odds, "kalshi") - (1 - pw)
-            if ev < STAR_EV:
-                continue
-            p = dict(kind="spread", side=side, line=line, book="kalshi", odds=odds,
-                     label=side_label("spread", side, {"home_team": g["home"], "away_team": g["away"]}, line),
-                     p_fair=round(pw, 4), fair_odds=american(pw), ev=round(ev, 4), ev_pin=None,
-                     good_to=american(pw / (1 + STAR_EV)))
-            pid = play_id(p, gid)
-            if pid in seen:
-                continue
-            seen.add(pid); new += 1
-            fs_set(f"cbb_plays/{pid}", dict(**p, event_id=gid, home=g["home"], away=g["away"], tip=g["tip"],
-                                            found=now.isoformat(), source="ladder", size_usd=round(size * ask),
-                                            fair_at=g["at"], fair_line=fs["line"]))
-            print(f"  ★ Kalshi ladder {p['label']} {odds:+d} (${size * ask:,.0f} avail) fair {p['fair_odds']:+d} EV {ev:+.1%}")
+        for m, name, n in rows:
+            gid, g, team_side = hits[name]
+            fs = g["fair"]["spread"]
+            home_cover = mover("spread", fs["line"], fs["p_a"])      # P(home covers at home handicap h)
+            # (side, home handicap) for Yes (team -n) and No (other team +n)
+            yes = ("a", -n) if team_side == "a" else ("b", n)
+            no = ("b", -n) if team_side == "a" else ("a", n)
+            yb, ya = float(m.get("yes_bid_dollars") or 0), float(m.get("yes_ask_dollars") or 0)
+            for (side, line), ask, size in ((yes, ya, float(m.get("yes_ask_size_fp") or 0)),
+                                            (no, 1 - yb if yb > 0 else 0, float(m.get("yes_bid_size_fp") or 0))):
+                if not 0.02 < ask < 0.98 or abs(line - fs["line"]) > LADDER_MAX_MOVE or size * ask < 20:
+                    continue
+                rungs += 1
+                pa = home_cover(line)
+                pw = pa if side == "a" else 1 - pa
+                odds = american(ask)
+                ev = pw * payout(odds, "kalshi") - (1 - pw)
+                if not STAR_EV <= ev <= MAX_EV:
+                    continue
+                p = dict(kind="spread", side=side, line=line, book="kalshi", odds=odds,
+                         label=side_label("spread", side, {"home_team": g["home"], "away_team": g["away"]}, line),
+                         p_fair=round(pw, 4), fair_odds=american(pw), ev=round(ev, 4), ev_pin=None,
+                         good_to=american(pw / (1 + STAR_EV)))
+                pid = play_id(p, gid)
+                if pid in seen:
+                    continue
+                seen.add(pid); new += 1
+                fs_set(f"cbb_plays/{pid}", dict(**p, event_id=gid, home=g["home"], away=g["away"], tip=g["tip"],
+                                                found=now.isoformat(), source="ladder", size_usd=round(size * ask),
+                                                fair_at=g["at"], fair_line=fs["line"]))
+                print(f"  ★ Kalshi ladder {p['label']} {odds:+d} (${size * ask:,.0f} avail) fair {p['fair_odds']:+d} EV {ev:+.1%}")
     print(f"kalshi ladder: {len(ms)} rungs listed, {rungs} priced, {new} new play(s)")
 
 
@@ -388,7 +405,10 @@ def fast():
         if len(mk) != 2:
             continue
         names = [norm(m.get("yes_sub_title") or "") for m in mk]
+        day = kalshi_date(et)
         for gid, g in fresh.items():
+            if tip_date(g) != day:
+                continue
             h, a = norm(g["home"]), norm(g["away"])
             side = {}
             for m, n in zip(mk, names):
@@ -408,7 +428,7 @@ def fast():
                 pw = p_home if s == "a" else 1 - p_home
                 odds = american(ask)
                 ev = pw * payout(odds, "kalshi") - (1 - pw)
-                if ev < STAR_EV:
+                if not STAR_EV <= ev <= MAX_EV:
                     continue
                 p = dict(kind="h2h", side=s, line=None, book="kalshi", odds=odds,
                          label=f"{g['home'] if s == 'a' else g['away']} ML", p_fair=round(pw, 4), fair_odds=american(pw),
@@ -423,6 +443,19 @@ def fast():
             break
     print(f"kalshi: {len(events)} games listed, {matched} matched to fair lines, {new} new play(s)")
     ladder(fresh, seen, now)
+
+
+def clean():
+    """Delete ungraded plays above MAX_EV (logged before that cap existed: stale quotes or a mismatched game)."""
+    gone = 0
+    for p in fs_list("cbb_plays"):
+        if not p.get("result") and (p.get("ev") or 0) > MAX_EV:
+            if not DRY:
+                requests.delete(doc_url(f"cbb_plays/{p['_id']}"), headers={"Authorization": f"Bearer {token()}"},
+                                timeout=30).raise_for_status()
+            gone += 1
+            print(f"  removed {p['label']} {p['odds']:+d} @ {p['book']} (EV {p['ev']:+.1%})")
+    print(f"removed {gone} play(s) above {MAX_EV:.0%}")
 
 
 def grade():
@@ -467,4 +500,4 @@ def grade():
 
 
 if __name__ == "__main__":
-    {"pull": pull, "fast": fast, "grade": grade}[sys.argv[1]]()
+    {"pull": pull, "fast": fast, "grade": grade, "clean": clean}[sys.argv[1]]()
