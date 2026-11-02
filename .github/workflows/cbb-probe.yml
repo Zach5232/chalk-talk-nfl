@@ -1,0 +1,10 @@
+name: CBB exchange probe (branch only, one-off)
+on:
+  push:
+    branches: [cbb-probe]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 cbbprobe/probe.py
