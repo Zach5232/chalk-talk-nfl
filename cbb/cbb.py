@@ -495,6 +495,21 @@ def grade():
         beat = sum(c > 0 for c in cl)
         print(f"graded {done} new. Season: {n} plays, {prof:+.1f}u ({prof / n:+.1%}), "
               f"beat the close {beat}/{len(cl)}, avg value vs close {sum(cl) / max(len(cl), 1):+.1%}")
+        def line(lab, ps):
+            if not ps:
+                return
+            pr = sum(p["profit"] for p in ps); c = [p["ev_close"] for p in ps if p.get("ev_close") is not None]
+            w = sum(p["result"] == "win" for p in ps); l = sum(p["result"] == "loss" for p in ps)
+            print(f"  {lab:28} {w}-{l}  {pr:+.1f}u ({pr / len(ps):+.1%})  beat close {sum(x > 0 for x in c)}/{len(c)}")
+        exch = {"novig", "prophetx", "kalshi", "polymarket"}
+        for lab, f in (("from the pull, sportsbook", lambda p: p.get("source") == "pull" and p["book"] not in exch),
+                       ("from the pull, exchange", lambda p: p.get("source") == "pull" and p["book"] in exch),
+                       ("Kalshi moneyline check", lambda p: p.get("source") == "fast"),
+                       ("Kalshi spread ladder", lambda p: p.get("source") == "ladder"),
+                       ("spreads", lambda p: p["kind"] == "spread"), ("totals", lambda p: p["kind"] == "total"),
+                       ("moneylines up to +300", lambda p: p["kind"] == "h2h" and p["odds"] <= 300),
+                       ("moneylines over +300", lambda p: p["kind"] == "h2h" and p["odds"] > 300)):
+            line(lab, [p for p in graded if f(p)])
     else:
         print(f"graded {done} new")
 
