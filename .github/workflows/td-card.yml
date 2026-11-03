@@ -48,6 +48,9 @@ jobs:
           if [ "${{ github.event_name }}" = "schedule" ] && [ "$MODE" = card ] && [ -f "tdcard/picks/2026_wk$(printf %02d $WEEK).csv" ]; then
             echo "week $WEEK card already posted -- skipping"; MODE=skip
           fi
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$MODE" = grade ] && head -1 "tdcard/picks/2026_wk$(printf %02d $WEEK).csv" 2>/dev/null | grep -q result; then
+            echo "week $WEEK already graded -- skipping"; MODE=skip
+          fi
           echo "mode=$MODE" >> $GITHUB_OUTPUT; echo "week=$WEEK" >> $GITHUB_OUTPUT; echo "card/grade: $MODE week $WEEK"
       - name: nflverse data
         if: steps.wk.outputs.mode == 'card' || steps.wk.outputs.mode == 'grade'
