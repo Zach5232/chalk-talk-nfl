@@ -14,7 +14,7 @@ on:
       mode: {description: "card or grade", required: true, default: "card", type: choice, options: [card, grade, edge]}
       week: {description: "NFL week (blank = auto)", required: false, default: ""}
       post: {description: "Post to Discord", type: boolean, default: true}
-      skip_books: {description: "edge mode: books you can't bet at (comma-separated, e.g. fanatics,betrivers)", required: false, default: ""}
+      skip_books: {description: "edge mode: books you can't bet at (comma-separated)", required: false, default: "fanatics"}
 
 permissions:
   contents: write
