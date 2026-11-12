@@ -502,6 +502,11 @@ def grade():
             w = sum(p["result"] == "win" for p in ps); l = sum(p["result"] == "loss" for p in ps)
             print(f"  {lab:28} {w}-{l}  {pr:+.1f}u ({pr / len(ps):+.1%})  beat close {sum(x > 0 for x in c)}/{len(c)}")
         exch = {"novig", "prophetx", "kalshi", "polymarket"}
+        if os.environ.get("CBB_AUDIT"):   # print graded moneylines up to +300 and a few spreads, to check grading
+            for p in sorted((p for p in graded if p["kind"] == "h2h" and p["odds"] <= 300), key=lambda p: p["tip"]):
+                print(f"  AUDIT ML  {p['away']} @ {p['home']} final {p.get('final')} | {p['label']} {p['odds']:+d} @ {p['book']} -> {p['result']}")
+            for p in sorted((p for p in graded if p["kind"] == "spread"), key=lambda p: p["tip"])[:12]:
+                print(f"  AUDIT SPR {p['away']} @ {p['home']} final {p.get('final')} | {p['label']} {p['odds']:+d} @ {p['book']} ({p.get('source')}) -> {p['result']}")
         for lab, f in (("from the pull, sportsbook", lambda p: p.get("source") == "pull" and p["book"] not in exch),
                        ("from the pull, exchange", lambda p: p.get("source") == "pull" and p["book"] in exch),
                        ("Kalshi moneyline check", lambda p: p.get("source") == "fast"),

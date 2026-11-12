@@ -13,7 +13,7 @@ on:
     - cron: '30 13 * * *'
   workflow_dispatch:
     inputs:
-      mode: {description: "pull, fast, grade or clean", required: true, default: "pull", type: choice, options: [pull, fast, grade, clean]}
+      mode: {description: "pull, fast, grade or clean", required: true, default: "pull", type: choice, options: [pull, fast, grade, clean, audit]}
 
 concurrency:
   group: cbb
@@ -42,4 +42,4 @@ jobs:
             esac
           fi
           echo "mode: $MODE"
-          python3 cbb/cbb.py $MODE
+          if [ "$MODE" = audit ]; then CBB_AUDIT=1 python3 cbb/cbb.py grade; else python3 cbb/cbb.py $MODE; fi
