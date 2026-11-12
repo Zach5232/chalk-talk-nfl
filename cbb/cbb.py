@@ -495,6 +495,22 @@ def grade():
         beat = sum(c > 0 for c in cl)
         print(f"graded {done} new. Season: {n} plays, {prof:+.1f}u ({prof / n:+.1%}), "
               f"beat the close {beat}/{len(cl)}, avg value vs close {sum(cl) / max(len(cl), 1):+.1%}")
+        # the same bet often shows up at several books (and as a moneyline AND a spread); count each game + team once,
+        # at its best price, for the record you'd actually have
+        def team_of(p):
+            if p["kind"] == "total":
+                return p["side"]
+            return p["home"] if p["side"] == "a" else p["away"]
+        best = {}
+        for p in graded:
+            k = (p["event_id"], p["kind"] == "total", team_of(p))
+            if k not in best or p["ev"] > best[k]["ev"]:
+                best[k] = p
+        uniq = list(best.values())
+        up = sum(p["profit"] for p in uniq); uc = [p["ev_close"] for p in uniq if p.get("ev_close") is not None]
+        print(f"One per game and side (best price): {len(uniq)} bets, {sum(p['result'] == 'win' for p in uniq)}-"
+              f"{sum(p['result'] == 'loss' for p in uniq)}, {up:+.1f}u ({up / len(uniq):+.1%}), beat the close "
+              f"{sum(c > 0 for c in uc)}/{len(uc)}")
         def line(lab, ps):
             if not ps:
                 return
