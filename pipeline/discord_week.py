@@ -7,6 +7,7 @@ that only real changes post. Runs only after an odds pull (the caller decides), 
   3. Better price a posted play at a better line, or the same line at least 1% better in payout
   4. Off board    a posted play that is no longer a starred BET anywhere (game not started, market re-pulled)
   5. Game day    first odds run on a game day (not the card's): starred plays still good for today's games
+                  (off: GAMEDAY_LIST = False, since it repeats plays already posted)
   6. Recap        once last week's posted plays are graded: their results, then the season record
 
 A play here is a dict:
@@ -27,6 +28,7 @@ from odds_books import BOOK_NAMES
 
 ET = ZoneInfo("America/New_York")
 BETTER_PAYOUT = 0.01   # same line: post again only when the payout is at least 1% better
+GAMEDAY_LIST = False   # the "Still good today" list re-posts plays already sent; off so every play posts once
 
 
 def _post(url, text):
@@ -162,6 +164,8 @@ def update(url, state, sport, week_id, plays, best_now, repulled, now=None, allo
 
     # game-day list: first odds run on a day with games (not the card's day) -- what's still good today
     today = now.astimezone(ET).date()
+    if not GAMEDAY_LIST:
+        state["gameday"] = today.isoformat()
     if state.get("gameday") != today.isoformat():
         todays = [p for pid, p in current.items() if p.get("kick") and p["kick"].astimezone(ET).date() == today
                   and posted.get(pid, {}).get("status") == "on" and pid not in just]
