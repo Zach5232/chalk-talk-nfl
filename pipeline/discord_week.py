@@ -46,9 +46,19 @@ def _post(url, text):
 
 
 def _post_chunks(url, head, blocks, sep="\n"):
-    """Post head + blocks, split under Discord's 2,000-character cap. True if every part went through."""
-    msgs, cur = [], head
+    """Post head + blocks, split under Discord's 2,000-character cap. True if every part went through.
+    A block that is itself too long (a whole game day of plays) is split at its line breaks first; one oversized
+    message gets a 400 from Discord and the whole card is lost."""
+    pieces = []
     for b in blocks:
+        while len(b) > 1900:
+            cut = b.rfind("\n", 0, 1900)
+            cut = cut if cut > 0 else 1900
+            pieces.append(b[:cut])
+            b = b[cut:].lstrip("\n")
+        pieces.append(b)
+    msgs, cur = [], head
+    for b in pieces:
         if len(cur) + len(b) + len(sep) > 1900:
             msgs.append(cur)
             cur = b
@@ -135,7 +145,8 @@ def update(url, state, sport, week_id, plays, best_now, repulled, now=None, allo
         head = f"{sport} **{_wk(week_id)} card** · {len(current)} play{'s' if len(current) != 1 else ''}"
         if not current:
             head += "\nNo plays yet. New ones post here as lines move."
-        blocks = [f"\n__**{d}**__\n" + "\n\n".join(items) for d, items in days.items()]
+        blocks = [(f"\n__**{d}**__\n" if i == 0 else "\n") + item
+                  for d, items in days.items() for i, item in enumerate(items)]
         if _post_chunks(url, head + "\n_Each play posts once; after this only new plays, better numbers and "
                                    "plays that come off the board._", blocks):
             cards.append(week_id)
