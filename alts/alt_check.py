@@ -67,6 +67,8 @@ evs = requests.get(f"{B}/events", params={"apiKey": KEY}, timeout=30).json()
 evs = [e for e in evs if now < datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) < now + timedelta(hours=HOURS)]
 print(f"{len(evs)} games in the next {HOURS}h")
 found = []
+from collections import defaultdict as _dd
+raw = _dd(dict)   # (game, kind, number, book) -> {"A": price, "B": price}; A = home / over
 for e in evs:
     r = requests.get(f"{B}/events/{e['id']}/odds", params={"apiKey": KEY, "bookmakers": ",".join(BOOKS),
                      "markets": "spreads,totals,alternate_spreads,alternate_totals", "oddsFormat": "american"}, timeout=30)
@@ -74,6 +76,16 @@ for e in evs:
     left = r.headers.get("x-requests-remaining")
     bms = {b["key"]: {m["key"]: m["outcomes"] for m in b["markets"]} for b in d.get("bookmakers", [])}
     pin = bms.get("pinnacle", {})
+    for bk, mk in bms.items():
+        for mkey in ("spreads", "alternate_spreads"):
+            for o in mk.get(mkey, []):
+                if o.get("point") is not None:
+                    L = o["point"] if o["name"] == home else -o["point"]
+                    raw[(f"{away} @ {home}", "spread", L, bk)]["A" if o["name"] == home else "B"] = o["price"]
+        for mkey in ("totals", "alternate_totals"):
+            for o in mk.get(mkey, []):
+                if o.get("point") is not None:
+                    raw[(f"{away} @ {home}", "total", o["point"], bk)]["A" if o["name"] == "Over" else "B"] = o["price"]
     fair = {}
     sp = {o["name"]: o for o in pin.get("spreads", [])}
     if home in sp and away in sp:
@@ -102,7 +114,8 @@ for e in evs:
                 pw = po if o["name"] == home else 1 - po - push
                 ev = pw * payout(o["price"], bk) - (1 - pw - push)
                 found.append((ev, f"{away} @ {home}", f"{o['name'].split()[-1]} {o['point']:+g}", o["price"], bk,
-                              "alt" if mkey.startswith("alt") else "main", pw, push, f"Pinnacle {home.split()[-1]} {main:+g}"))
+                              "alt" if mkey.startswith("alt") else "main", pw, push, f"Pinnacle {home.split()[-1]} {main:+g}",
+                              (f"{away} @ {home}", "spread", L), "A" if o["name"] == home else "B"))
         for mkey in ("totals", "alternate_totals"):
             if "total" not in fair:
                 continue
@@ -114,14 +127,37 @@ for e in evs:
                 pw = po if o["name"] == "Over" else 1 - po - push
                 ev = pw * payout(o["price"], bk) - (1 - pw - push)
                 found.append((ev, f"{away} @ {home}", f"{o['name']} {o['point']:g}", o["price"], bk,
-                              "alt" if mkey.startswith("alt") else "main", pw, push, f"Pinnacle total {main:g}"))
+                              "alt" if mkey.startswith("alt") else "main", pw, push, f"Pinnacle total {main:g}",
+                              (f"{away} @ {home}", "total", o["point"]), "A" if o["name"] == "Over" else "B"))
     print(f"  {away} @ {home}: priced ({len(bms)} books), credits left {left}")
 
+# consensus check: every book's own two-sided price at the same alt number, devigged, averaged without the book
+# being checked. A line counts only when it's MIN_EV+ better than BOTH the key-number price and that consensus
+# (far from the main line, the key-number table alone can disagree with every book).
+from collections import defaultdict
+two = defaultdict(dict)   # (game, kind, number) -> {book: P(side A)}
+for k, v in raw.items():
+    (game, kind, number, bk) = k
+    if "A" in v and "B" in v:
+        pa, pb = prob(v["A"]), prob(v["B"])
+        two[(game, kind, number)][bk] = pa / (pa + pb)
+keep = []
+for x in found:
+    ev, game, bet, price, bk, kind, pw, push, ref, ckey, side = x
+    others = {b: q for b, q in two.get(ckey, {}).items() if b != bk}
+    if len(others) < 2:
+        continue
+    q = sum(others.values()) / len(others)
+    pc = (q if side == "A" else 1 - q) * (1 - push)
+    evc = pc * payout(price, bk) - (1 - pc - push)
+    if ev >= MIN_EV and evc >= MIN_EV:
+        keep.append((min(ev, evc), game, bet, price, bk, kind, pw, push, ref + f", {len(others)} books' alt price: win {pc:.1%}"))
+found = keep
 best = {}
 for x in sorted(found, key=lambda x: -x[0]):
     k = (x[1], x[2])
     if x[0] >= MIN_EV and k not in best:
         best[k] = x
-print(f"\nAlt and main lines {MIN_EV:.0%}+ better than Pinnacle's fair line (best book per line):")
+print(f"\nAlt and main lines {MIN_EV:.0%}+ better than BOTH Pinnacle's key-number price and the other books' price for that number:")
 for ev, game, bet, price, bk, kind, pw, push, ref in sorted(best.values(), key=lambda x: -x[0])[:40]:
     print(f"  {ev:+6.1%}  {game:44} {bet:22} {price:+5d} @ {bk:12} {kind:4} win {pw:.1%}" + (f" push {push:.1%}" if push else "") + f"  [{ref}]")
