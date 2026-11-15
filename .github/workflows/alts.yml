@@ -8,6 +8,7 @@ on:
     inputs:
       min_ev: {description: "Show lines at least this much better than fair (0.03 = 3%)", required: false, default: "0.03"}
       skip_books: {description: "Books you can't bet at (comma-separated)", required: false, default: "fanatics,bovada"}
+      h1_games: {description: "Also check first-half lines for these games, e.g. MIN@GB,SF@DAL (blank = skip)", required: false, default: ""}
 
 jobs:
   check:
@@ -19,4 +20,5 @@ jobs:
       - env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           SKIP_BOOKS: ${{ inputs.skip_books }}
-        run: python3 alts/alt_check.py ${{ inputs.min_ev }}
+        run: |
+          if [ -n "${{ inputs.h1_games }}" ]; then python3 alts/h1_check.py "${{ inputs.h1_games }}" 0.02; else python3 alts/alt_check.py ${{ inputs.min_ev }}; fi
