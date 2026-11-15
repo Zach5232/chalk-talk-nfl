@@ -1,0 +1,22 @@
+name: NFL alt lines check
+
+# Manual only: every book's alt spreads and alt totals (and main lines) for games in the next 14 hours, priced
+# against Pinnacle's fair line moved along real NFL results (key_numbers.json). Prints to this log only.
+# About 8 Odds API credits per game.
+on:
+  workflow_dispatch:
+    inputs:
+      min_ev: {description: "Show lines at least this much better than fair (0.03 = 3%)", required: false, default: "0.03"}
+      skip_books: {description: "Books you can't bet at (comma-separated)", required: false, default: "fanatics,bovada"}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install requests
+      - env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          SKIP_BOOKS: ${{ inputs.skip_books }}
+        run: python3 alts/alt_check.py ${{ inputs.min_ev }}
