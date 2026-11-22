@@ -24,7 +24,7 @@ A better number later edits that same message ("Better number at ...", showing t
 Storage: Firestore scan_state/* and scan_plays/*. This repo is public: no odds are written to it and the log prints
 counts only (prices go to Firestore and Discord). SCAN_DRY=1 keeps state in local files and prints alerts instead.
 """
-import argparse, json, math, os, re, time
+import argparse, json, math, os, queue, re, threading, time
 from datetime import datetime, timedelta, timezone
 from statistics import NormalDist
 from zoneinfo import ZoneInfo
@@ -837,16 +837,39 @@ def webhook():
     return os.environ.get("SCAN_DISCORD_WEBHOOK_URL") or os.environ.get("DISCORD_WEBHOOK_URL")
 
 
+BUTTONS = [{"type": 1, "components": [
+    {"type": 2, "style": 3, "label": "Bet it", "custom_id": "bet"},
+    {"type": 2, "style": 2, "label": "Pass", "custom_id": "pass"}]}]
+BOT_MSGS = set()          # alert messages the bot posted (it edits those; the webhook edits its own)
+BOT_CAN_POST = [True]
+
+
 def discord_send(text, edit_id=None):
-    """Post one alert (returns its message id), or edit an earlier one in place (no new notification)."""
+    """Post one alert (returns its message id), or edit an earlier one in place (no new notification).
+    With the bot: posted by the bot with Bet it / Pass buttons. Without it (or no Send Messages permission): webhook."""
     if DRY:
         print("   [edit]" if edit_id else "   [alert]", text.replace("\n", " | "))
         return edit_id or f"dry-{abs(hash(text)) % 10**8}"
-    url = webhook()
-    if not POST or not url:   # public log: never print prices
+    if not POST or not webhook():   # public log: never print prices
         log("alert not posted (posting off or no webhook)")
         return None
     try:
+        if bot_on() and (edit_id in BOT_MSGS if edit_id else BOT_CAN_POST[0]):
+            if edit_id:
+                bot("PATCH", f"/channels/{channel_id()}/messages/{edit_id}", json={"content": text})
+                time.sleep(0.3)
+                return edit_id
+            try:
+                m = bot("POST", f"/channels/{channel_id()}/messages", json={"content": text, "components": BUTTONS})
+                BOT_MSGS.add(m["id"])
+                time.sleep(0.3)
+                return m["id"]
+            except requests.HTTPError as e:
+                if e.response.status_code != 403:
+                    raise
+                BOT_CAN_POST[0] = False
+                log("bot can't send messages in the alert channel (give it Send Messages) -- using the webhook")
+        url = webhook()
         if edit_id:
             r = requests.patch(f"{url}/messages/{edit_id}", json={"content": text}, timeout=20)
         else:
@@ -890,7 +913,7 @@ def bot(method, path, **kw):
 
 def add_buttons(mid):
     """✅ / ❌ under a new alert, so marking a bet is one tap."""
-    if not (mid and bot_on()):
+    if not (mid and bot_on()) or mid in BOT_MSGS:   # bot messages have buttons instead
         return
     for e in (TAKE, PASS):
         try:
@@ -971,6 +994,130 @@ def read_reactions(seen, now):
             fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
             changed += 1
     return changed
+
+
+# ---- Bet it / Pass buttons: the bot listens on Discord's gateway while the scan runs ----
+TAPS = queue.Queue()      # (message id, 'bet' | 'pass', stake, odds, contract price) for the main loop
+MSG_DOC = {}              # message id -> its live play (refreshed by the main loop every cycle)
+
+
+def parse_price(v):
+    """'46.5' / '46.5c' / '.465' -> cents; '-110' / '+115' / '115' -> American. -> (American odds, price 0-1 or None)."""
+    t = (v or "").strip().lower().replace("¢", "").replace("c", "").replace(" ", "")
+    if re.fullmatch(r"[+-]\d{3,5}", t):
+        return int(t), None
+    x = float(t)
+    if 0 < x < 1:
+        return american(x), x
+    if 1 <= x < 100:
+        return american(x / 100), x / 100
+    if abs(x) >= 100:
+        return int(x), None
+    raise ValueError(v)
+
+
+def _default_price(x):
+    if x["book"] in EXCHANGES:
+        return _pct(x.get("price_prob") or prob(x["odds"]))
+    return f"{x['odds']:+d}"
+
+
+def _answer(it):
+    reply = lambda body: requests.post(f"{DAPI}/interactions/{it['id']}/{it['token']}/callback", json=body, timeout=10)
+    note = lambda msg: reply({"type": 4, "data": {"content": msg, "flags": 64}})   # only you see it
+    try:
+        if it["type"] == 3:   # button
+            mid = it["message"]["id"]
+            x = MSG_DOC.get(mid)
+            if not x:
+                return note("That alert isn't live anymore (game started or the scan restarted) -- nothing logged.")
+            if it["data"]["custom_id"] == "pass":
+                TAPS.put((mid, "pass", None, None, None))
+                return note("Passed ❌")
+            stake = x.get("stake_taken") or x.get("stake_usd") or 0
+            return reply({"type": 9, "data": {"custom_id": f"bet:{mid}", "title": "Log your bet"[:45], "components": [
+                {"type": 1, "components": [{"type": 4, "custom_id": "amount", "label": "Amount ($)", "style": 1,
+                                            "value": f"{stake:g}", "required": True, "max_length": 10}]},
+                {"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": True, "max_length": 10,
+                                            "label": "Price: cents (46.5) or odds (-110)", "value": _default_price(x)}]}]}})
+        if it["type"] == 5:   # form submitted
+            mid = it["data"]["custom_id"].split(":", 1)[1]
+            vals = {c["components"][0]["custom_id"]: c["components"][0].get("value", "") for c in it["data"]["components"]}
+            try:
+                stake = float(vals["amount"].replace("$", "").strip())
+                odds, pr = parse_price(vals["price"])
+            except (ValueError, KeyError):
+                return note("Couldn't read that -- amount like 10, price like 46.5 (cents) or -110 (odds). Tap Bet it again.")
+            TAPS.put((mid, "bet", stake, odds, pr))
+            x = MSG_DOC.get(mid) or {"book": "", "odds": odds}
+            return note(f"Logged ✅ ${stake:g} at {price_str(odds, x['book'], pr)}")
+    except Exception as e:  # noqa: BLE001
+        log(f"button answer failed: {type(e).__name__}")
+
+
+def gateway():
+    """Discord gateway connection (thread): receives button taps and form submits. Reconnects on drops."""
+    import websocket   # websocket-client
+    while True:
+        ws, alive = None, [True]
+        try:
+            ws = websocket.create_connection("wss://gateway.discord.gg/?v=10&encoding=json", timeout=60)
+            hb = json.loads(ws.recv())["d"]["heartbeat_interval"] / 1000
+            seq = [None]
+
+            def beat():
+                while alive[0]:
+                    time.sleep(hb)
+                    if alive[0]:
+                        ws.send(json.dumps({"op": 1, "d": seq[0]}))
+            threading.Thread(target=beat, daemon=True).start()
+            ws.send(json.dumps({"op": 2, "d": {"token": BOT, "intents": 0,
+                                               "properties": {"os": "linux", "browser": "scan", "device": "scan"}}}))
+            ws.settimeout(hb * 2 + 5)
+            while True:
+                msg = json.loads(ws.recv())
+                if msg.get("s") is not None:
+                    seq[0] = msg["s"]
+                if msg["op"] == 0 and msg.get("t") == "READY":
+                    log("gateway: listening for Bet it / Pass taps")
+                if msg["op"] == 0 and msg.get("t") == "INTERACTION_CREATE":
+                    threading.Thread(target=_answer, args=(msg["d"],), daemon=True).start()
+                elif msg["op"] == 1:
+                    ws.send(json.dumps({"op": 1, "d": seq[0]}))
+                elif msg["op"] in (7, 9):   # reconnect / invalid session
+                    break
+        except Exception as e:  # noqa: BLE001
+            log(f"gateway: {type(e).__name__} -- reconnecting")
+        finally:
+            alive[0] = False
+            try:
+                ws and ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        time.sleep(5)
+
+
+def apply_taps(seen):
+    """Main loop: record button taps / forms on the play, and show it on the alert."""
+    n = 0
+    while True:
+        try:
+            mid, what, stake, odds, pr = TAPS.get_nowait()
+        except queue.Empty:
+            return n
+        x = MSG_DOC.get(mid)
+        if not x:
+            continue
+        if what == "pass":
+            x["taken"] = False
+            line = "❌ **Passed**"
+        else:
+            x.update(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr)
+            line = f"✅ **You bet** ${stake:g} at {price_str(odds, x['book'], pr)}"
+        x.update(status_line=line, status_final=True)
+        discord_send((x.get("msg_text") or alert_text(x, x)) + "\n" + line, edit_id=mid)
+        fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
+        n += 1
 
 
 def open_exposure(seen, now):
@@ -1175,7 +1322,8 @@ def record(found, seen, now):
             mid = discord_send(text)
             add_buttons(mid)
             doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
-                       alerted_at=now.isoformat(), msg_id=mid, first_id=pid, msg_text=text)
+                       alerted_at=now.isoformat(), msg_id=mid, first_id=pid, msg_text=text,
+                       via="bot" if mid in BOT_MSGS else "webhook")
             fs_set(f"scan_plays/{pid}", doc)
             seen[pid] = doc
             posted += 1
@@ -1207,7 +1355,7 @@ def record(found, seen, now):
         last["superseded"] = True
         doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
                    alerted_at=now.isoformat(), msg_id=mid, first_id=last.get("first_id") or pid, updated=True,
-                   msg_text=text, taken=last.get("taken"), stake_taken=last.get("stake_taken"))
+                   msg_text=text, taken=last.get("taken"), stake_taken=last.get("stake_taken"), via=last.get("via"))
         fs_set(f"scan_plays/{pid}", doc)
         seen[pid] = doc
         posted += 1
@@ -1383,10 +1531,22 @@ def bot_check():
         log(f"bot: check failed ({type(e).__name__})")
 
 
+def refresh_msg_doc(seen, now):
+    """Swapped in whole, so the gateway thread never sees a half-built map."""
+    global MSG_DOC
+    MSG_DOC = {x["msg_id"]: x for x in list(seen.values())
+               if x.get("alerted") and not x.get("superseded") and x.get("msg_id")
+               and datetime.fromisoformat(x["start"]) > now - timedelta(hours=6)}
+
+
 def watch(minutes, sports):
     bot_check()
     t_end = time.time() + minutes * 60
     seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (datetime.now(timezone.utc) - timedelta(days=2)).isoformat())}
+    BOT_MSGS.update(x["msg_id"] for x in seen.values() if x.get("via") == "bot" and x.get("msg_id"))
+    refresh_msg_doc(seen, datetime.now(timezone.utc))
+    if bot_on():
+        threading.Thread(target=gateway, daemon=True).start()
     state = {}
     for s in sports:
         games, pulled = load_fair(s)
@@ -1476,10 +1636,12 @@ def watch(minutes, sports):
                 n_edits += live_status(s, S["games"], q, seen, now, full or bool(reasons and S["pulled"] == now.isoformat()))
             except Exception as e:  # noqa: BLE001 -- status lines never stop the scan
                 log(f"[{s}] live status: {type(e).__name__}: {str(e)[:80]}")
-        try:   # ✅ / ❌ under alerts (one Discord call a minute; needs DISCORD_BOT_TOKEN)
+        try:   # ✅ / ❌ reactions on webhook-posted alerts (one Discord call a minute; needs DISCORD_BOT_TOKEN)
             read_reactions(seen, now)
         except Exception as e:  # noqa: BLE001
             log(f"reactions: {type(e).__name__}")
+        refresh_msg_doc(seen, now)
+        apply_taps(seen)
         log(f"cycle {cycle}: {n_quotes} exchange prices checked, {n_alerts} alert(s), {n_edits} status update(s); "
             f"credits {st['used']}/{CREDIT_CAP}")
         time.sleep(max(0, min(CYCLE_S, t_end - time.time())))
