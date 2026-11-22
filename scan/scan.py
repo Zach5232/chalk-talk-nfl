@@ -86,6 +86,9 @@ KELLY = 1 / 8
 MAX_STAKE = 0.02
 
 
+MIN_TO_WIN = float(os.environ.get("SCAN_MIN_TO_WIN", "9"))   # don't post plays that can't win at least this much
+
+
 def bet_size(usd):
     """What actually gets bet: under $5 to the dollar ($1 minimum), from $5 up to the nearest $5 ($8 -> $10, $7 -> $5)."""
     return max(1, round(usd)) if usd < 5 else 5 * round(usd / 5)
@@ -226,11 +229,14 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
         return None
     kelly = ev / pay
     stake = min(kelly * KELLY, MAX_STAKE)
+    to_win = bet_size(stake * BANKROLL) * pay
+    if to_win < MIN_TO_WIN:
+        return None
     # worst price that still clears the bar vs the consensus (fees ignored for the display number)
     good = american(pw / (1 + bar))
     return dict(sport=sport, kind=kind, side=side, line=line, book=book, odds=int(odds), label=label(g, kind, side, line),
                 p_fair=round(pw, 4), fair_odds=american(pw), ev=round(ev, 4), ev_pin=round(ev_pin, 4),
-                stake_pct=round(stake, 4), stake_usd=bet_size(stake * BANKROLL), good_to=good, bar=bar,
+                stake_pct=round(stake, 4), stake_usd=bet_size(stake * BANKROLL), to_win=round(to_win, 2), good_to=good, bar=bar,
                 price_prob=round(price_prob if price_prob is not None else prob(odds), 4))
 
 
@@ -988,7 +994,7 @@ def alert_text(p, g, first=None):
     size = f" · ${p['size_usd']:,} avail" if p.get("size_usd") else ""
     txt = (f"🔎 **{SPORTS[p['sport']]['label']}** {g['away']} @ {g['home']} · {t} ET\n"
            f"**{p['label']} · {price_str(p['odds'], p['book'], p.get('price_prob'))} @ {bk}**\n"
-           f"Fair {_pct(p['p_fair'])}% ({p['fair_odds']:+d}) · EV {p['ev']:+.1%} · bet ${p['stake_usd']} (1/8 Kelly){good}{size}")
+           f"Fair {_pct(p['p_fair'])}% ({p['fair_odds']:+d}) · EV {p['ev']:+.1%} · bet ${p['stake_usd']} to win ${p.get('to_win') or p['stake_usd'] * payout(p['odds'], p['book'], p['sport']):,.0f}{good}{size}")
     if first:
         was = price_str(first["odds"], first["book"], first.get("price_prob"))
         wbk = BOOK_NAMES.get(first["book"], first["book"])
