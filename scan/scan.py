@@ -1,5 +1,5 @@
 """
-Value scanner: NFL, NBA, college basketball and NHL game lines (moneyline, spread, total) at every book and exchange
+Value scanner: NFL, NBA, college basketball, NHL and college football game lines (moneyline, spread, total) at every book and exchange
 you can bet, priced against the sharp market. No model -- the fair line is the market itself.
 
     python3 scan/scan.py watch [--minutes 330]   loop: free exchange checks every ~3 min, paid confirm pulls on triggers
@@ -52,6 +52,9 @@ SPORTS = {
     "ncaab": dict(odds="basketball_ncaab", novig="NCAAB", poly=["cbb", "ncaab"], label="CBB",
                   kalshi=dict(h2h="KXNCAAMBGAME", spread="KXNCAAMBSPREAD", total="KXNCAAMBTOTAL"),
                   sd=dict(spread=11.0, total=16.0), max_move=2.5),
+    "ncaaf": dict(odds="americanfootball_ncaaf", novig="NCAAF", poly=["cfb"], label="CFB",
+                  kalshi=dict(h2h="KXNCAAFGAME", spread="KXNCAAFSPREAD", total="KXNCAAFTOTAL"),
+                  sd=dict(spread=15.0, total=15.0), max_move=0.0),   # key numbers: exact lines only, like the NFL
     "nhl":   dict(odds="icehockey_nhl", novig="NHL", poly=["nhl"], label="NHL",
                   kalshi=dict(h2h="KXNHLGAME", spread="KXNHLSPREAD", total="KXNHLTOTAL"),
                   sd=dict(spread=2.3, total=2.3), max_move=0.0, markets="h2h,totals"),
@@ -1703,13 +1706,16 @@ def day_summary(now):
 
 
 # ---------------- grading ----------------
-ESPN = {"nfl": "football/nfl", "nba": "basketball/nba", "ncaab": "basketball/mens-college-basketball", "nhl": "hockey/nhl"}
+ESPN = {"nfl": "football/nfl", "nba": "basketball/nba", "ncaab": "basketball/mens-college-basketball", "nhl": "hockey/nhl",
+        "ncaaf": "football/college-football"}
 
 
 def espn_finals(sport, day):
     params = dict(dates=day.replace("-", ""), limit=500)
     if sport == "ncaab":
         params["groups"] = 50
+    if sport == "ncaaf":
+        params["groups"] = 80   # FBS
     d = _get(f"https://site.api.espn.com/apis/site/v2/sports/{ESPN[sport]}/scoreboard", params) or {}
     out = []
     for e in d.get("events", []):
@@ -1788,7 +1794,7 @@ def main():
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
-    ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS", "nfl,nba,ncaab,nhl"))
+    ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS", "nfl,nba,ncaab,nhl,ncaaf"))
     a = ap.parse_args()
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
