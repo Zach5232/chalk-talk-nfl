@@ -1039,7 +1039,8 @@ def _answer(it):
                 {"type": 1, "components": [{"type": 4, "custom_id": "amount", "label": "Amount ($)", "style": 1,
                                             "value": f"{stake:g}", "required": True, "max_length": 10}]},
                 {"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": True, "max_length": 10,
-                                            "label": "Price: cents (46.5) or odds (-110)", "value": _default_price(x)}]}]}})
+                                            "label": ("Price in cents (e.g. 46.5)" if x["book"] in EXCHANGES
+                                                      else "Odds (e.g. -115)"), "value": _default_price(x)}]}]}})
         if it["type"] == 5:   # form submitted
             mid = it["data"]["custom_id"].split(":", 1)[1]
             vals = {c["components"][0]["custom_id"]: c["components"][0].get("value", "") for c in it["data"]["components"]}
