@@ -1338,7 +1338,27 @@ def close_lines(sport, games, plays, now):
     return n
 
 
+def bot_check():
+    """One line in the log saying whether ✅/❌ tracking works (and why not)."""
+    if not BOT:
+        return log("bot: no DISCORD_BOT_TOKEN -- alerts post without ✅/❌ buttons")
+    if not channel_id():
+        return log("bot: couldn't find the alert channel from the webhook")
+    try:
+        bot("GET", f"/channels/{channel_id()}/messages", params=dict(limit=1))
+        log("bot: connected -- can read the alert channel; ✅/❌ tracking on")
+    except requests.HTTPError as e:
+        code = e.response.status_code
+        why = {401: "the token is wrong (reset it and update the secret)",
+               403: "it can't see the channel (add the bot to #value-plays with View Channel + Read Message History)",
+               404: "the channel wasn't found"}.get(code, f"HTTP {code}")
+        log(f"bot: not working -- {why}")
+    except Exception as e:  # noqa: BLE001
+        log(f"bot: check failed ({type(e).__name__})")
+
+
 def watch(minutes, sports):
+    bot_check()
     t_end = time.time() + minutes * 60
     seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (datetime.now(timezone.utc) - timedelta(days=2)).isoformat())}
     state = {}
