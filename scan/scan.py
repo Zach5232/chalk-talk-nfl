@@ -372,6 +372,62 @@ def charge(st, now, cost):
     fs_set("scan_state/credits", st)
 
 
+# ---------------- book scorecard ----------------
+def book_tally(sport, events_q, now):
+    """For every priced side in a pull: which book had the best price and how far each book was from fair (after
+    fees). Accumulated per month / sport / book in Firestore -- answers 'which books are worth funding' for every
+    sport, from data the pull already paid for."""
+    tally = {}
+    for g, q in events_q:
+        for kind, rows in q.items():
+            if not rows or not (g.get("views") or {}).get(kind):
+                continue
+            for line in {r["line"] for r in rows}:
+                at = [r for r in rows if r["line"] == line and r["book"] != SHARP]
+                for side in ("a", "b"):
+                    pays = {r["book"]: payout(r[side], r["book"], sport) for r in at}
+                    if not pays:
+                        continue
+                    best = max(pays.values())
+                    for r in at:
+                        pa = fair_at(sport, kind, g["views"][kind], line, without=r["book"])
+                        if pa is None:
+                            continue
+                        pw = pa if side == "a" else 1 - pa
+                        ev = pw * (1 + pays[r["book"]]) - 1
+                        t = tally.setdefault(r["book"], [0, 0, 0, 0, 0.0])
+                        t[0] += 1
+                        t[1] += pays[r["book"]] >= best - 1e-9
+                        t[2] += ev >= 0.02
+                        t[3] += ev >= 0.03
+                        t[4] += ev
+    if not tally:
+        return
+    path = f"scan_state/books_{now.strftime('%Y-%m')}"
+    doc = fs_get(path) or {}
+    sp = doc.get(sport) or {}
+    for bk, t in tally.items():
+        old = sp.get(bk) or [0, 0, 0, 0, 0.0]
+        sp[bk] = [old[i] + t[i] for i in range(5)]
+    doc[sport] = sp
+    fs_set(path, doc)
+
+
+def book_report(now):
+    """Plain-text scorecard (aggregates only -- safe for the public log)."""
+    doc = fs_get(f"scan_state/books_{now.strftime('%Y-%m')}") or {}
+    out = []
+    for sport in SPORTS:
+        sp = doc.get(sport)
+        if not sp:
+            continue
+        out.append(f"{SPORTS[sport]['label']}: book / sides priced / best price / 2%+ value / 3%+ value / avg vs fair")
+        for bk, t in sorted(sp.items(), key=lambda x: -x[1][1] / max(x[1][0], 1)):
+            if t[0]:
+                out.append(f"  {BOOK_NAMES.get(bk, bk):11s} {t[0]:6d} {t[1] / t[0]:6.0%} {t[2] / t[0]:6.1%} {t[3] / t[0]:6.1%} {t[4] / t[0]:+6.2%}")
+    return "\n".join(out)
+
+
 # ---------------- paid pull ----------------
 def pull(sport, now, st, reason):
     """One Odds API pull for a sport: saves fair views for every game in the next HOURS_AHEAD, returns
@@ -395,7 +451,7 @@ def pull(sport, now, st, reason):
     cost = int(r.headers.get("x-requests-last") or 3)
     charge(st, now, cost)
     events = r.json()
-    games, plays = {}, []
+    games, plays, for_tally = {}, [], []
     for ev in events:
         q = quotes(ev)
         if not any(r_["book"] == SHARP for rows in q.values() for r_ in rows):
@@ -403,6 +459,7 @@ def pull(sport, now, st, reason):
         g = dict(home=ev["home_team"], away=ev["away_team"], start=ev["commence_time"].replace("Z", "+00:00"),
                  at=now.isoformat(), views={k: fair_views(sport, k, rows) for k, rows in q.items() if rows})
         games[ev["id"]] = g
+        for_tally.append((g, q))
         for kind, rows in q.items():
             for row in rows:
                 if row["book"] not in BET_BOOKS:
@@ -411,6 +468,10 @@ def pull(sport, now, st, reason):
                     p = evaluate(sport, g, kind, side, row["line"], row["book"], odds, now)
                     if p:
                         plays.append((ev["id"], g, p, None))
+    try:
+        book_tally(sport, for_tally, now)
+    except Exception as e:  # noqa: BLE001 -- the scorecard never blocks alerts
+        log(f"[{sport}] book tally: {type(e).__name__}")
     log(f"[{sport}] pull ({reason}): {len(games)} games, {cost} credits (month {st['used']}/{CREDIT_CAP})")
     return games, plays
 
@@ -1149,11 +1210,14 @@ def grade():
             if cl else f"graded {done}; {w}-{l}")
     else:
         log(f"graded {done}")
+    rep_ = book_report(now)
+    if rep_:
+        print("book scorecard this month:\n" + rep_)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["watch", "pull", "grade"])
+    ap.add_argument("mode", choices=["watch", "pull", "grade", "books"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS", "nfl,nba,ncaab,nhl"))
@@ -1161,6 +1225,8 @@ def main():
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
         return grade()
+    if a.mode == "books":
+        return print(book_report(datetime.now(timezone.utc)) or "no scorecard yet")
     if a.mode == "pull":
         now = datetime.now(timezone.utc)
         st = credits_state(now)
