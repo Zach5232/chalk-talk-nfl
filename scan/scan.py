@@ -86,7 +86,8 @@ KELLY = 1 / 8
 MAX_STAKE = 0.02
 
 
-MIN_TO_WIN = float(os.environ.get("SCAN_MIN_TO_WIN", "9"))   # don't post plays that can't win at least this much
+MIN_STAKE_USD = 5          # a play posts if the stake is at least $5 ...
+MIN_TO_WIN = 10            # ... or it can win at least $10 (no '$1 to win $4' bets)
 
 
 def bet_size(usd):
@@ -230,7 +231,7 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     kelly = ev / pay
     stake = min(kelly * KELLY, MAX_STAKE)
     to_win = bet_size(stake * BANKROLL) * pay
-    if to_win < MIN_TO_WIN:
+    if bet_size(stake * BANKROLL) < MIN_STAKE_USD and to_win < MIN_TO_WIN:
         return None
     # worst price that still clears the bar vs the consensus (fees ignored for the display number)
     good = american(pw / (1 + bar))
