@@ -57,6 +57,7 @@ on:
 
 jobs:
   update:
+    if: false   # PAUSED 2026-11-22 by the owner to save Odds API credits -- delete this line to resume
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
