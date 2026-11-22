@@ -82,7 +82,6 @@ REPOST_CENTS = 10          # alert the same play again only if the price improve
 BANKROLL = float(os.environ.get("SCAN_BANKROLL", "2000"))
 EXPOSURE_CAP = float(os.environ.get("SCAN_EXPOSURE", "0.5"))   # pending bets above this share of bankroll: only 5%+ EV posts
 EXPOSURE_OVERRIDE_EV = 0.05
-STATUS_REFRESH_MIN = 5     # a still-good alert's "as of" time is refreshed at most this often
 KELLY = 1 / 8
 MAX_STAKE = 0.02
 HOURS_AHEAD = 24
@@ -1212,15 +1211,17 @@ def live_status(sport, games, quotes_, seen, now, full):
             if ok:
                 state, line_ = "good", f"🟢 **Still good** {when} · {ps} @ {bk} (EV {ok['ev']:+.1%})"
             elif ev is not None and ev > 0:
-                state, line_ = "thin", f"🟡 **Price still there, edge down to {ev:+.1%}** {when} · {ps} @ {bk}"
+                state, line_ = "gone", f"🔴 **Gone** {when} -- edge down to {ev:+.1%} at {ps} @ {bk}"
             else:
                 state, line_ = "gone", f"🔴 **Gone** {when} -- now {ps} @ {bk}" + (f" (EV {ev:+.1%})" if ev is not None else "")
-        last_at = x.get("status_at")
-        stale = (not last_at or (now - datetime.fromisoformat(last_at)).total_seconds() >= STATUS_REFRESH_MIN * 60)
-        changed = state != x.get("status") or (state != "good" and line_ != x.get("status_line"))
-        if not changed and not (state == "good" and stale and line_ != x.get("status_line")):
+        # Only what changes a decision is shown: 'Gone' when the price dies (removed if it comes back) and
+        # 'Game started'. A still-good alert is left alone -- no edits every few minutes.
+        prev_state = x.get("status") or "good"
+        if state == prev_state:
             continue
         body = x.get("msg_text") or alert_text(x, x)
+        if state == "good":
+            line_ = ""
         x.update(status=state, status_line=line_, status_at=now.isoformat())
         if state == "gone" and not x.get("gone_at"):
             x["gone_at"] = now.isoformat()
@@ -1228,8 +1229,7 @@ def live_status(sport, games, quotes_, seen, now, full):
             x["status_final"] = True
         discord_send(body + status_suffix(x), edit_id=x["msg_id"])
         edits += 1
-        if changed:   # Firestore only on real changes (keeps writes low)
-            fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
+        fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
     return edits
 
 
