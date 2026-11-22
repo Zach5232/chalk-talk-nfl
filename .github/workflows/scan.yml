@@ -1,0 +1,60 @@
+name: Value scanner
+
+# NFL / NBA / college basketball / NHL game lines vs the sharp market (scan/scan.py).
+#   watch -- long-running loop, 10 AM to midnight ET: free Novig / Kalshi / Polymarket checks every 3 minutes,
+#            paid Odds API pulls (~3 credits for a whole sport) only on triggers; hard monthly credit cap.
+#            Started hourly; the concurrency group queues the next start behind the running loop, so a late
+#            GitHub schedule never leaves a gap and two loops never run at once.
+#   grade -- 9:45 AM ET: finals from ESPN (free), win/loss, profit, closing-line value.
+# Prices go to Firestore (scan_plays) and Discord only -- this repo is public, the log prints counts.
+on:
+  schedule:
+    - cron: '0 15-23,0-3 * * *'
+    - cron: '45 14 * * *'
+  workflow_dispatch:
+    inputs:
+      mode: {description: "watch, pull or grade", required: true, default: "watch", type: choice, options: [watch, pull, grade]}
+      minutes: {description: "watch: minutes to run (blank = until midnight ET, max 330)", required: false, default: ""}
+      sports: {description: "comma-separated: nfl,nba,ncaab,nhl", required: false, default: "nfl,nba,ncaab,nhl"}
+      post: {description: "Post alerts to Discord", type: boolean, default: true}
+
+concurrency:
+  group: scan-${{ (inputs.mode == 'grade' || github.event.schedule == '45 14 * * *') && 'grade' || 'watch' }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install requests google-auth
+      - name: Run
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SCAN_DISCORD_WEBHOOK_URL: ${{ secrets.SCAN_DISCORD_WEBHOOK_URL }}
+          SCAN_POST: ${{ github.event_name == 'workflow_dispatch' && inputs.post || 'true' }}
+          SCAN_SPORTS: ${{ inputs.sports || 'nfl,nba,ncaab,nhl' }}
+        run: |
+          MODE="${{ inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            [ "${{ github.event.schedule }}" = "45 14 * * *" ] && MODE=grade || MODE=watch
+          fi
+          if [ "$MODE" = watch ]; then
+            MIN="${{ inputs.minutes }}"
+            if [ -z "$MIN" ]; then
+              # until 05:00 UTC (midnight ET in winter), at most 330 minutes
+              NOW=$(date -u +%s); END=$(date -u -d "$(date -u +%Y-%m-%d) 05:00" +%s)
+              [ "$END" -le "$NOW" ] && END=$((END + 86400))
+              MIN=$(( (END - NOW) / 60 )); [ "$MIN" -gt 330 ] && MIN=330
+              [ "$(date -u +%H)" -ge 5 ] && [ "$(date -u +%H)" -lt 14 ] && { echo "overnight -- nothing to watch"; exit 0; }
+            fi
+            echo "watching for $MIN minutes"
+            python3 scan/scan.py watch --minutes "$MIN"
+          else
+            python3 scan/scan.py $MODE
+          fi
