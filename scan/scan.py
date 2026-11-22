@@ -54,11 +54,15 @@ SPORTS = {
                   sd=dict(spread=11.0, total=16.0), max_move=2.5),
     "nhl":   dict(odds="icehockey_nhl", novig="NHL", poly=["nhl"], label="NHL",
                   kalshi=dict(h2h="KXNHLGAME", spread="KXNHLSPREAD", total="KXNHLTOTAL"),
-                  sd=dict(spread=2.3, total=2.3), max_move=0.0),
+                  sd=dict(spread=2.3, total=2.3), max_move=0.0, markets="h2h,totals"),
 }
 SHARP = "pinnacle"
-# 10 named books = 1 region of credits per market. Fanatics / Bovada left out on purpose (can't bet there).
-BOOKS = ["pinnacle", "novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "betonlineag", "espnbet", "betmgm"]
+# 10 named books = 1 region of credits per market (fewer books cost the same). Two jobs:
+#   BET_BOOKS -- where the owner bets (the only books alerts can name)
+#   the rest  -- pricing only: they sharpen the consensus fair line but are never alerted
+# No DraftKings (unfunded), Fanatics or Bovada.
+BOOKS = ["pinnacle", "novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betonlineag", "espnbet"]
+BET_BOOKS = {"novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet"}
 WEIGHTS = {"pinnacle": 3.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
 # pregame taker fees, checked on real slips (see nhl-model model_config.json exchange_fees)
 FEES = {"kalshi": ("parabolic", 0.07), "polymarket": ("parabolic", 0.07), "prophetx": ("winnings", 0.02)}
@@ -77,7 +81,8 @@ KELLY = 1 / 8
 MAX_STAKE = 0.02
 HOURS_AHEAD = 24
 CREDIT_CAP = int(os.environ.get("SCAN_CREDIT_CAP", "3000"))
-CYCLE_S = 180
+CYCLE_S = 60               # moneylines every minute (free) ...
+FULL_EVERY = 3             # ... spreads and totals every 3rd cycle
 STALE_FAIR_MIN = 10        # an exchange play against a fair line older than this is confirmed by a pull first
 MOVE_TRIGGER = 0.025
 BASE_GAP_MIN = 180
@@ -378,7 +383,8 @@ def pull(sport, now, st, reason):
     if not can_spend(st, now):
         log(f"[{sport}] credit budget reached (month {st['used']}/{CREDIT_CAP}) -- no pull ({reason})")
         return None, []
-    params = dict(apiKey=key, bookmakers=",".join(BOOKS), markets="h2h,spreads,totals", oddsFormat="american",
+    params = dict(apiKey=key, bookmakers=",".join(BOOKS), markets=SPORTS[sport].get("markets", "h2h,spreads,totals"),
+                  oddsFormat="american",
                   commenceTimeFrom=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                   commenceTimeTo=(now + timedelta(hours=HOURS_AHEAD)).strftime("%Y-%m-%dT%H:%M:%SZ"))
     r = requests.get(f"{ODDS}/{SPORTS[sport]['odds']}/odds", params=params, timeout=60)
@@ -399,7 +405,7 @@ def pull(sport, now, st, reason):
         games[ev["id"]] = g
         for kind, rows in q.items():
             for row in rows:
-                if row["book"] == SHARP:
+                if row["book"] not in BET_BOOKS:
                     continue
                 for side, odds in (("a", row["a"]), ("b", row["b"])):
                     p = evaluate(sport, g, kind, side, row["line"], row["book"], odds, now)
@@ -437,8 +443,24 @@ def name_hits(name, full):
     return bool(n) and len(n) >= 3 and (f.startswith(n) or f.endswith(n) or (len(f) >= 5 and n.startswith(f)))
 
 
+_MATCH = {}
+
+
 def find_game(games, t1, t2, day=None, start=None):
-    """(gid, game, t1_is_home) for two exchange team names, if exactly one saved game has both teams."""
+    """(gid, game, t1_is_home) for two exchange team names, if exactly one saved game has both teams.
+    Remembered per game list, so each venue's games are fuzzy-matched once, not every cycle."""
+    key = (frozenset(games), norm(t1), norm(t2), day, start.strftime("%Y%m%d%H") if start else None)
+    if key not in _MATCH:
+        if len(_MATCH) > 50000:
+            _MATCH.clear()
+        hit = _find_game(games, t1, t2, day, start)
+        _MATCH[key] = (hit[0], hit[2]) if hit else None
+    m = _MATCH[key]
+    # only the game id and side are remembered: the game itself (fair line) always comes from the current list
+    return (m[0], games[m[0]], m[1]) if m and m[0] in games else None
+
+
+def _find_game(games, t1, t2, day=None, start=None):
     hits = []
     for gid, g in games.items():
         if day and datetime.fromisoformat(g["start"]).astimezone(ET).strftime("%Y-%m-%d") != day:
@@ -460,7 +482,7 @@ def ex_quote(gid, g, kind, side, line, book, prob_, size_usd, start=None):
                 start=start)
 
 
-def novig_quotes(sport, games):
+def novig_quotes(sport, games, ml_only=False):
     lg = SPORTS[sport]["novig"]
     ev_names = {}
     for e in (_get(f"{NOVIG}/catalog/events", dict(league=lg)) or {}).get("items", []):
@@ -468,7 +490,7 @@ def novig_quotes(sport, games):
         if mt:
             ev_names[e["eventId"]] = (mt.group(1), mt.group(2))   # (away, home)
     markets = []
-    for mtype in ("MONEY", "SPREAD", "TOTAL"):
+    for mtype in (("MONEY", "TOTAL") if ml_only else ("MONEY", "SPREAD", "TOTAL")):   # TOTAL names home/away
         after = None
         for _ in range(10):
             d = _get(f"{NOVIG}/catalog/markets", dict(league=lg, marketType=mtype, **({"after": after} if after else {})))
@@ -524,7 +546,9 @@ def novig_quotes(sport, games):
 def kalshi_markets(series):
     ms, cursor = [], None
     for _ in range(30):
-        d = _get(f"{KALSHI}/markets", dict(series_ticker=series, status="open", limit=1000, **({"cursor": cursor} if cursor else {})))
+        now_ts = int(time.time())
+        d = _get(f"{KALSHI}/markets", dict(series_ticker=series, status="open", limit=1000, min_close_ts=now_ts,
+                                           max_close_ts=now_ts + int(3.5 * 86400), **({"cursor": cursor} if cursor else {})))
         ms += d.get("markets", [])
         cursor = d.get("cursor")
         if not cursor or not d.get("markets"):
@@ -553,9 +577,13 @@ def _rules_teams(m):
     return (t.group(1), " ".join(b)) if b else None
 
 
-def kalshi_quotes(sport, games):
+def kalshi_quotes(sport, games, ml_only=False):
     out = []
     for kind, series in SPORTS[sport]["kalshi"].items():
+        if ml_only and kind != "h2h":
+            continue
+        if kind == "spread" and "spreads" not in SPORTS[sport].get("markets", "spreads"):
+            continue
         try:
             ms = kalshi_markets(series)
         except Exception as e:  # noqa: BLE001
@@ -604,7 +632,7 @@ def kalshi_quotes(sport, games):
     return out
 
 
-def poly_quotes(sport, games):
+def poly_quotes(sport, games, ml_only=False):
     sports = _get(f"{GAMMA}/sports") or []
     out = []
     now = datetime.now(timezone.utc)
@@ -617,7 +645,7 @@ def poly_quotes(sport, games):
         for ev in evs:
             for m in ev.get("markets", []):
                 typ = m.get("sportsMarketType")
-                if typ not in ("moneyline", "spreads", "totals") or not m.get("acceptingOrders", True):
+                if typ not in (("moneyline",) if ml_only else ("moneyline", "spreads", "totals")) or not m.get("acceptingOrders", True):
                     continue
                 try:
                     outs = json.loads(m["outcomes"]) if isinstance(m.get("outcomes"), str) else m.get("outcomes") or []
@@ -665,17 +693,22 @@ def poly_quotes(sport, games):
     return out
 
 
-def exchange_quotes(sport, games):
+def exchange_quotes(sport, games, ml_only=False):
     """Pregame prices only: games past (or within minutes of) their start are dropped, by our start time or the venue's."""
     cut = datetime.now(timezone.utc) + timedelta(minutes=START_BUFFER_MIN)
     games = {k: g for k, g in games.items() if datetime.fromisoformat(g["start"]) > cut}
     res = []
     for name, fn in (("novig", novig_quotes), ("kalshi", kalshi_quotes), ("polymarket", poly_quotes)):
         try:
-            res += fn(sport, games)
+            res += fn(sport, games, ml_only)
         except Exception as e:  # noqa: BLE001 -- one venue down never stops the scan
             log(f"[{sport}] {name}: {type(e).__name__}: {str(e)[:120]}")
-    return [q for q in res if not q.get("start") or q["start"] > cut]
+    res = [q for q in res if not q.get("start") or q["start"] > cut]
+    if ml_only:
+        res = [q for q in res if q["kind"] == "h2h"]
+    if "spreads" not in SPORTS[sport].get("markets", "spreads"):
+        res = [q for q in res if q["kind"] != "spread"]
+    return res
 
 
 def ml_mid(quotes_, gid):
@@ -719,8 +752,8 @@ def discord_send(text, edit_id=None):
 
 
 BOOK_NAMES = {"novig": "Novig", "prophetx": "ProphetX", "kalshi": "Kalshi", "polymarket": "Polymarket",
-              "fanduel": "FanDuel", "betrivers": "BetRivers", "betonlineag": "BetOnline", "espnbet": "ESPN Bet",
-              "betmgm": "BetMGM"}
+              "fanduel": "FanDuel", "betrivers": "BetRivers", "ballybet": "Bally Bet", "betonlineag": "BetOnline",
+              "espnbet": "ESPN Bet"}
 
 
 def _pct(p):
@@ -979,7 +1012,8 @@ def watch(minutes, sports):
                           and now < datetime.fromisoformat(p["start"]) < now + timedelta(minutes=CLOSE_WINDOW_MIN)]
             if open_plays and age_min >= 8:
                 reasons.append("closing line")
-            q = exchange_quotes(s, S["games"]) if S["games"] else []
+            full = cycle % FULL_EVERY == 1
+            q = exchange_quotes(s, S["games"], ml_only=not full) if S["games"] else []
             n_quotes += len(q)
             # line moves since the last pull
             moved = []
