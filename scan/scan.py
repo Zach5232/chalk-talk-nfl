@@ -55,6 +55,33 @@ SPORTS = {
     "ncaaf": dict(odds="americanfootball_ncaaf", novig="NCAAF", poly=["cfb"], label="CFB",
                   kalshi=dict(h2h="KXNCAAFGAME", spread="KXNCAAFSPREAD", total="KXNCAAFTOTAL"),
                   sd=dict(spread=15.0, total=15.0), max_move=0.0),   # key numbers: exact lines only, like the NFL
+    # soccer: 3-way moneyline (home / away / draw, 90 min + stoppage) and half-goal totals. alerts=False: priced
+    # and graded but not posted, until its record says it's worth betting.
+    "epl":     dict(odds="soccer_epl", novig="EPL", poly=["epl"], label="EPL", three_way=True, espn="soccer/eng.1",
+                    kalshi=dict(h2h="KXEPLGAME", total="KXEPLTOTAL"), sd=dict(total=1.7), max_move=0.0, markets="h2h,totals"),
+    "ucl":     dict(odds="soccer_uefa_champs_league", novig=None, poly=["ucl"], label="UCL", three_way=True,
+                    espn="soccer/uefa.champions", kalshi=dict(h2h="KXUCLGAME", total="KXUCLTOTAL"), sd=dict(total=1.7),
+                    max_move=0.0, markets="h2h,totals"),
+    "laliga":  dict(odds="soccer_spain_la_liga", novig=None, poly=["lal"], label="La Liga", three_way=True, alerts=False,
+                    espn="soccer/esp.1", kalshi=dict(h2h="KXLALIGAGAME", total="KXLALIGATOTAL"), sd=dict(total=1.7),
+                    max_move=0.0, markets="h2h,totals"),
+    "seriea":  dict(odds="soccer_italy_serie_a", novig=None, poly=["sea"], label="Serie A", three_way=True, alerts=False,
+                    espn="soccer/ita.1", kalshi=dict(h2h="KXSERIEAGAME", total="KXSERIEATOTAL"), sd=dict(total=1.7),
+                    max_move=0.0, markets="h2h,totals"),
+    "bundes":  dict(odds="soccer_germany_bundesliga", novig=None, poly=["bun"], label="Bundesliga", three_way=True,
+                    alerts=False, espn="soccer/ger.1", kalshi=dict(h2h="KXBUNDESLIGAGAME", total="KXBUNDESLIGATOTAL"),
+                    sd=dict(total=1.7), max_move=0.0, markets="h2h,totals"),
+    "ligue1":  dict(odds="soccer_france_ligue_one", novig=None, poly=["fl1"], label="Ligue 1", three_way=True, alerts=False,
+                    espn="soccer/fra.1", kalshi=dict(h2h="KXLIGUE1GAME", total="KXLIGUE1TOTAL"), sd=dict(total=1.7),
+                    max_move=0.0, markets="h2h,totals"),
+    "mls":     dict(odds="soccer_usa_mls", novig="MLS", poly=["mls"], label="MLS", three_way=True, alerts=False,
+                    espn="soccer/usa.1", kalshi=dict(h2h="KXMLSGAME", total="KXMLSTOTAL"), sd=dict(total=1.7),
+                    max_move=0.0, markets="h2h,totals"),
+    # tennis: the Odds API lists each tournament separately ('tennis_atp_paris_masters'); every active one is pulled
+    "atp":     dict(odds=None, odds_prefix="tennis_atp", novig="ATP", poly=["atp"], label="ATP",
+                    kalshi=dict(h2h="KXATPMATCH"), sd={}, max_move=0.0, markets="h2h"),
+    "wta":     dict(odds=None, odds_prefix="tennis_wta", novig="WTA", poly=["wta"], label="WTA",
+                    kalshi=dict(h2h="KXWTAMATCH"), sd={}, max_move=0.0, markets="h2h"),
     "nhl":   dict(odds="icehockey_nhl", novig="NHL", poly=["nhl"], label="NHL",
                   kalshi=dict(h2h="KXNHLGAME", spread="KXNHLSPREAD", total="KXNHLTOTAL"),
                   sd=dict(spread=2.3, total=2.3), max_move=0.0, markets="h2h,totals"),
@@ -93,7 +120,7 @@ def bet_size(usd):
     """1/8 Kelly in dollars, to the dollar ($1 minimum) -- no other rounding or limits."""
     return max(1, round(usd))
 HOURS_AHEAD = 24
-CREDIT_CAP = int(os.environ.get("SCAN_CREDIT_CAP", "3000"))
+CREDIT_CAP = int(os.environ.get("SCAN_CREDIT_CAP", "8000"))
 CYCLE_S = 60               # moneylines every minute (free) ...
 FULL_EVERY = 3             # ... spreads and totals every 3rd cycle
 STALE_FAIR_MIN = 10        # an exchange play against a fair line older than this is confirmed by a pull first
@@ -148,21 +175,29 @@ def mover(sport, kind, line, q):
     return lambda new: 1 - N.cdf((new - mu) / sd)
 
 
-def quotes(event):
-    """{kind: [{book, line, a, b}]}, a = home / over, b = away / under."""
+def sides_of(row):
+    return ("a", "b", "d") if "d" in row else ("a", "b")
+
+
+def quotes(event, three_way=False):
+    """{kind: [{book, line, a, b[, d]}]}, a = home / over, b = away / under, d = draw (soccer moneyline)."""
     home, away = event["home_team"], event["away_team"]
     out = {"h2h": [], "spread": [], "total": []}
     for bm in event.get("bookmakers", []):
         for mk in bm.get("markets", []):
             o = {x["name"]: x for x in mk.get("outcomes", [])}
-            if mk["key"] == "h2h" and home in o and away in o and len(o) == 2:
+            if mk["key"] == "h2h" and three_way and home in o and away in o and "Draw" in o and len(o) == 3:
+                out["h2h"].append(dict(book=bm["key"], line=None, a=o[home]["price"], b=o[away]["price"], d=o["Draw"]["price"]))
+            elif mk["key"] == "h2h" and not three_way and home in o and away in o and len(o) == 2:
                 out["h2h"].append(dict(book=bm["key"], line=None, a=o[home]["price"], b=o[away]["price"]))
             elif mk["key"] == "spreads" and home in o and away in o and o[home].get("point") == -o[away].get("point", 1e9):
                 out["spread"].append(dict(book=bm["key"], line=o[home]["point"], a=o[home]["price"], b=o[away]["price"]))
             elif mk["key"] == "totals" and "Over" in o and "Under" in o and o["Over"].get("point") == o["Under"].get("point"):
                 out["total"].append(dict(book=bm["key"], line=o["Over"]["point"], a=o["Over"]["price"], b=o["Under"]["price"]))
     for k, rows in out.items():   # drop dead quotes and lines far from the pack
-        rows = [r for r in rows if all(100 <= abs(float(r[s])) <= 1500 for s in ("a", "b"))]
+        rows = [r for r in rows if all(100 <= abs(float(r[s])) <= 1500 for s in sides_of(r))]
+        if three_way and k == "total":   # soccer: half-goal lines only (quarter lines half-push)
+            rows = [r for r in rows if r["line"] is not None and (r["line"] * 2) % 2 == 1]
         if k != "h2h" and rows:
             mid = sorted(r["line"] for r in rows)[len(rows) // 2]
             rows = [r for r in rows if abs(r["line"] - mid) <= 3]
@@ -187,10 +222,49 @@ def devig(ia, ib):
     return ia ** k / (ia ** k + ib ** k)
 
 
+def devig_n(imps):
+    """Power-method devig for any number of outcomes (soccer: home / away / draw)."""
+    if sum(imps) <= 1:
+        return [x / sum(imps) for x in imps]
+    lo, hi = 1.0, 3.0
+    for _ in range(50):
+        k = (lo + hi) / 2
+        if sum(x ** k for x in imps) > 1:
+            lo = k
+        else:
+            hi = k
+    k = (lo + hi) / 2
+    t = sum(x ** k for x in imps)
+    return [x ** k / t for x in imps]
+
+
 def fair_views(sport, kind, rows):
-    """Compact per-book views saved with each game: [book, weight, line, devigged P(side A)]."""
-    return [[r["book"], WEIGHTS.get(r["book"], 1.0), r["line"], round(devig(prob(r["a"]), prob(r["b"])), 5)]
-            for r in rows]
+    """Compact per-book views saved with each game: [book, weight, line, devigged P(side A)] -- or, for a 3-way
+    moneyline, [book, weight, None, [P(home), P(away), P(draw)]]."""
+    out = []
+    for r in rows:
+        if "d" in r:
+            q = [round(x, 5) for x in devig_n([prob(r["a"]), prob(r["b"]), prob(r["d"])])]
+        else:
+            q = round(devig(prob(r["a"]), prob(r["b"])), 5)
+        out.append([r["book"], WEIGHTS.get(r["book"], 1.0), r["line"], q])
+    return out
+
+
+SIDE_IX = {"a": 0, "b": 1, "d": 2}
+
+
+def fair_side(sport, kind, views, line, side, without=None, only=None):
+    """Consensus chance that `side` wins at `line` (2-way or 3-way), or None if too few books."""
+    if views and isinstance(views[0][3], list):
+        use = [(w, q[SIDE_IX[side]]) for bk, w, l0, q in views if bk != without and (only is None or bk == only)]
+        if not use or (only is None and len(use) < MIN_BOOKS):
+            return None
+        return sum(w * q for w, q in use) / sum(w for w, _ in use)
+    if side == "d":
+        return None
+    pa = fair_at(sport, kind, views, line, without=without, only=only)
+    return None if pa is None else (pa if side == "a" else 1 - pa)
 
 
 def fair_at(sport, kind, views, line, without=None, only=None):
@@ -212,11 +286,10 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     views = (g.get("views") or {}).get(kind)
     if not views:
         return None
-    pa = fair_at(sport, kind, views, line, without=book)
-    pp = fair_at(sport, kind, views, line, only=SHARP)
-    if pa is None or pp is None:
+    pw = fair_side(sport, kind, views, line, side, without=book)
+    ppw = fair_side(sport, kind, views, line, side, only=SHARP)
+    if pw is None or ppw is None:
         return None
-    pw, ppw = (pa, pp) if side == "a" else (1 - pa, 1 - pp)
     pay = payout(odds, book, sport)
     ev, ev_pin = pw * pay - (1 - pw), ppw * pay - (1 - ppw)
     hrs = (datetime.fromisoformat(g["start"]) - now).total_seconds() / 3600
@@ -239,8 +312,10 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
 
 
 def label(g, kind, side, line):
+    if kind == "h2h" and side == "d":
+        return "Draw (90 min)"
     if kind == "h2h":
-        return f"{g['home'] if side == 'a' else g['away']} ML"
+        return f"{g['home'] if side == 'a' else g['away']} ML" + (" (90 min)" if g.get("three_way") else "")
     if kind == "spread":
         return f"{g['home']} {line:+g}" if side == "a" else f"{g['away']} {-line:+g}"
     return f"{'Over' if side == 'a' else 'Under'} {line:g}"
@@ -398,16 +473,17 @@ def book_tally(sport, events_q, now):
                 continue
             for line in {r["line"] for r in rows}:
                 at = [r for r in rows if r["line"] == line and r["book"] != SHARP]
-                for side in ("a", "b"):
-                    pays = {r["book"]: payout(r[side], r["book"], sport) for r in at}
+                for side in (("a", "b", "d") if at and "d" in at[0] else ("a", "b")):
+                    pays = {r["book"]: payout(r[side], r["book"], sport) for r in at if side in r}
                     if not pays:
                         continue
                     best = max(pays.values())
                     for r in at:
-                        pa = fair_at(sport, kind, g["views"][kind], line, without=r["book"])
-                        if pa is None:
+                        if r["book"] not in pays:
                             continue
-                        pw = pa if side == "a" else 1 - pa
+                        pw = fair_side(sport, kind, g["views"][kind], line, side, without=r["book"])
+                        if pw is None:
+                            continue
                         ev = pw * (1 + pays[r["book"]]) - 1
                         t = tally.setdefault(r["book"], [0, 0, 0, 0, 0.0])
                         t[0] += 1
@@ -468,6 +544,22 @@ def book_report(now):
 
 
 BOOK_Q, BOOK_Q_AT = {}, {}   # sport -> {(gid, kind, side, line, book): odds} from the last pull, and its time
+_ACTIVE = [None, 0.0]        # Odds API sports list (free to read), refreshed every 6 hours
+
+
+def odds_keys(sport, key):
+    """The Odds API sport keys to pull. Tennis is listed per tournament ('tennis_atp_paris'): every active one."""
+    pre = SPORTS[sport].get("odds_prefix")
+    if not pre:
+        return [SPORTS[sport]["odds"]]
+    if _ACTIVE[0] is None or time.time() - _ACTIVE[1] > 6 * 3600:
+        try:
+            _ACTIVE[0] = [x["key"] for x in requests.get(f"{ODDS}", params=dict(apiKey=key), timeout=30).json() if x.get("active")]
+            _ACTIVE[1] = time.time()
+        except Exception as e:  # noqa: BLE001
+            log(f"sports list: {type(e).__name__}")
+            return []
+    return [k for k in _ACTIVE[0] if k.startswith(pre)]
 
 
 # ---------------- paid pull ----------------
@@ -485,37 +577,47 @@ def pull(sport, now, st, reason):
                   oddsFormat="american",
                   commenceTimeFrom=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                   commenceTimeTo=(now + timedelta(hours=HOURS_AHEAD)).strftime("%Y-%m-%dT%H:%M:%SZ"))
-    r = requests.get(f"{ODDS}/{SPORTS[sport]['odds']}/odds", params=params, timeout=60)
-    if r.status_code == 422 or r.status_code == 404:
-        log(f"[{sport}] odds api {r.status_code} (off-season?)")
-        return {}, []
-    r.raise_for_status()
-    cost = int(r.headers.get("x-requests-last") or 3)
+    okeys = odds_keys(sport, key)
+    if not okeys:
+        return {}, []            # e.g. no tennis tournament on right now
+    events, cost = [], 0
+    for ok in okeys:
+        r = requests.get(f"{ODDS}/{ok}/odds", params=params, timeout=60)
+        if r.status_code in (404, 422):
+            continue
+        r.raise_for_status()
+        c = int(r.headers.get("x-requests-last") or 0)
+        cost += c
+        evs = r.json()
+        for e in evs:
+            e["_okey"] = ok
+        events += evs
     charge(st, now, cost)
-    events = r.json()
     games, plays, for_tally = {}, [], []
     bq = BOOK_Q.setdefault(sport, {})
     bq.clear()
     BOOK_Q_AT[sport] = now
     for ev in events:
-        q = quotes(ev)
+        three = bool(SPORTS[sport].get("three_way"))
+        q = quotes(ev, three)
         if not any(r_["book"] == SHARP for rows in q.values() for r_ in rows):
             continue
         g = dict(home=ev["home_team"], away=ev["away_team"], start=ev["commence_time"].replace("Z", "+00:00"),
-                 at=now.isoformat(), views={k: fair_views(sport, k, rows) for k, rows in q.items() if rows})
+                 at=now.isoformat(), views={k: fair_views(sport, k, rows) for k, rows in q.items() if rows},
+                 okey=ev.get("_okey"), **({"three_way": True} if three else {}))
         games[ev["id"]] = g
         for_tally.append((g, q))
         for kind, rows in q.items():
             for row in rows:
                 if row["book"] in BET_BOOKS:
-                    for side in ("a", "b"):
+                    for side in sides_of(row):
                         bq[(ev["id"], kind, side, row["line"], row["book"])] = int(row[side])
         for kind, rows in q.items():
             for row in rows:
                 if row["book"] not in BET_BOOKS:
                     continue
-                for side, odds in (("a", row["a"]), ("b", row["b"])):
-                    p = evaluate(sport, g, kind, side, row["line"], row["book"], odds, now)
+                for side in sides_of(row):
+                    p = evaluate(sport, g, kind, side, row["line"], row["book"], row[side], now)
                     if p:
                         plays.append((ev["id"], g, p, None))
     try:
@@ -597,7 +699,8 @@ def novig_quotes(sport, games, ml_only=False):
     lg = SPORTS[sport]["novig"]
     ev_names = {}
     for e in (_get(f"{NOVIG}/catalog/events", dict(league=lg)) or {}).get("items", []):
-        mt = re.match(r"(.+?)\s+@\s+(.+)", e.get("description") or "")
+        mt = re.match(r"(.+?)\s+@\s+(.+?)(?:\s+(?:Qualification|Round of \d+|Round \d+|Quarterfinals?|Semifinals?|"
+                      r"Finals?|R\d+))?$", e.get("description") or "")
         if mt:
             ev_names[e["eventId"]] = (mt.group(1), mt.group(2))   # (away, home)
     markets = []
@@ -643,6 +746,10 @@ def novig_quotes(sport, games, ml_only=False):
                 continue
             team = re.match(r"(\S+)(?:\s+([+-][\d.]+))?$", name)
             side = abbr.get(m["eventId"], {}).get(team.group(1)) if team else None
+            if not side and m["marketType"] == "MONEY":   # tennis 'A. Campos': match on the last name
+                last = name.split()[-1] if name.split() else ""
+                hh, aa = name_hits(last, g["home"]), name_hits(last, g["away"])
+                side = "home" if hh and not aa else "away" if aa and not hh else None
             if not side:
                 continue
             s = "a" if side == "home" else "b"
@@ -674,12 +781,14 @@ def kalshi_date(event_ticker):
 
 
 SPORT_WORDS = {"pro", "professional", "basketball", "football", "hockey", "men's", "mens", "college", "nhl", "nfl",
+               "soccer", "epl", "english", "premier", "league", "uefa", "champions", "laliga", "la", "liga", "serie",
+               "bundesliga", "ligue", "1", "mls", "major", "tennis", "atp", "wta", "women's", "singles",
                "nba", "ncaa", "regular", "season"}
 
 
 def _rules_teams(m):
     """'If Utah wins the Denver vs Utah Pro Basketball game originally scheduled ...' -> ('Denver', 'Utah')."""
-    t = re.search(r"\bthe ((?:(?!\bthe\b).)+?) (?:vs\.?|at|@) (.+?) game\b", m.get("rules_primary") or "")
+    t = re.search(r"\bthe ((?:(?!\bthe\b).)+?) (?:vs\.?|at|@) (.+?) (?:game|match)\b", m.get("rules_primary") or "")
     if not t:
         return None
     b = t.group(2).split()
@@ -713,6 +822,10 @@ def kalshi_quotes(sport, games, ml_only=False):
             title = m.get("title") or ""
             if kind == "h2h":
                 who = m.get("yes_sub_title") or ""
+                if who.strip().lower() in ("tie", "draw"):
+                    if SPORTS[sport].get("three_way") and 0 < ya < 1:
+                        out.append(ex_quote(gid, g, "h2h", "d", None, "kalshi", ya, ys))
+                    continue
                 is_home = name_hits(who, g["home"]) and not name_hits(who, g["away"])
                 is_away = name_hits(who, g["away"]) and not name_hits(who, g["home"])
                 if is_home == is_away:
@@ -743,8 +856,13 @@ def kalshi_quotes(sport, games, ml_only=False):
     return out
 
 
+_GSPORTS = [None]
+
+
 def poly_quotes(sport, games, ml_only=False):
-    sports = _get(f"{GAMMA}/sports") or []
+    if _GSPORTS[0] is None:
+        _GSPORTS[0] = _get(f"{GAMMA}/sports") or []
+    sports = _GSPORTS[0]
     out = []
     now = datetime.now(timezone.utc)
     for code in SPORTS[sport]["poly"]:
@@ -770,13 +888,27 @@ def poly_quotes(sport, games, ml_only=False):
                     continue
                 p0, p1 = float(ask), 1 - float(bid)        # buy outcome 0 at its ask; outcome 1 = 1 - outcome 0's bid
                 size = 0   # Gamma's liquidity is the whole book, not what's at the best ask
-                teams = re.match(r"(.+?) vs\.? (.+?)(?::|$)", ev.get("title") or "")
+                title = ev.get("title") or ""
+                if ": " in title and " vs" in title.split(": ", 1)[1]:
+                    title = title.split(": ", 1)[1]      # 'Playford: Sweeny vs Delaney' (tennis tournament prefix)
+                teams = re.match(r"(.+?) vs\.? (.+?)(?::|$)", title)
                 if not teams:
                     continue
                 hit = find_game(games, teams.group(1), teams.group(2), start=start)
                 if not hit:
                     continue
                 gid, g, first_is_home = hit
+                if typ == "moneyline" and [o.lower() for o in outs] == ["yes", "no"]:
+                    # soccer: one Yes/No market per outcome ('Will Brentford win?', '... end in a draw?')
+                    git = (m.get("groupItemTitle") or m.get("question") or "")
+                    if git.lower().startswith("draw") or "draw" in (m.get("question") or "").lower():
+                        side = "d"
+                    else:
+                        h, a = name_hits(git, g["home"]), name_hits(git, g["away"])
+                        side = "a" if h and not a else "b" if a and not h else None
+                    if side and (side != "d" or SPORTS[sport].get("three_way")):
+                        out.append(ex_quote(gid, g, "h2h", side, None, "polymarket", p0, size, start))
+                    continue
                 if typ == "totals":
                     line = m.get("line")
                     if line is None or outs[0].lower() != "over":
@@ -817,9 +949,8 @@ def exchange_quotes(sport, games, ml_only=False):
     res = [q for q in res if not q.get("start") or q["start"] > cut]
     if ml_only:
         res = [q for q in res if q["kind"] == "h2h"]
-    if "spreads" not in SPORTS[sport].get("markets", "spreads"):
-        res = [q for q in res if q["kind"] != "spread"]
-    return res
+    allowed = {{"h2h": "h2h", "spreads": "spread", "totals": "total"}[m] for m in SPORTS[sport].get("markets", "h2h,spreads,totals").split(",")}
+    return [q for q in res if q["kind"] in allowed]   # only the markets this sport prices
 
 
 def ml_mid(quotes_, gid):
@@ -1164,7 +1295,8 @@ def alert_text(p, g, first=None):
     if p.get("good_to") is not None:
         good = f" · good to {price_str(p['good_to'], p['book'])}"
     size = f" · ${p['size_usd']:,} avail" if p.get("size_usd") else ""
-    txt = (f"🔎 **{SPORTS[p['sport']]['label']}** {g['away']} @ {g['home']} · {t} ET\n"
+    at_ = " vs " if SPORTS[p["sport"]].get("odds_prefix") else " @ "   # tennis has no home side
+    txt = (f"🔎 **{SPORTS[p['sport']]['label']}** {g['away']}{at_}{g['home']} · {t} ET\n"
            f"**{p['label']} · {price_str(p['odds'], p['book'], p.get('price_prob'))} @ {bk}**\n"
            f"Fair {_pct(p['p_fair'])}% ({p['fair_odds']:+d}) · EV {p['ev']:+.1%} · bet ${p['stake_usd']} to win ${p.get('to_win') or p['stake_usd'] * payout(p['odds'], p['book'], p['sport']):,.0f}{good}{size}")
     if first:
@@ -1181,6 +1313,8 @@ def region(p):
     home ML: margin > 0; home spread h: margin > -h; away mirrors with '<'; over L: total > L; under: total < L."""
     if p["kind"] == "total":
         return ("total", ">" if p["side"] == "a" else "<", p["line"])
+    if p["kind"] == "h2h" and (p["side"] == "d" or SPORTS.get(p.get("sport"), {}).get("three_way")):
+        return None   # home / away / draw: three separate outcomes, each priced on its own
     t = 0.0 if p["kind"] == "h2h" else -p["line"]
     return ("margin", ">" if p["side"] == "a" else "<", t)
 
@@ -1200,6 +1334,8 @@ def _bounds(axis, lo, hi, g):
 
 def relation(p, q, g):
     """p and q on opposite sides of the same game: ('middle' | 'arb' | 'conflict', text) or None if not opposed."""
+    if region(p) is None or region(q) is None:
+        return None
     ax1, d1, t1 = region(p)
     ax2, d2, t2 = region(q)
     if ax1 != ax2 or d1 == d2:
@@ -1262,12 +1398,21 @@ def record(found, seen, now):
                       and f"{x['sport']}_{x['event_id']}_{x['kind']}_{x['side']}" == fam),
                      key=lambda x: x.get("alerted_at") or "")
         extra = {"size_usd": round(size)} if size else {}
-        base = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], fair_at=g["at"], **extra)
+        base = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], fair_at=g["at"],
+                    **({"okey": g["okey"]} if g.get("okey") else {}), **extra)
+        if not SPORTS[p["sport"]].get("alerts", True):   # log-only league: priced and graded, never posted
+            if not prev:
+                d_ = dict(base, found=now.isoformat(), alerted=False, shadow=True)
+                fs_set(f"scan_plays/{pid}", d_)
+                seen[pid] = d_
+            continue
         # plays already posted in this game: other side (middle / arb / conflict) or the same team another way
         notes, edits, skip = [], [], False
         for o in [x for x in seen.values() if x.get("alerted") and not x.get("superseded") and x["event_id"] == gid
                   and x["sport"] == p["sport"] and x["kind"] in ("h2h", "spread", "total") and x.get("taken") is not False]:
             r1, r2 = region(p), region(o)
+            if r1 is None or r2 is None:
+                continue
             if o.get("taken"):   # you already bet o: only a middle or a lock is worth a message
                 if r1[:2] == r2[:2] and (o["kind"], o["side"]) != (p["kind"], p["side"]):
                     skip = True          # same team another way: that's doubling up
@@ -1376,10 +1521,9 @@ def status_suffix(x):
 
 def _ev_now(sport, g, kind, side, line, book, odds):
     views = (g.get("views") or {}).get(kind)
-    pa = fair_at(sport, kind, views, line, without=book) if views else None
-    if pa is None:
+    pw = fair_side(sport, kind, views, line, side, without=book) if views else None
+    if pw is None:
         return None
-    pw = pa if side == "a" else 1 - pa
     return pw * (1 + payout(odds, book, sport)) - 1
 
 
@@ -1502,14 +1646,12 @@ def close_lines(sport, games, plays, now):
         views = (g.get("views") or {}).get(p["kind"])
         if not views:
             continue
-        pa = fair_at(sport, p["kind"], views, p["line"])
-        pp = fair_at(sport, p["kind"], views, p["line"], only=SHARP)
-        if pa is None:
+        pc = fair_side(sport, p["kind"], views, p["line"], p["side"])
+        pp = fair_side(sport, p["kind"], views, p["line"], p["side"], only=SHARP)
+        if pc is None:
             continue
-        side = (lambda x: x) if p["side"] == "a" else (lambda x: 1 - x)
         doc = {k: v for k, v in p.items() if k != "_id"}
-        doc.update(p_close=round(side(pa), 4), p_close_pin=round(side(pp), 4) if pp is not None else None,
-                   close_at=now.isoformat())
+        doc.update(p_close=round(pc, 4), p_close_pin=round(pp, 4) if pp is not None else None, close_at=now.isoformat())
         fs_set(f"scan_plays/{p.get('_id') or play_id(p, p['event_id'])}", doc)
         p.update(doc)
         n += 1
@@ -1570,13 +1712,14 @@ def watch(minutes, sports):
             reasons = []
             if (age_min >= BASE_GAP_MIN and upcoming) or age_min >= 12 * 60:
                 reasons.append("baseline")
-            open_plays = [p for p in seen.values() if p.get("sport") == s and p.get("alerted") and not p.get("superseded")
+            open_plays = [p for p in seen.values() if p.get("sport") == s and (p.get("alerted") or p.get("shadow"))
+                          and not p.get("superseded")
                           and p.get("p_close") is None
                           and now < datetime.fromisoformat(p["start"]) < now + timedelta(minutes=CLOSE_WINDOW_MIN)]
             if open_plays and age_min >= 8:
                 reasons.append("closing line")
             full = cycle % FULL_EVERY == 1
-            q = exchange_quotes(s, S["games"], ml_only=not full) if S["games"] else []
+            q = exchange_quotes(s, S["games"], ml_only=not full) if upcoming else []
             n_quotes += len(q)
             # line moves since the last pull
             moved = []
@@ -1711,12 +1854,14 @@ ESPN = {"nfl": "football/nfl", "nba": "basketball/nba", "ncaab": "basketball/men
 
 
 def espn_finals(sport, day):
+    if SPORTS[sport].get("odds_prefix"):
+        return []   # tennis: graded from Odds API scores instead
     params = dict(dates=day.replace("-", ""), limit=500)
     if sport == "ncaab":
         params["groups"] = 50
     if sport == "ncaaf":
         params["groups"] = 80   # FBS
-    d = _get(f"https://site.api.espn.com/apis/site/v2/sports/{ESPN[sport]}/scoreboard", params) or {}
+    d = _get(f"https://site.api.espn.com/apis/site/v2/sports/{SPORTS[sport].get('espn') or ESPN[sport]}/scoreboard", params) or {}
     out = []
     for e in d.get("events", []):
         c = (e.get("competitions") or [{}])[0]
@@ -1731,6 +1876,27 @@ def espn_finals(sport, day):
     return out
 
 
+def tennis_finals(okey):
+    """Finished tennis matches for one tournament from the Odds API (scores endpoint, 2 credits)."""
+    key = os.environ.get("ODDS_API_KEY")
+    now = datetime.now(timezone.utc)
+    st = credits_state(now)
+    if not key or not can_spend(st, now, 2):
+        return []
+    r = requests.get(f"{ODDS}/{okey}/scores", params=dict(apiKey=key, daysFrom=3), timeout=30)
+    if r.status_code in (404, 422):
+        return []
+    r.raise_for_status()
+    charge(st, now, int(r.headers.get("x-requests-last") or 2))
+    out = []
+    for e in r.json():
+        if not e.get("completed") or not e.get("scores"):
+            continue
+        sc = {x["name"]: float(x.get("score") or 0) for x in e["scores"]}
+        out.append(dict(home=[e["home_team"]], away=[e["away_team"]], hs=sc.get(e["home_team"], 0), as_=sc.get(e["away_team"], 0)))
+    return out
+
+
 def grade():
     now = datetime.now(timezone.utc)
     plays = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=6)).isoformat()) if not p.get("result")
@@ -1738,9 +1904,9 @@ def grade():
     cache, done = {}, 0
     for p in plays:
         day = datetime.fromisoformat(p["start"]).astimezone(ET).strftime("%Y-%m-%d")
-        key = (p["sport"], day)
+        key = ("okey", p.get("okey")) if SPORTS[p["sport"]].get("odds_prefix") else (p["sport"], day)
         if key not in cache:
-            cache[key] = espn_finals(*key)
+            cache[key] = tennis_finals(p["okey"]) if key[0] == "okey" and p.get("okey") else espn_finals(*key) if key[0] != "okey" else []
         fin = [f for f in cache[key] if any(name_hits(n, p["home"]) or name_hits(p["home"], n) for n in f["home"])
                and any(name_hits(n, p["away"]) or name_hits(p["away"], n) for n in f["away"])]
         if len(fin) != 1:
@@ -1752,7 +1918,10 @@ def grade():
             fs_set(f"scan_plays/{p['_id']}", {**{k: v for k, v in p.items() if k != "_id"},
                                              "result": "void: posted after the start", "graded_at": now.isoformat()})
             continue
-        if p["kind"] == "h2h":
+        if p["kind"] == "h2h" and (p["side"] == "d" or SPORTS[p["sport"]].get("three_way")):
+            m = f["hs"] - f["as_"]     # soccer: 90 minutes + stoppage; a draw loses both team bets
+            res = "win" if (m == 0) == (p["side"] == "d") and (p["side"] == "d" or (m > 0) == (p["side"] == "a")) else "loss"
+        elif p["kind"] == "h2h":
             m = f["hs"] - f["as_"]
             res = "push" if m == 0 else ("win" if (m > 0) == (p["side"] == "a") else "loss")
         elif p["kind"] == "spread":
@@ -1794,7 +1963,7 @@ def main():
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
-    ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS", "nfl,nba,ncaab,nhl,ncaaf"))
+    ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
     a = ap.parse_args()
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
