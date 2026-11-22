@@ -741,7 +741,7 @@ def close_lines(sport, games, plays, now):
         doc = {k: v for k, v in p.items() if k != "_id"}
         doc.update(p_close=round(side(pa), 4), p_close_pin=round(side(pp), 4) if pp is not None else None,
                    close_at=now.isoformat())
-        fs_set(f"scan_plays/{p['_id']}", doc)
+        fs_set(f"scan_plays/{p.get('_id') or play_id(p, p['event_id'])}", doc)
         p.update(doc)
         n += 1
     return n
