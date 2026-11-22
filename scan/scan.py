@@ -709,6 +709,61 @@ def alert_text(p, g, first=None):
     return txt
 
 
+def region(p):
+    """Where a play wins, as (axis, direction, threshold): margin = home minus away, total = combined score.
+    home ML: margin > 0; home spread h: margin > -h; away mirrors with '<'; over L: total > L; under: total < L."""
+    if p["kind"] == "total":
+        return ("total", ">" if p["side"] == "a" else "<", p["line"])
+    t = 0.0 if p["kind"] == "h2h" else -p["line"]
+    return ("margin", ">" if p["side"] == "a" else "<", t)
+
+
+def _bounds(axis, lo, hi, g):
+    """Words for the open interval lo < x < hi."""
+    if axis == "total":
+        return f"the total lands between {lo:g} and {hi:g}"
+    if lo >= 0:
+        return (f"{g['home']} wins by less than {hi:g}" if lo == 0
+                else f"{g['home']} wins by more than {lo:g} but less than {hi:g}")
+    if hi <= 0:
+        return (f"{g['away']} wins by less than {-lo:g}" if hi == 0
+                else f"{g['away']} wins by more than {-hi:g} but less than {-lo:g}")
+    return f"{g['away']} wins by less than {-lo:g} or {g['home']} wins by less than {hi:g}"
+
+
+def relation(p, q, g):
+    """p and q on opposite sides of the same game: ('middle' | 'arb' | 'conflict', text) or None if not opposed."""
+    ax1, d1, t1 = region(p)
+    ax2, d2, t2 = region(q)
+    if ax1 != ax2 or d1 == d2:
+        return None
+    over, under = (p, q) if d1 == ">" else (q, p)
+    lo, hi = region(over)[2], region(under)[2]
+    if lo < hi:
+        return "middle", f"both win if {_bounds(ax1, lo, hi, g)}"
+    if lo == hi:
+        d_o = 1 + payout(over["odds"], over["book"], over["sport"])
+        d_u = 1 + payout(under["odds"], under["book"], under["sport"])
+        if 1 / d_o + 1 / d_u < 1:
+            k = 100 / (1 / d_o + 1 / d_u)   # total return per $100 split across both
+            return "arb", (f"bet ${k / d_o:,.0f} on {over['label']} and ${k / d_u:,.0f} on {under['label']} "
+                           f"(per $100 total) and you get ${k:,.0f} back either way")
+        return "conflict", "exact opposites"
+    return "conflict", f"both lose if {_bounds(ax1, hi, lo, g)}"
+
+
+def _note_for(kind, text, other, better):
+    bk = BOOK_NAMES.get(other["book"], other["book"])
+    ref = f"{other['label']} {price_str(other.get('odds_alerted') or other['odds'], other['book'], other.get('price_prob'))} @ {bk} (EV {other['ev']:+.1%})"
+    if kind == "middle":
+        return f"🎯 **Middle** with {ref}: {text} -- fine to hold both"
+    if kind == "arb":
+        return f"💰 **Arb** with {ref}: {text}"
+    return (f"⚠️ **Opposite side** of {ref}: {text}. "
+            + ("This one is the better value -- if you haven't bet the other, take this one only."
+               if better else "The other one is the better value -- take only one."))
+
+
 def record(found, seen, now):
     """Save new plays. A game/market/side is posted once; a better number later (same line 10+ cents better, or
     another line with 2%+ more EV) edits that same Discord message instead of posting again."""
@@ -718,7 +773,7 @@ def record(found, seen, now):
         if k not in best or p["ev"] > best[k][2]["ev"]:
             best[k] = (gid, g, p, size)
     posted = 0
-    for gid, g, p, size in best.values():
+    for gid, g, p, size in sorted(best.values(), key=lambda b: -b[2]["ev"]):
         pid = play_id(p, gid)
         prev = seen.get(pid)
         fam = f"{p['sport']}_{gid}_{p['kind']}_{p['side']}"
@@ -727,8 +782,32 @@ def record(found, seen, now):
                      key=lambda x: x.get("alerted_at") or "")
         extra = {"size_usd": round(size)} if size else {}
         base = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], fair_at=g["at"], **extra)
+        # plays already posted on the other side of this game
+        notes, edits, skip = [], [], False
+        for o in [x for x in seen.values() if x.get("alerted") and not x.get("superseded") and x["event_id"] == gid
+                  and x["sport"] == p["sport"] and x["kind"] in ("h2h", "spread", "total")]:
+            rel = relation(p, o, g)
+            if not rel:
+                continue
+            kind, text = rel
+            if kind == "conflict" and p["ev"] <= o["ev"]:
+                skip = True   # the play already posted is the better value: don't post the weaker opposite
+                break
+            notes.append(_note_for(kind, text, o, better=True))
+            edits.append((o, _note_for(kind, text, {**p, **extra}, better=False) if kind == "conflict"
+                          else _note_for(kind, text, {**p, **extra}, better=True)))
+        if skip:
+            if not prev:
+                fs_set(f"scan_plays/{pid}", dict(base, found=now.isoformat(), alerted=False, conflict=True))
+                seen[pid] = dict(base, found=now.isoformat(), alerted=False, conflict=True)
+            continue
+        note = ("\n" + "\n".join(notes)) if notes else ""
+        for o, onote in edits:   # tell the earlier message about the new one
+            if o.get("msg_id"):
+                first = seen.get(o.get("first_id")) if o.get("updated") else None
+                discord_send(alert_text(o, o, first=first) + "\n" + onote, edit_id=o["msg_id"])
         if not sib:
-            mid = discord_send(alert_text({**p, **extra}, g))
+            mid = discord_send(alert_text({**p, **extra}, g) + note)
             doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
                        alerted_at=now.isoformat(), msg_id=mid, first_id=pid)
             fs_set(f"scan_plays/{pid}", doc)
@@ -746,7 +825,7 @@ def record(found, seen, now):
                 seen[pid] = dict(base, found=now.isoformat(), alerted=False)
             continue
         first = seen.get(last.get("first_id")) or last
-        mid = discord_send(alert_text({**p, **extra}, g, first=first), edit_id=last.get("msg_id"))
+        mid = discord_send(alert_text({**p, **extra}, g, first=first) + note, edit_id=last.get("msg_id"))
         if mid is None and last.get("msg_id"):
             mid = last["msg_id"]
         # the older doc stays for the record but is graded as superseded; the bettor took one of them
