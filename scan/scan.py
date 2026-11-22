@@ -413,6 +413,31 @@ def book_tally(sport, events_q, now):
     fs_set(path, doc)
 
 
+def cbb_book_report():
+    """The CBB logger's graded plays (cbb_plays) by book: count, record, units, closing-line value. Totals only."""
+    ps = [p for p in fs_list("cbb_plays") if p.get("result") in ("win", "loss", "push")]
+    if not ps:
+        return "no graded CBB logger plays"
+    out = [f"CBB logger, {len(ps)} graded plays (every book listed, so one game/side can appear at several books)",
+           "  book         plays    W-L      units   ROI    avg CLV  beat close"]
+    by = {}
+    for p in ps:
+        by.setdefault(p["book"], []).append(p)
+    for bk, xs in sorted(by.items(), key=lambda x: -len(x[1])):
+        w = sum(p["result"] == "win" for p in xs); l = sum(p["result"] == "loss" for p in xs)
+        u = sum(p.get("profit") or 0 for p in xs)
+        c = [p["ev_close"] for p in xs if p.get("ev_close") is not None]
+        clv = f"{sum(c) / len(c):+6.2%} {sum(x > 0 for x in c) / len(c):7.0%}" if c else "     -        -"
+        out.append(f"  {BOOK_NAMES.get(bk, bk):11s} {len(xs):5d} {w:4d}-{l:<4d} {u:+7.1f} {u / len(xs):+6.1%}  {clv}")
+    for kind in ("h2h", "spread", "total"):
+        xs = [p for p in ps if p.get("kind") == kind]
+        if xs:
+            c = [p["ev_close"] for p in xs if p.get("ev_close") is not None]
+            out.append(f"  market {kind:7s} {len(xs):4d} plays, {sum(p.get('profit') or 0 for p in xs):+.1f}u"
+                       + (f", avg CLV {sum(c) / len(c):+.2%}" if c else ""))
+    return "\n".join(out)
+
+
 def book_report(now):
     """Plain-text scorecard (aggregates only -- safe for the public log)."""
     doc = fs_get(f"scan_state/books_{now.strftime('%Y-%m')}") or {}
@@ -1217,7 +1242,7 @@ def grade():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["watch", "pull", "grade", "books"])
+    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS", "nfl,nba,ncaab,nhl"))
@@ -1225,6 +1250,8 @@ def main():
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
         return grade()
+    if a.mode == "cbbbooks":
+        return print(cbb_book_report())
     if a.mode == "books":
         return print(book_report(datetime.now(timezone.utc)) or "no scorecard yet")
     if a.mode == "pull":
