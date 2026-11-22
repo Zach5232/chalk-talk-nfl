@@ -18,6 +18,9 @@ How it decides:
       - nothing pulled for 3 hours and games start within 12 hours (baseline)
   * Hard credit cap per month (SCAN_CREDIT_CAP, default 3000) and an even daily share of what's left.
 
+Discord: each game/market/side is posted once, with cents (exchanges) or implied % (books) next to the American odds.
+A better number later edits that same message ("Better number at ...", showing the first price) -- no repost.
+
 Storage: Firestore scan_state/* and scan_plays/*. This repo is public: no odds are written to it and the log prints
 counts only (prices go to Firestore and Discord). SCAN_DRY=1 keeps state in local files and prints alerts instead.
 """
@@ -167,7 +170,7 @@ def bar_for(book, hours_to_start):
     return BAR_STRICT if book in STRICT_BOOKS or hours_to_start > EARLY_H else BAR
 
 
-def evaluate(sport, g, kind, side, line, book, odds, now):
+def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     """A play dict if (book, odds) on this side clears the bar, else None. g = saved game (with views)."""
     views = (g.get("views") or {}).get(kind)
     if not views:
@@ -189,7 +192,8 @@ def evaluate(sport, g, kind, side, line, book, odds, now):
     good = american(pw / (1 + bar))
     return dict(sport=sport, kind=kind, side=side, line=line, book=book, odds=int(odds), label=label(g, kind, side, line),
                 p_fair=round(pw, 4), fair_odds=american(pw), ev=round(ev, 4), ev_pin=round(ev_pin, 4),
-                stake_pct=round(stake, 4), stake_usd=round(stake * BANKROLL), good_to=good, bar=bar)
+                stake_pct=round(stake, 4), stake_usd=round(stake * BANKROLL), good_to=good, bar=bar,
+                price_prob=round(price_prob if price_prob is not None else prob(odds), 4))
 
 
 def label(g, kind, side, line):
@@ -641,24 +645,33 @@ def ml_mid(quotes_, gid):
 
 
 # ---------------- alerts ----------------
-def post_discord(lines):
-    url = os.environ.get("SCAN_DISCORD_WEBHOOK_URL") or os.environ.get("DISCORD_WEBHOOK_URL")
+EXCHANGES = {"novig", "kalshi", "polymarket", "prophetx"}
+
+
+def webhook():
+    return os.environ.get("SCAN_DISCORD_WEBHOOK_URL") or os.environ.get("DISCORD_WEBHOOK_URL")
+
+
+def discord_send(text, edit_id=None):
+    """Post one alert (returns its message id), or edit an earlier one in place (no new notification)."""
     if DRY:
-        for ln in lines:
-            print("   [alert]", ln.replace("\n", " | "))
-        return
+        print("   [edit]" if edit_id else "   [alert]", text.replace("\n", " | "))
+        return edit_id or f"dry-{abs(hash(text)) % 10**8}"
+    url = webhook()
     if not POST or not url:   # public log: never print prices
-        log(f"{len(lines)} alert(s) not posted (posting off or no webhook)")
-        return
-    chunk = ""
-    for ln in lines + [None]:
-        if ln is None or len(chunk) + len(ln) + 2 > 1900:
-            if chunk:
-                requests.post(url, json={"content": chunk}, timeout=20).raise_for_status()
-                time.sleep(0.6)
-            chunk = ""
-        if ln:
-            chunk += ln + "\n\n"
+        log("alert not posted (posting off or no webhook)")
+        return None
+    try:
+        if edit_id:
+            r = requests.patch(f"{url}/messages/{edit_id}", json={"content": text}, timeout=20)
+        else:
+            r = requests.post(url, params={"wait": "true"}, json={"content": text}, timeout=20)
+        time.sleep(0.6)   # webhooks allow ~5 messages per 2 seconds
+        r.raise_for_status()
+        return r.json().get("id") if not edit_id else edit_id
+    except Exception as e:  # noqa: BLE001 -- a Discord hiccup never stops the scan
+        log(f"discord {'edit' if edit_id else 'post'} failed: {type(e).__name__} {getattr(e, 'response', None) and e.response.status_code}")
+        return None
 
 
 BOOK_NAMES = {"novig": "Novig", "prophetx": "ProphetX", "kalshi": "Kalshi", "polymarket": "Polymarket",
@@ -666,49 +679,86 @@ BOOK_NAMES = {"novig": "Novig", "prophetx": "ProphetX", "kalshi": "Kalshi", "pol
               "betmgm": "BetMGM"}
 
 
-def alert_text(p, g):
+def _pct(p):
+    return f"{p * 100:.1f}".rstrip("0").rstrip(".")
+
+
+def price_str(odds, book, p=None):
+    """Exchanges: '46¢ (+117)'; sportsbooks: '+117 (46.1%)'. p = the exchange's own contract price if known."""
+    p = prob(odds) if p is None else p
+    return f"{_pct(p)}¢ ({odds:+d})" if book in EXCHANGES else f"{odds:+d} ({_pct(p)}%)"
+
+
+def alert_text(p, g, first=None):
+    """first = the play doc that was originally posted, when this is an in-place update."""
     t = datetime.fromisoformat(g["start"]).astimezone(ET).strftime("%a %-I:%M %p")
-    good = f" · good to {p['good_to']:+d}" if p.get("good_to") is not None else ""
+    bk = BOOK_NAMES.get(p["book"], p["book"])
+    good = ""
+    if p.get("good_to") is not None:
+        good = f" · good to {price_str(p['good_to'], p['book'])}"
     size = f" · ${p['size_usd']:,} avail" if p.get("size_usd") else ""
-    return (f"🔎 **{SPORTS[p['sport']]['label']}** {g['away']} @ {g['home']} · {t} ET\n"
-            f"**{p['label']} {p['odds']:+d} @ {BOOK_NAMES.get(p['book'], p['book'])}** · fair {p['fair_odds']:+d} · "
-            f"EV {p['ev']:+.1%} · bet ${p['stake_usd']} (1/8 Kelly){good}{size}")
+    txt = (f"🔎 **{SPORTS[p['sport']]['label']}** {g['away']} @ {g['home']} · {t} ET\n"
+           f"**{p['label']} · {price_str(p['odds'], p['book'], p.get('price_prob'))} @ {bk}**\n"
+           f"Fair {_pct(p['p_fair'])}% ({p['fair_odds']:+d}) · EV {p['ev']:+.1%} · bet ${p['stake_usd']} (1/8 Kelly){good}{size}")
+    if first:
+        was = price_str(first["odds"], first["book"], first.get("price_prob"))
+        wbk = BOOK_NAMES.get(first["book"], first["book"])
+        wl = "" if first["line"] == p["line"] else f" {first['label']}"
+        at = datetime.now(ET).strftime("%-I:%M %p")
+        txt = f"🔄 **Better number at {at}** -- first posted{wl} at {was} @ {wbk}\n" + txt
+    return txt
 
 
 def record(found, seen, now):
-    """Save new plays (best book per game/side/line), alert the ones that are new or 10+ cents better."""
+    """Save new plays. A game/market/side is posted once; a better number later (same line 10+ cents better, or
+    another line with 2%+ more EV) edits that same Discord message instead of posting again."""
     best = {}
     for gid, g, p, size in found:   # one play per game / market / side: the best EV across books and alt lines
         k = (p["sport"], gid, p["kind"], p["side"])
         if k not in best or p["ev"] > best[k][2]["ev"]:
             best[k] = (gid, g, p, size)
-    alerts = []
+    posted = 0
     for gid, g, p, size in best.values():
         pid = play_id(p, gid)
         prev = seen.get(pid)
         fam = f"{p['sport']}_{gid}_{p['kind']}_{p['side']}"
-        sib = [x for x in seen.values() if x.get("alerted") and f"{x['sport']}_{x['event_id']}_{x['kind']}_{x['side']}" == fam]
-        # already alerted on this side: again only for the same line 10+ cents better, or a different line 2%+ more EV
-        better = all((x["line"] == p["line"] and payout(p["odds"], "x", p["sport"]) * 100
-                      >= payout(x.get("odds_alerted") or x["odds"], "x", p["sport"]) * 100 + REPOST_CENTS)
-                     or (x["line"] != p["line"] and p["ev"] >= x["ev"] + 0.02) for x in sib)
-        if not better:
-            if prev:
-                continue
-            doc = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], found=now.isoformat(),
-                       fair_at=g["at"], alerted=False, **({"size_usd": round(size)} if size else {}))
+        sib = sorted((x for x in seen.values() if x.get("alerted") and not x.get("superseded")
+                      and f"{x['sport']}_{x['event_id']}_{x['kind']}_{x['side']}" == fam),
+                     key=lambda x: x.get("alerted_at") or "")
+        extra = {"size_usd": round(size)} if size else {}
+        base = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], fair_at=g["at"], **extra)
+        if not sib:
+            mid = discord_send(alert_text({**p, **extra}, g))
+            doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
+                       alerted_at=now.isoformat(), msg_id=mid, first_id=pid)
             fs_set(f"scan_plays/{pid}", doc)
             seen[pid] = doc
+            posted += 1
             continue
-        doc = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], found=prev["found"] if prev else now.isoformat(),
-                   fair_at=g["at"], alerted=True, odds_alerted=p["odds"], alerted_at=now.isoformat(),
-                   **({"size_usd": round(size)} if size else {}))
+        last = sib[-1]
+        same_line = last["line"] == p["line"]
+        better = (same_line and payout(p["odds"], "x", p["sport"]) * 100
+                  >= payout(last.get("odds_alerted") or last["odds"], "x", p["sport"]) * 100 + REPOST_CENTS) \
+            or (not same_line and p["ev"] >= last["ev"] + 0.02)
+        if not better:
+            if not prev:
+                fs_set(f"scan_plays/{pid}", dict(base, found=now.isoformat(), alerted=False))
+                seen[pid] = dict(base, found=now.isoformat(), alerted=False)
+            continue
+        first = seen.get(last.get("first_id")) or last
+        mid = discord_send(alert_text({**p, **extra}, g, first=first), edit_id=last.get("msg_id"))
+        if mid is None and last.get("msg_id"):
+            mid = last["msg_id"]
+        # the older doc stays for the record but is graded as superseded; the bettor took one of them
+        fs_set(f"scan_plays/{last['_id'] if last.get('_id') else play_id(last, last['event_id'])}",
+               {**{k: v for k, v in last.items() if k != "_id"}, "superseded": True})
+        last["superseded"] = True
+        doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
+                   alerted_at=now.isoformat(), msg_id=mid, first_id=last.get("first_id") or pid, updated=True)
         fs_set(f"scan_plays/{pid}", doc)
         seen[pid] = doc
-        alerts.append(alert_text({**p, **({"size_usd": round(size)} if size else {})}, g))
-    if alerts:
-        post_discord(alerts)
-    return len(alerts)
+        posted += 1
+    return posted
 
 
 # ---------------- watch loop ----------------
@@ -769,7 +819,8 @@ def watch(minutes, sports):
             reasons = []
             if (age_min >= BASE_GAP_MIN and upcoming) or age_min >= 12 * 60:
                 reasons.append("baseline")
-            open_plays = [p for p in seen.values() if p.get("sport") == s and p.get("alerted") and p.get("p_close") is None
+            open_plays = [p for p in seen.values() if p.get("sport") == s and p.get("alerted") and not p.get("superseded")
+                          and p.get("p_close") is None
                           and now < datetime.fromisoformat(p["start"]) < now + timedelta(minutes=CLOSE_WINDOW_MIN)]
             if open_plays and age_min >= 8:
                 reasons.append("closing line")
@@ -791,7 +842,7 @@ def watch(minutes, sports):
             for x in q:
                 if x["size"] and x["size"] < MIN_SIZE_USD:
                     continue
-                p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now)
+                p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"])
                 if not p:
                     continue
                 if age_min < STALE_FAIR_MIN:
@@ -816,7 +867,7 @@ def watch(minutes, sports):
                     for x in q:
                         if x["size"] and x["size"] < MIN_SIZE_USD:
                             continue
-                        p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now)
+                        p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"])
                         if p:
                             found.append((x["gid"], x["g"], p, x["size"]))
                     n_quotes += len(q)
@@ -886,7 +937,8 @@ def grade():
                    graded_at=now.isoformat())
         fs_set(f"scan_plays/{p['_id']}", doc)
         done += 1
-    allp = [p for p in fs_list("scan_plays") if p.get("result") in ("win", "loss", "push") and p.get("alerted")]
+    allp = [p for p in fs_list("scan_plays") if p.get("result") in ("win", "loss", "push") and p.get("alerted")
+            and not p.get("superseded")]
     if allp:
         cl = [p["clv"] for p in allp if p.get("clv") is not None]
         w = sum(p["result"] == "win" for p in allp); l = sum(p["result"] == "loss" for p in allp)
@@ -917,7 +969,7 @@ def main():
                 save_fair(s, games, now.isoformat(), {})
                 found = list(plays)
                 for x in exchange_quotes(s, games):
-                    p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now)
+                    p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"])
                     if p and not (x["size"] and x["size"] < MIN_SIZE_USD):
                         found.append((x["gid"], x["g"], p, x["size"]))
                 log(f"[{s}] {record(found, seen, now)} alert(s)")
