@@ -13,13 +13,13 @@ on:
     - cron: '5 12 * * *'
   workflow_dispatch:
     inputs:
-      mode: {description: "watch, pull, grade or books (book scorecard)", required: true, default: "watch", type: choice, options: [watch, pull, grade, books, cbbbooks, taken]}
+      mode: {description: "watch, pull, grade or books (book scorecard)", required: true, default: "watch", type: choice, options: [watch, pull, grade, books, cbbbooks, taken, cfbrecord]}
       minutes: {description: "watch: minutes to run (blank = until midnight ET, max 330)", required: false, default: ""}
       sports: {description: "comma-separated: nfl,nba,ncaab,nhl", required: false, default: "nfl,nba,ncaab,nhl"}
       post: {description: "Post alerts to Discord", type: boolean, default: true}
 
 concurrency:
-  group: scan-${{ (inputs.mode == 'grade' || inputs.mode == 'books' || inputs.mode == 'cbbbooks' || inputs.mode == 'taken' || github.event.schedule == '5 12 * * *') && 'grade' || 'watch' }}
+  group: scan-${{ (inputs.mode == 'grade' || inputs.mode == 'books' || inputs.mode == 'cbbbooks' || inputs.mode == 'taken' || inputs.mode == 'cfbrecord' || github.event.schedule == '5 12 * * *') && 'grade' || 'watch' }}
   cancel-in-progress: false
 
 jobs:

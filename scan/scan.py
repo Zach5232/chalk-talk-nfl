@@ -1784,7 +1784,7 @@ def grade():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken"])
+    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS", "nfl,nba,ncaab,nhl"))
@@ -1792,6 +1792,25 @@ def main():
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
         return grade()
+    if a.mode == "cfbrecord":   # CFB plays posted to Discord this season, by kind (totals only -- public log)
+        st = fs_get("cfb_odds_state/current") or {}
+        ps = [x for x in (st.get("posted") or {}).values() if x.get("result") in ("win", "loss", "push")]
+        print(f"{len(ps)} graded CFB posted plays; kinds: {sorted({x.get('kind', 'ev') for x in ps})}")
+        for kind in sorted({x.get("kind", "ev") for x in ps}):
+            xs = [x for x in ps if x.get("kind", "ev") == kind]
+            for label, sub in (("all", xs), ("went off the board", [x for x in xs if x.get("status") == "off"]),
+                               ("stayed on", [x for x in xs if x.get("status") != "off"])):
+                if not sub:
+                    continue
+                w = sum(x["result"] == "win" for x in sub); l_ = sum(x["result"] == "loss" for x in sub)
+                u = sum(x.get("units") or 0 for x in sub)
+                c = [x["close_ev"] for x in sub if x.get("close_ev") is not None]
+                print(f"  {kind:12s} {label:20s} {len(sub):4d} plays  {w}-{l_}  {u:+.2f}u ({u / len(sub):+.1%})"
+                      + (f"  avg CLV {sum(c) / len(c):+.2%}, beat close {sum(v > 0 for v in c)}/{len(c)}" if c else ""))
+        by_wk = {}
+        for x in ps:
+            by_wk.setdefault((x.get("kind", "ev"), str(x.get("ev_key", "")).split(":")[0][:12] or "?"), []).append(x)
+        return
     if a.mode == "taken":   # today's alerts and your ✅/❌ (teams and books only -- this log is public)
         now = datetime.now(timezone.utc)
         ps = sorted((x for x in fs_recent("scan_plays", "start", (now - timedelta(days=1)).isoformat())
