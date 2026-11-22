@@ -67,6 +67,7 @@ BAR = 0.03                 # EV after fees vs consensus and vs Pinnacle
 BAR_STRICT = 0.04          # Kalshi / Polymarket, and plays found more than EARLY_H before start
 STRICT_BOOKS = {"kalshi", "polymarket"}
 EARLY_H = 6
+LONGSHOT_P = 0.20          # sides the market gives under 20% also need the stricter bar
 MAX_EV = 0.12              # above this it's a stale quote or a mismatched game, not value
 MIN_BOOKS = 3              # books left in the consensus after removing the one being checked
 MIN_SIZE_USD = 25          # exchange liquidity at the quoted price
@@ -151,9 +152,26 @@ def quotes(event):
     return out
 
 
+def devig(ia, ib):
+    """Power method: fair p = implied ** k with k chosen so the two sides sum to 1. Same as the proportional method on
+    even lines, but on lopsided ones it puts the book's margin on the longshot, where books actually load it
+    (proportional devig makes big underdogs look more likely than they are)."""
+    if ia + ib <= 1:
+        return ia / (ia + ib)
+    lo, hi = 1.0, 3.0
+    for _ in range(50):
+        k = (lo + hi) / 2
+        if ia ** k + ib ** k > 1:
+            lo = k
+        else:
+            hi = k
+    k = (lo + hi) / 2
+    return ia ** k / (ia ** k + ib ** k)
+
+
 def fair_views(sport, kind, rows):
     """Compact per-book views saved with each game: [book, weight, line, devigged P(side A)]."""
-    return [[r["book"], WEIGHTS.get(r["book"], 1.0), r["line"], round(prob(r["a"]) / (prob(r["a"]) + prob(r["b"])), 5)]
+    return [[r["book"], WEIGHTS.get(r["book"], 1.0), r["line"], round(devig(prob(r["a"]), prob(r["b"])), 5)]
             for r in rows]
 
 
@@ -187,6 +205,8 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     if hrs * 60 < START_BUFFER_MIN:
         return None
     bar = bar_for(book, hrs)
+    if pw < LONGSHOT_P:
+        bar = max(bar, BAR_STRICT)
     if not (bar <= ev <= MAX_EV and ev_pin >= bar):
         return None
     kelly = ev / pay
