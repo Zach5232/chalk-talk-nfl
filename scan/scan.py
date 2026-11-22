@@ -80,19 +80,15 @@ MIN_BOOKS = 3              # books left in the consensus after removing the one 
 MIN_SIZE_USD = 25          # exchange liquidity at the quoted price
 REPOST_CENTS = 10          # alert the same play again only if the price improved this much
 BANKROLL = float(os.environ.get("SCAN_BANKROLL", "2000"))
-EXPOSURE_CAP = float(os.environ.get("SCAN_EXPOSURE", "0.5"))   # pending bets above this share of bankroll: only 5%+ EV posts
+EXPOSURE_CAP = float(os.environ.get("SCAN_EXPOSURE", "0"))   # 0 = off. If set (e.g. 0.5): over that share pending, only 5%+ EV posts
 EXPOSURE_OVERRIDE_EV = 0.05
 KELLY = 1 / 8
 MAX_STAKE = 0.02
 
 
-MIN_STAKE_USD = 5          # a play posts if the stake is at least $5 ...
-MIN_TO_WIN = 10            # ... or it can win at least $10 (no '$1 to win $4' bets)
-
-
 def bet_size(usd):
-    """What actually gets bet: under $5 to the dollar ($1 minimum), from $5 up to the nearest $5 ($8 -> $10, $7 -> $5)."""
-    return max(1, round(usd)) if usd < 5 else 5 * round(usd / 5)
+    """1/8 Kelly in dollars, to the dollar ($1 minimum) -- no other rounding or limits."""
+    return max(1, round(usd))
 HOURS_AHEAD = 24
 CREDIT_CAP = int(os.environ.get("SCAN_CREDIT_CAP", "3000"))
 CYCLE_S = 60               # moneylines every minute (free) ...
@@ -231,8 +227,6 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     kelly = ev / pay
     stake = min(kelly * KELLY, MAX_STAKE)
     to_win = bet_size(stake * BANKROLL) * pay
-    if bet_size(stake * BANKROLL) < MIN_STAKE_USD and to_win < MIN_TO_WIN:
-        return None
     # worst price that still clears the bar vs the consensus (fees ignored for the display number)
     good = american(pw / (1 + bar))
     return dict(sport=sport, kind=kind, side=side, line=line, book=book, odds=int(odds), label=label(g, kind, side, line),
@@ -1110,7 +1104,7 @@ def record(found, seen, now):
                 seen[pid] = dict(base, found=now.isoformat(), alerted=False, conflict=True)
             continue
         note = ("\n" + "\n".join(notes)) if notes else ""
-        if not sib and p["ev"] < EXPOSURE_OVERRIDE_EV:
+        if EXPOSURE_CAP and not sib and p["ev"] < EXPOSURE_OVERRIDE_EV:
             exp = open_exposure(seen, now)
             if exp + p["stake_usd"] > EXPOSURE_CAP * BANKROLL:
                 if not prev:
