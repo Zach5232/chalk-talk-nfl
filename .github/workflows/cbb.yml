@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   run:
+    if: false   # PAUSED 2026-11-22 by the owner: the value scanner (scan.yml) covers CBB -- delete this line to resume
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
