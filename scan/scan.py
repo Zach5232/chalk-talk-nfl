@@ -973,6 +973,7 @@ def webhook():
 
 BUTTONS = [{"type": 1, "components": [
     {"type": 2, "style": 3, "label": "Bet it", "custom_id": "bet"},
+    {"type": 2, "style": 2, "label": "Line moved", "custom_id": "moved"},
     {"type": 2, "style": 2, "label": "Pass", "custom_id": "pass"}]}]
 BOT_MSGS = set()          # alert messages the bot posted (it edits those; the webhook edits its own)
 BOT_CAN_POST = [True]
@@ -1168,6 +1169,11 @@ def _answer(it):
             if it["data"]["custom_id"] == "pass":
                 TAPS.put((mid, "pass", None, None, None))
                 return note("Passed ❌")
+            if it["data"]["custom_id"] == "moved":
+                return reply({"type": 9, "data": {"custom_id": f"moved:{mid}", "title": "Line moved", "components": [
+                    {"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": False,
+                                                "max_length": 10, "label": "Best price now (optional)",
+                                                "placeholder": "-257 or 52.5"}]}]}})
             stake = x.get("stake_taken") or x.get("stake_usd") or 0
             return reply({"type": 9, "data": {"custom_id": f"bet:{mid}", "title": "Log your bet"[:45], "components": [
                 {"type": 1, "components": [{"type": 4, "custom_id": "amount", "label": "Amount ($)", "style": 1,
@@ -1175,6 +1181,18 @@ def _answer(it):
                 {"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": True, "max_length": 10,
                                             "label": ("Price in cents (e.g. 46.5)" if x["book"] in EXCHANGES
                                                       else "Odds (e.g. -115)"), "value": _default_price(x)}]}]}})
+        if it["type"] == 5 and it["data"]["custom_id"].startswith("moved:"):
+            mid = it["data"]["custom_id"].split(":", 1)[1]
+            raw = it["data"]["components"][0]["components"][0].get("value", "").strip()
+            odds = pr = None
+            if raw:
+                try:
+                    odds, pr = parse_price(raw)
+                except ValueError:
+                    return note("Couldn't read that price -- like -257 or 52.5. Tap Line moved again (or leave it blank).")
+            TAPS.put((mid, "moved", None, odds, pr))
+            x = MSG_DOC.get(mid) or {"book": ""}
+            return note("Noted: missed, line moved" + (f" (now {price_str(odds, x['book'], pr)})" if odds is not None else ""))
         if it["type"] == 5:   # form submitted
             mid = it["data"]["custom_id"].split(":", 1)[1]
             vals = {c["components"][0]["custom_id"]: c["components"][0].get("value", "") for c in it["data"]["components"]}
@@ -1244,8 +1262,11 @@ def apply_taps(seen):
         if not x:
             continue
         if what == "pass":
-            x["taken"] = False
+            x.update(taken=False, pass_reason="didn't want it")
             line = "❌ **Passed**"
+        elif what == "moved":
+            x.update(taken=False, pass_reason="line moved", moved_odds=odds, moved_price=pr, moved_at=datetime.now(timezone.utc).isoformat())
+            line = "❌ **Missed -- line moved**" + (f" (now {price_str(odds, x['book'], pr)})" if odds is not None else "")
         else:
             x.update(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr)
             line = f"✅ **You bet** ${stake:g} at {price_str(odds, x['book'], pr)}"
@@ -1693,6 +1714,13 @@ def watch(minutes, sports):
     refresh_msg_doc(seen, datetime.now(timezone.utc))
     if bot_on():
         threading.Thread(target=gateway, daemon=True).start()
+        for mid, x in list(MSG_DOC.items()):   # give alerts you haven't answered the current buttons
+            if mid in BOT_MSGS and x.get("taken") is None:
+                try:
+                    bot("PATCH", f"/channels/{channel_id()}/messages/{mid}", json={"components": BUTTONS})
+                    time.sleep(0.3)
+                except Exception:  # noqa: BLE001
+                    pass
     state = {}
     for s in sports:
         games, pulled = load_fair(s)
@@ -1821,8 +1849,10 @@ def day_summary(now):
              f"Alerts: {len(ps)} (" + ", ".join(f"{k} {v}" for k, v in sorted(by_sport.items())) + ")"]
     if any(x.get("taken") is not None for x in ps):
         tk = [x for x in ps if x.get("taken")]
+        mv = sum(x.get("taken") is False and x.get("pass_reason") == "line moved" for x in ps)
         lines.append(f"You took {len(tk)} (${sum(x.get('stake_taken') or x.get('stake_usd') or 0 for x in tk):,.0f}), "
-                     f"passed {sum(x.get('taken') is False for x in ps)}, no answer {sum(x.get('taken') is None for x in ps)}")
+                     f"passed {sum(x.get('taken') is False for x in ps) - mv}, missed (line moved) {mv}, "
+                     f"no answer {sum(x.get('taken') is None for x in ps)}")
     pend = [x for x in ps if not x.get("result") and x.get("taken") is not False]
     if pend:
         lines.append(f"Still open: {len(pend)} bets, ${sum(x.get('stake_taken') or x.get('stake_usd') or 0 for x in pend):,.0f}")
