@@ -901,6 +901,27 @@ def add_buttons(mid):
             return
 
 
+def parse_reply(text):
+    """What you actually bet, from a reply to an alert: '10 @ 46.5' ($10 at 46.5¢), '$25 -110', '$10', '12 at 52c'.
+    -> (stake or None, American odds or None, contract price 0-1 or None)."""
+    t = (text or "").lower().replace(",", "")
+    odds = price = None
+    m = re.search(r"(?<![\d.$])([+-]\d{3,5})(?![\d.])", t)
+    if m:
+        odds = int(m.group(1))
+        t = t[:m.start()] + " " + t[m.end():]
+    else:
+        m = (re.search(r"(?:@|\bat\b)\s*(\d{1,2}(?:\.\d+)?)\s*(?:¢|c\b|cents?\b)?", t)
+             or re.search(r"(\d{1,2}(?:\.\d+)?)\s*(?:¢|c\b|cents?\b)", t))
+        if m:
+            price = float(m.group(1)) / 100
+            odds = american(price) if 0 < price < 1 else None
+            t = t[:m.start()] + " " + t[m.end():]
+    m = re.search(r"\$\s*(\d+(?:\.\d+)?)", t) or re.search(r"(?<![\d.])(\d+(?:\.\d+)?)", t)
+    stake = float(m.group(1)) if m else None
+    return stake, odds, price
+
+
 def read_reactions(seen, now):
     """Mark alerts taken (✅) or passed (❌) from the owner's reactions; a reply like '$20' sets the stake taken."""
     if not bot_on():
@@ -925,23 +946,28 @@ def read_reactions(seen, now):
         before = page[-1]["id"]
     changed = 0
     stakes = {}
-    for m in msgs:   # replies to an alert: '$20', '20', 'took 20'
+    for m in sorted(msgs, key=lambda m: m.get("timestamp") or ""):   # replies: '10 @ 46.5', '$25 -110', '$10'
         ref = (m.get("message_reference") or {}).get("message_id")
-        amt = re.search(r"\$?\s*(\d+(?:\.\d+)?)", m.get("content") or "")
-        if ref in live and amt and not (m.get("author") or {}).get("bot"):
-            stakes[ref] = float(amt.group(1))
+        if ref in live and not (m.get("author") or {}).get("bot"):
+            got = parse_reply(m.get("content"))
+            if got[0] is not None or got[1] is not None:
+                stakes[ref] = got           # the latest reply wins
     for m in msgs:
         x = live.get(m["id"])
         if not x:
             continue
         mine = {r["emoji"].get("name"): r["count"] - (1 if r.get("me") else 0) for r in m.get("reactions") or []}
         taken = True if mine.get(TAKE, 0) > 0 else False if mine.get(PASS, 0) > 0 else None
-        stake = stakes.get(m["id"])
-        if taken != x.get("taken") or (stake is not None and stake != x.get("stake_taken")):
+        stake, odds_t, price_t = stakes.get(m["id"], (None, None, None))
+        if (taken != x.get("taken") or (stake is not None and stake != x.get("stake_taken"))
+                or (odds_t is not None and odds_t != x.get("taken_odds"))):
             x["taken"] = taken
+            if stake is not None or odds_t is not None:
+                x["taken"] = True if taken is None else taken   # a reply means you bet it
             if stake is not None:
                 x["stake_taken"] = stake
-                x["taken"] = True if taken is None else taken
+            if odds_t is not None:
+                x["taken_odds"], x["taken_price"] = odds_t, price_t
             fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
             changed += 1
     return changed
@@ -1501,7 +1527,7 @@ def day_summary(now):
         mine = [x for x in gr if x.get("taken")]
         if mine:
             lines.append(f"Your bets: {sum(x['result'] == 'win' for x in mine)}-{sum(x['result'] == 'loss' for x in mine)}, "
-                         f"{sum((x.get('pl_unit') or 0) * (x.get('stake_taken') or x.get('stake_usd') or 0) for x in mine):+,.0f}")
+                         f"{sum(x.get('pl_taken_usd') or 0 for x in mine):+,.0f} at your prices and stakes")
     life = {}
     for x in ps:
         if x.get("gone_at") and x.get("alerted_at"):
@@ -1569,6 +1595,10 @@ def grade():
         pay = payout(p["odds"], p["book"], p["sport"])
         pl = {"win": pay, "loss": -1.0, "push": 0.0}[res]
         doc = {k: v for k, v in p.items() if k != "_id"}
+        if p.get("taken"):   # your bet at the price and stake you actually got
+            pay_t = payout(p.get("taken_odds") or p["odds"], p["book"], p["sport"])
+            doc["pl_taken_usd"] = round({"win": pay_t, "loss": -1.0, "push": 0.0}[res]
+                                        * (p.get("stake_taken") or p.get("stake_usd") or 0), 2)
         doc.update(result=res, pl_unit=round(pl, 4), pl_usd=round(pl * (p.get("stake_usd") or 0), 2),
                    clv=round(p["p_close"] * (1 + pay) - 1, 4) if p.get("p_close") is not None else None,
                    clv_pin=round(p["p_close_pin"] * (1 + pay) - 1, 4) if p.get("p_close_pin") is not None else None,
