@@ -1592,7 +1592,7 @@ def grade():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks"])
+    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS", "nfl,nba,ncaab,nhl"))
@@ -1600,6 +1600,17 @@ def main():
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
         return grade()
+    if a.mode == "taken":   # today's alerts and your ✅/❌ (teams and books only -- this log is public)
+        now = datetime.now(timezone.utc)
+        ps = sorted((x for x in fs_recent("scan_plays", "start", (now - timedelta(days=1)).isoformat())
+                     if x.get("alerted") and not x.get("superseded")), key=lambda x: x.get("alerted_at") or "")
+        for x in ps[-40:]:
+            mark = {True: "BET ✅", False: "passed ❌", None: "-"}[x.get("taken")]
+            t = datetime.fromisoformat(x["alerted_at"]).astimezone(ET).strftime("%-I:%M %p") if x.get("alerted_at") else ""
+            print(f"{t:>8s}  {mark:10s} {SPORTS[x['sport']]['label']:4s} {x['label'][:34]:34s} @ {BOOK_NAMES.get(x['book'], x['book']):11s}"
+                  f" {'msg' if x.get('msg_id') else 'no msg'}")
+        return print(f"{sum(1 for x in ps if x.get('taken'))} marked bet, {sum(1 for x in ps if x.get('taken') is False)} passed, "
+                     f"{len(ps)} alerts in the last day")
     if a.mode == "cbbbooks":
         return print(cbb_book_report())
     if a.mode == "books":
