@@ -80,6 +80,9 @@ MIN_BOOKS = 3              # books left in the consensus after removing the one 
 MIN_SIZE_USD = 25          # exchange liquidity at the quoted price
 REPOST_CENTS = 10          # alert the same play again only if the price improved this much
 BANKROLL = float(os.environ.get("SCAN_BANKROLL", "2000"))
+EXPOSURE_CAP = float(os.environ.get("SCAN_EXPOSURE", "0.5"))   # pending bets above this share of bankroll: only 5%+ EV posts
+EXPOSURE_OVERRIDE_EV = 0.05
+STATUS_REFRESH_MIN = 5     # a still-good alert's "as of" time is refreshed at most this often
 KELLY = 1 / 8
 MAX_STAKE = 0.02
 HOURS_AHEAD = 24
@@ -456,6 +459,9 @@ def book_report(now):
     return "\n".join(out)
 
 
+BOOK_Q, BOOK_Q_AT = {}, {}   # sport -> {(gid, kind, side, line, book): odds} from the last pull, and its time
+
+
 # ---------------- paid pull ----------------
 def pull(sport, now, st, reason):
     """One Odds API pull for a sport: saves fair views for every game in the next HOURS_AHEAD, returns
@@ -480,6 +486,9 @@ def pull(sport, now, st, reason):
     charge(st, now, cost)
     events = r.json()
     games, plays, for_tally = {}, [], []
+    bq = BOOK_Q.setdefault(sport, {})
+    bq.clear()
+    BOOK_Q_AT[sport] = now
     for ev in events:
         q = quotes(ev)
         if not any(r_["book"] == SHARP for rows in q.values() for r_ in rows):
@@ -488,6 +497,11 @@ def pull(sport, now, st, reason):
                  at=now.isoformat(), views={k: fair_views(sport, k, rows) for k, rows in q.items() if rows})
         games[ev["id"]] = g
         for_tally.append((g, q))
+        for kind, rows in q.items():
+            for row in rows:
+                if row["book"] in BET_BOOKS:
+                    for side in ("a", "b"):
+                        bq[(ev["id"], kind, side, row["line"], row["book"])] = int(row[side])
         for kind, rows in q.items():
             for row in rows:
                 if row["book"] not in BET_BOOKS:
@@ -840,6 +854,110 @@ def discord_send(text, edit_id=None):
         return None
 
 
+BOT = os.environ.get("DISCORD_BOT_TOKEN", "")
+DAPI = "https://discord.com/api/v10"
+TAKE, PASS = "\u2705", "\u274c"     # ✅ ❌
+_CHANNEL = [None]
+
+
+def channel_id():
+    """The alert channel, from the webhook itself (no extra setting needed)."""
+    if _CHANNEL[0] is None and webhook() and not DRY:
+        try:
+            _CHANNEL[0] = requests.get(webhook(), timeout=20).json().get("channel_id") or ""
+        except Exception:  # noqa: BLE001
+            _CHANNEL[0] = ""
+    return _CHANNEL[0]
+
+
+def bot_on():
+    return bool(BOT) and POST and not DRY and bool(channel_id())
+
+
+def bot(method, path, **kw):
+    r = requests.request(method, f"{DAPI}{path}", headers={"Authorization": f"Bot {BOT}"}, timeout=20, **kw)
+    if r.status_code == 429:
+        time.sleep(float(r.json().get("retry_after", 1)) + 0.2)
+        r = requests.request(method, f"{DAPI}{path}", headers={"Authorization": f"Bot {BOT}"}, timeout=20, **kw)
+    r.raise_for_status()
+    return r.json() if r.content else None
+
+
+def add_buttons(mid):
+    """✅ / ❌ under a new alert, so marking a bet is one tap."""
+    if not (mid and bot_on()):
+        return
+    for e in (TAKE, PASS):
+        try:
+            bot("PUT", f"/channels/{channel_id()}/messages/{mid}/reactions/{requests.utils.quote(e)}/@me")
+            time.sleep(0.3)
+        except Exception as ex:  # noqa: BLE001
+            log(f"reaction add failed: {type(ex).__name__}")
+            return
+
+
+def read_reactions(seen, now):
+    """Mark alerts taken (✅) or passed (❌) from the owner's reactions; a reply like '$20' sets the stake taken."""
+    if not bot_on():
+        return 0
+    live = {}
+    for x in seen.values():
+        if x.get("alerted") and not x.get("superseded") and x.get("msg_id"):
+            live[x["msg_id"]] = x
+    if not live:
+        return 0
+    oldest = min(x.get("alerted_at") or "" for x in live.values())
+    msgs, before = [], None
+    for _ in range(5):
+        try:
+            page = bot("GET", f"/channels/{channel_id()}/messages", params=dict(limit=100, **({"before": before} if before else {})))
+        except Exception as ex:  # noqa: BLE001
+            log(f"reaction read failed: {type(ex).__name__}")
+            return 0
+        msgs += page or []
+        if not page or len(page) < 100 or (page[-1].get("timestamp") or "") < oldest:
+            break
+        before = page[-1]["id"]
+    changed = 0
+    stakes = {}
+    for m in msgs:   # replies to an alert: '$20', '20', 'took 20'
+        ref = (m.get("message_reference") or {}).get("message_id")
+        amt = re.search(r"\$?\s*(\d+(?:\.\d+)?)", m.get("content") or "")
+        if ref in live and amt and not (m.get("author") or {}).get("bot"):
+            stakes[ref] = float(amt.group(1))
+    for m in msgs:
+        x = live.get(m["id"])
+        if not x:
+            continue
+        mine = {r["emoji"].get("name"): r["count"] - (1 if r.get("me") else 0) for r in m.get("reactions") or []}
+        taken = True if mine.get(TAKE, 0) > 0 else False if mine.get(PASS, 0) > 0 else None
+        stake = stakes.get(m["id"])
+        if taken != x.get("taken") or (stake is not None and stake != x.get("stake_taken")):
+            x["taken"] = taken
+            if stake is not None:
+                x["stake_taken"] = stake
+                x["taken"] = True if taken is None else taken
+            fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
+            changed += 1
+    return changed
+
+
+def open_exposure(seen, now):
+    """Dollars in bets not yet settled. With reactions: ✅ bets plus alerts under an hour old with no answer yet.
+    Without: every alert counts (the scanner can't know which ones you took)."""
+    tot = 0.0
+    for x in seen.values():
+        if not x.get("alerted") or x.get("superseded") or x.get("result") or x.get("taken") is False:
+            continue
+        if datetime.fromisoformat(x["start"]) < now - timedelta(hours=4):
+            continue
+        if bot_on() and x.get("taken") is None:
+            if (now - datetime.fromisoformat(x.get("alerted_at") or now.isoformat())).total_seconds() > 3600:
+                continue
+        tot += x.get("stake_taken") or x.get("stake_usd") or 0
+    return tot
+
+
 BOOK_NAMES = {"novig": "Novig", "prophetx": "ProphetX", "kalshi": "Kalshi", "polymarket": "Polymarket",
               "fanduel": "FanDuel", "betrivers": "BetRivers", "ballybet": "Bally Bet", "betmgm": "BetMGM",
               "betonlineag": "BetOnline", "espnbet": "theScore Bet",
@@ -949,10 +1067,22 @@ def record(found, seen, now):
                      key=lambda x: x.get("alerted_at") or "")
         extra = {"size_usd": round(size)} if size else {}
         base = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], fair_at=g["at"], **extra)
-        # plays already posted on the other side of this game
+        # plays already posted in this game: other side (middle / arb / conflict) or the same team another way
         notes, edits, skip = [], [], False
         for o in [x for x in seen.values() if x.get("alerted") and not x.get("superseded") and x["event_id"] == gid
                   and x["sport"] == p["sport"] and x["kind"] in ("h2h", "spread", "total")]:
+            r1, r2 = region(p), region(o)
+            if r1[:2] == r2[:2] and (o["kind"], o["side"]) != (p["kind"], p["side"]):
+                # e.g. Nebraska ML and Nebraska -10.5: one bet on Nebraska, not two
+                if p["ev"] <= o["ev"]:
+                    skip = True
+                    break
+                notes.append(f"↪️ **Same side** as {o['label']} @ {BOOK_NAMES.get(o['book'], o['book'])} (EV {o['ev']:+.1%}) "
+                             f"-- that's one bet on the same result; this is the better way. If you took that one, skip this.")
+                edits.append((o, f"↪️ A better way to bet this side was posted: {p['label']} "
+                                 f"{price_str(p['odds'], p['book'], p.get('price_prob'))} @ {BOOK_NAMES.get(p['book'], p['book'])} "
+                                 f"(EV {p['ev']:+.1%}). Take only one."))
+                continue
             rel = relation(p, o, g)
             if not rel:
                 continue
@@ -969,14 +1099,27 @@ def record(found, seen, now):
                 seen[pid] = dict(base, found=now.isoformat(), alerted=False, conflict=True)
             continue
         note = ("\n" + "\n".join(notes)) if notes else ""
+        if not sib and p["ev"] < EXPOSURE_OVERRIDE_EV:
+            exp = open_exposure(seen, now)
+            if exp + p["stake_usd"] > EXPOSURE_CAP * BANKROLL:
+                if not prev:
+                    d_ = dict(base, found=now.isoformat(), alerted=False, skipped="exposure cap")
+                    fs_set(f"scan_plays/{pid}", d_)
+                    seen[pid] = d_
+                continue
         for o, onote in edits:   # tell the earlier message about the new one
             if o.get("msg_id"):
                 first = seen.get(o.get("first_id")) if o.get("updated") else None
-                discord_send(alert_text(o, o, first=first) + "\n" + onote, edit_id=o["msg_id"])
+                body = (o.get("msg_text") or alert_text(o, o, first=first)) + "\n" + onote
+                discord_send(body + status_suffix(o), edit_id=o["msg_id"])
+                o["msg_text"] = body
+                fs_set(f"scan_plays/{o.get('_id') or play_id(o, o['event_id'])}", {k: v for k, v in o.items() if k != "_id"})
         if not sib:
-            mid = discord_send(alert_text({**p, **extra}, g) + note)
+            text = alert_text({**p, **extra}, g) + note
+            mid = discord_send(text)
+            add_buttons(mid)
             doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
-                       alerted_at=now.isoformat(), msg_id=mid, first_id=pid)
+                       alerted_at=now.isoformat(), msg_id=mid, first_id=pid, msg_text=text)
             fs_set(f"scan_plays/{pid}", doc)
             seen[pid] = doc
             posted += 1
@@ -992,7 +1135,8 @@ def record(found, seen, now):
                 seen[pid] = dict(base, found=now.isoformat(), alerted=False)
             continue
         first = seen.get(last.get("first_id")) or last
-        mid = discord_send(alert_text({**p, **extra}, g, first=first) + note, edit_id=last.get("msg_id"))
+        text = alert_text({**p, **extra}, g, first=first) + note
+        mid = discord_send(text, edit_id=last.get("msg_id"))
         if mid is None and last.get("msg_id"):
             mid = last["msg_id"]
         # the older doc stays for the record but is graded as superseded; the bettor took one of them
@@ -1000,11 +1144,93 @@ def record(found, seen, now):
                {**{k: v for k, v in last.items() if k != "_id"}, "superseded": True})
         last["superseded"] = True
         doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
-                   alerted_at=now.isoformat(), msg_id=mid, first_id=last.get("first_id") or pid, updated=True)
+                   alerted_at=now.isoformat(), msg_id=mid, first_id=last.get("first_id") or pid, updated=True,
+                   msg_text=text, taken=last.get("taken"), stake_taken=last.get("stake_taken"))
         fs_set(f"scan_plays/{pid}", doc)
         seen[pid] = doc
         posted += 1
     return posted
+
+
+# ---------------- live status on posted alerts ----------------
+FREE_FEED = {"novig", "kalshi", "polymarket"}
+
+
+def status_suffix(x):
+    return ("\n" + x["status_line"]) if x.get("status_line") else ""
+
+
+def _ev_now(sport, g, kind, side, line, book, odds):
+    views = (g.get("views") or {}).get(kind)
+    pa = fair_at(sport, kind, views, line, without=book) if views else None
+    if pa is None:
+        return None
+    pw = pa if side == "a" else 1 - pa
+    return pw * (1 + payout(odds, book, sport)) - 1
+
+
+def live_status(sport, games, quotes_, seen, now, full):
+    """Re-check every posted alert's own price (same book / line / side) and keep a status line on its message:
+    🟢 still good · 🟡 price there, edge under the bar · 🔴 gone · ⏱️ game started. Records when each alert died."""
+    free = {}
+    for x in quotes_:
+        k = (x["gid"], x["kind"], x["side"], x["line"], x["book"])
+        if k not in free or payout(x["odds"], x["book"], sport) > payout(free[k][0], x["book"], sport):
+            free[k] = (x["odds"], x.get("prob"))
+    edits = 0
+    for x in list(seen.values()):
+        if (x.get("sport") != sport or not x.get("alerted") or x.get("superseded") or not x.get("msg_id")
+                or x.get("status_final")):
+            continue
+        g = games.get(x["event_id"])
+        if not g:
+            continue
+        key = (x["event_id"], x["kind"], x["side"], x["line"], x["book"])
+        started = datetime.fromisoformat(x["start"]) <= now
+        if x["book"] in FREE_FEED:
+            if x["kind"] != "h2h" and not full and not started:
+                continue            # spreads / totals are re-read every 3rd cycle
+            cur = free.get(key)
+            odds, pp = (cur if cur else (None, None))
+            at, src = now, "live"
+        else:
+            odds, pp = BOOK_Q.get(sport, {}).get(key), None
+            at, src = BOOK_Q_AT.get(sport), "pull"
+        if at is None:
+            continue
+        hhmm = at.astimezone(ET).strftime("%-I:%M %p")
+        bk = BOOK_NAMES.get(x["book"], x["book"])
+        if started:
+            state, line_ = "started", f"⏱️ **Game started** -- {'last seen ' + price_str(odds, x['book'], pp) if odds is not None else 'off the board'} @ {bk}"
+        elif odds is None:
+            state, line_ = "gone", f"🔴 **Gone** as of {hhmm} -- no longer offered at {bk}"
+        else:
+            ev = _ev_now(sport, g, x["kind"], x["side"], x["line"], x["book"], odds)
+            ok = evaluate(sport, g, x["kind"], x["side"], x["line"], x["book"], odds, now, pp)
+            ps = price_str(odds, x["book"], pp)
+            when = f"as of {hhmm}" if src == "live" else f"at the last {bk} check ({hhmm})"
+            if ok:
+                state, line_ = "good", f"🟢 **Still good** {when} · {ps} @ {bk} (EV {ok['ev']:+.1%})"
+            elif ev is not None and ev > 0:
+                state, line_ = "thin", f"🟡 **Price still there, edge down to {ev:+.1%}** {when} · {ps} @ {bk}"
+            else:
+                state, line_ = "gone", f"🔴 **Gone** {when} -- now {ps} @ {bk}" + (f" (EV {ev:+.1%})" if ev is not None else "")
+        last_at = x.get("status_at")
+        stale = (not last_at or (now - datetime.fromisoformat(last_at)).total_seconds() >= STATUS_REFRESH_MIN * 60)
+        changed = state != x.get("status") or (state != "good" and line_ != x.get("status_line"))
+        if not changed and not (state == "good" and stale and line_ != x.get("status_line")):
+            continue
+        body = x.get("msg_text") or alert_text(x, x)
+        x.update(status=state, status_line=line_, status_at=now.isoformat())
+        if state == "gone" and not x.get("gone_at"):
+            x["gone_at"] = now.isoformat()
+        if state == "started":
+            x["status_final"] = True
+        discord_send(body + status_suffix(x), edit_id=x["msg_id"])
+        edits += 1
+        if changed:   # Firestore only on real changes (keeps writes low)
+            fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
+    return edits
 
 
 # ---------------- news: ESPN injury reports (free) ----------------
@@ -1087,7 +1313,7 @@ def watch(minutes, sports):
         cycle += 1
         now = datetime.now(timezone.utc)
         st = credits_state(now)
-        n_alerts = n_quotes = 0
+        n_alerts = n_quotes = n_edits = 0
         for s in sports:
             S = state[s]
             S["games"] = {k: g for k, g in S["games"].items() if datetime.fromisoformat(g["start"]) > now - timedelta(hours=8)}
@@ -1163,12 +1389,72 @@ def watch(minutes, sports):
                     save_fair(s, S["games"], S["pulled"], S["mids"])
             if found:
                 n_alerts += record(found, seen, now)
-        log(f"cycle {cycle}: {n_quotes} exchange prices checked, {n_alerts} alert(s); credits {st['used']}/{CREDIT_CAP}")
+            try:
+                n_edits += live_status(s, S["games"], q, seen, now, full or bool(reasons and S["pulled"] == now.isoformat()))
+            except Exception as e:  # noqa: BLE001 -- status lines never stop the scan
+                log(f"[{s}] live status: {type(e).__name__}: {str(e)[:80]}")
+        if cycle % FULL_EVERY == 1:
+            try:
+                read_reactions(seen, now)
+            except Exception as e:  # noqa: BLE001
+                log(f"reactions: {type(e).__name__}")
+        log(f"cycle {cycle}: {n_quotes} exchange prices checked, {n_alerts} alert(s), {n_edits} status update(s); "
+            f"credits {st['used']}/{CREDIT_CAP}")
         time.sleep(max(0, min(CYCLE_S, t_end - time.time())))
     try:   # free (ESPN finals): tonight's finished games are graded before the run ends
         grade()
     except Exception as e:  # noqa: BLE001
         log(f"end-of-run grade failed: {type(e).__name__}")
+    end = datetime.now(timezone.utc)
+    if end.astimezone(ET).hour >= 23 or end.astimezone(ET).hour < 5:   # the night's last run: post the wrap-up
+        try:
+            txt = day_summary(end)
+            if txt:
+                discord_send(txt)
+        except Exception as e:  # noqa: BLE001
+            log(f"summary failed: {type(e).__name__}")
+
+
+def day_summary(now):
+    """Tonight's wrap-up for Discord: alerts, what you took, money still out, results so far, how long alerts lasted."""
+    day = (now - timedelta(hours=5)).astimezone(ET).strftime("%Y-%m-%d")   # after midnight still counts as 'today'
+    ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(days=2)).isoformat())
+          if x.get("alerted") and not x.get("superseded")
+          and datetime.fromisoformat(x.get("alerted_at") or x["start"]).astimezone(ET).strftime("%Y-%m-%d") == day]
+    if not ps:
+        return None
+    by_sport = {}
+    for x in ps:
+        by_sport[SPORTS[x["sport"]]["label"]] = by_sport.get(SPORTS[x["sport"]]["label"], 0) + 1
+    lines = [f"📋 **Wrap-up {datetime.fromisoformat(day).strftime('%a %b %-d')}**",
+             f"Alerts: {len(ps)} (" + ", ".join(f"{k} {v}" for k, v in sorted(by_sport.items())) + ")"]
+    if any(x.get("taken") is not None for x in ps):
+        tk = [x for x in ps if x.get("taken")]
+        lines.append(f"You took {len(tk)} (${sum(x.get('stake_taken') or x.get('stake_usd') or 0 for x in tk):,.0f}), "
+                     f"passed {sum(x.get('taken') is False for x in ps)}, no answer {sum(x.get('taken') is None for x in ps)}")
+    pend = [x for x in ps if not x.get("result") and x.get("taken") is not False]
+    if pend:
+        lines.append(f"Still open: {len(pend)} bets, ${sum(x.get('stake_taken') or x.get('stake_usd') or 0 for x in pend):,.0f}")
+    gr = [x for x in ps if x.get("result") in ("win", "loss", "push")]
+    if gr:
+        w = sum(x["result"] == "win" for x in gr); l_ = sum(x["result"] == "loss" for x in gr)
+        usd = sum(x.get("pl_usd") or 0 for x in gr)
+        cl = [x["clv"] for x in gr if x.get("clv") is not None]
+        lines.append(f"Graded so far: {w}-{l_}, {usd:+,.0f} at the suggested stakes"
+                     + (f", beat the close {sum(c > 0 for c in cl)}/{len(cl)} (avg {sum(cl) / len(cl):+.1%})" if cl else ""))
+        mine = [x for x in gr if x.get("taken")]
+        if mine:
+            lines.append(f"Your bets: {sum(x['result'] == 'win' for x in mine)}-{sum(x['result'] == 'loss' for x in mine)}, "
+                         f"{sum((x.get('pl_unit') or 0) * (x.get('stake_taken') or x.get('stake_usd') or 0) for x in mine):+,.0f}")
+    life = {}
+    for x in ps:
+        if x.get("gone_at") and x.get("alerted_at"):
+            mins = (datetime.fromisoformat(x["gone_at"]) - datetime.fromisoformat(x["alerted_at"])).total_seconds() / 60
+            life.setdefault(BOOK_NAMES.get(x["book"], x["book"]), []).append(mins)
+    if life:
+        lines.append("How long alerts lasted (median): " + ", ".join(
+            f"{b} {sorted(v)[len(v) // 2]:.0f} min" for b, v in sorted(life.items(), key=lambda kv: -len(kv[1]))))
+    return "\n".join(lines)
 
 
 # ---------------- grading ----------------

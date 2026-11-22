@@ -37,6 +37,7 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           SCAN_DISCORD_WEBHOOK_URL: ${{ secrets.SCAN_DISCORD_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           SCAN_POST: ${{ github.event_name == 'workflow_dispatch' && inputs.post || 'true' }}
           SCAN_SPORTS: ${{ inputs.sports || 'nfl,nba,ncaab,nhl' }}
         run: |
