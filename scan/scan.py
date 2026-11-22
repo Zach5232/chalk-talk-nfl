@@ -318,6 +318,21 @@ def fs_list(collection):
             return out
 
 
+def fs_recent(collection, field, since_iso):
+    """Documents whose `field` (an ISO string) is >= since_iso -- keeps reads flat as the play log grows."""
+    if DRY:
+        return [d for d in fs_list(collection) if (d.get(field) or "") >= since_iso]
+    q = {"structuredQuery": {"from": [{"collectionId": collection}],
+                             "where": {"fieldFilter": {"field": {"fieldPath": field}, "op": "GREATER_THAN_OR_EQUAL",
+                                                       "value": {"stringValue": since_iso}}}}}
+    url = f"https://firestore.googleapis.com/v1/projects/{PROJECT}/databases/(default)/documents:runQuery"
+    r = requests.post(url, headers={"Authorization": f"Bearer {token()}"}, json=q, timeout=60)
+    r.raise_for_status()
+    return [{"_id": x["document"]["name"].rsplit("/", 1)[-1],
+             **{k: _unval(v) for k, v in x["document"].get("fields", {}).items()}}
+            for x in r.json() if "document" in x]
+
+
 def play_id(p, event_id):
     line = "ml" if p["line"] is None else f"{p['line']:g}"
     return re.sub(r"[^A-Za-z0-9_.+-]", "_", f"{p['sport']}_{event_id}_{p['kind']}_{p['side']}_{line}_{p['book']}")
@@ -869,6 +884,38 @@ def record(found, seen, now):
     return posted
 
 
+# ---------------- news: ESPN injury reports (free) ----------------
+INJURY_FEED = {"nba": "basketball/nba", "nfl": "football/nfl", "nhl": "hockey/nhl"}
+NEWS_PULL_GAP_MIN = 10     # news can pull sooner than the usual 15-minute gap
+
+
+def injury_snapshot(sport):
+    """{team display name: {(player id, status), ...}} or None if the feed is down / not covered. Status changes only:
+    ESPN re-stamps entries whenever a note is edited, which would be noise."""
+    path = INJURY_FEED.get(sport)
+    if not path:
+        return None
+    try:
+        d = _get(f"https://site.api.espn.com/apis/site/v2/sports/{path}/injuries") or {}
+    except Exception:  # noqa: BLE001
+        return None
+    return {t.get("displayName", ""): {(i.get("id"), i.get("status")) for i in t.get("injuries", [])}
+            for t in d.get("injuries", [])}
+
+
+def injury_news(prev, cur, upcoming):
+    """Teams playing in the next 12 hours whose injury report changed since the last check."""
+    if prev is None or cur is None:
+        return []
+    teams = []
+    for team, entries in cur.items():
+        if entries != prev.get(team, set()) and any(name_hits(team, g["home"]) or name_hits(team, g["away"])
+                                                    or name_hits(g["home"], team) or name_hits(g["away"], team)
+                                                    for g in upcoming.values()):
+            teams.append(team)
+    return teams
+
+
 # ---------------- watch loop ----------------
 def load_fair(sport):
     d = fs_get(f"scan_state/fair_{sport}") or {}
@@ -907,11 +954,11 @@ def close_lines(sport, games, plays, now):
 
 def watch(minutes, sports):
     t_end = time.time() + minutes * 60
-    seen = {p["_id"]: p for p in fs_list("scan_plays")}
+    seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (datetime.now(timezone.utc) - timedelta(days=2)).isoformat())}
     state = {}
     for s in sports:
         games, pulled = load_fair(s)
-        state[s] = dict(games=games, pulled=pulled, mids={})
+        state[s] = dict(games=games, pulled=pulled, mids={}, inj=injury_snapshot(s))
     cycle = 0
     while time.time() < t_end:
         cycle += 1
@@ -945,6 +992,12 @@ def watch(minutes, sports):
                     moved.append(gid)
             if moved:
                 reasons.append(f"exchanges moved on {len(moved)} game(s)")
+            cur = injury_snapshot(s)
+            news = injury_news(S["inj"], cur, upcoming)
+            if cur is not None and not news:
+                S["inj"] = cur          # news stays pending until a pull has priced it
+            if news:
+                reasons.append(f"injury news ({len(news)} team(s))")
             # exchange prices that clear the bar
             found, stale = [], []
             for x in q:
@@ -961,10 +1014,13 @@ def watch(minutes, sports):
                         stale.append((x["gid"], x["g"], p, x["size"]))
             if stale:
                 reasons.append(f"{len(stale)} exchange price(s) to confirm")
-            if reasons and (age_min >= MIN_PULL_GAP_MIN or "closing line" in reasons):
+            if reasons and (age_min >= MIN_PULL_GAP_MIN or "closing line" in reasons
+                            or (news and age_min >= NEWS_PULL_GAP_MIN)):
                 games, plays = pull(s, now, st, ", ".join(reasons))
                 if games is not None:
                     S["games"], S["pulled"], S["mids"] = games, now.isoformat(), {}
+                    if cur is not None:
+                        S["inj"] = cur
                     for gid in games:   # re-base the move detector on this pull
                         mid = ml_mid(q, gid)
                         if mid is not None:
@@ -1012,7 +1068,7 @@ def espn_finals(sport, day):
 
 def grade():
     now = datetime.now(timezone.utc)
-    plays = [p for p in fs_list("scan_plays") if not p.get("result")
+    plays = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=6)).isoformat()) if not p.get("result")
              and datetime.fromisoformat(p["start"]) < now - timedelta(hours=4)]
     cache, done = {}, 0
     for p in plays:
@@ -1074,7 +1130,7 @@ def main():
     if a.mode == "pull":
         now = datetime.now(timezone.utc)
         st = credits_state(now)
-        seen = {p["_id"]: p for p in fs_list("scan_plays")}
+        seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (now - timedelta(days=2)).isoformat())}
         for s in sports:
             games, plays = pull(s, now, st, "manual")
             if games is not None:
