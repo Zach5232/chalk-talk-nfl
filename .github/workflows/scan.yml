@@ -5,12 +5,12 @@ name: Value scanner
 #            paid Odds API pulls (~3 credits for a whole sport) only on triggers; hard monthly credit cap.
 #            Started hourly; the concurrency group queues the next start behind the running loop, so a late
 #            GitHub schedule never leaves a gap and two loops never run at once.
-#   grade -- 9:45 AM ET: finals from ESPN (free), win/loss, profit, closing-line value.
+#   grade -- 7:05 AM ET (and at the end of every watch run): finals from ESPN (free), win/loss, profit, closing-line value.
 # Prices go to Firestore (scan_plays) and Discord only -- this repo is public, the log prints counts.
 on:
   schedule:
     - cron: '0 15-23,0-3 * * *'
-    - cron: '45 14 * * *'
+    - cron: '5 12 * * *'
   workflow_dispatch:
     inputs:
       mode: {description: "watch, pull, grade or books (book scorecard)", required: true, default: "watch", type: choice, options: [watch, pull, grade, books, cbbbooks]}
@@ -19,7 +19,7 @@ on:
       post: {description: "Post alerts to Discord", type: boolean, default: true}
 
 concurrency:
-  group: scan-${{ (inputs.mode == 'grade' || inputs.mode == 'books' || inputs.mode == 'cbbbooks' || github.event.schedule == '45 14 * * *') && 'grade' || 'watch' }}
+  group: scan-${{ (inputs.mode == 'grade' || inputs.mode == 'books' || inputs.mode == 'cbbbooks' || github.event.schedule == '5 12 * * *') && 'grade' || 'watch' }}
   cancel-in-progress: false
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
         run: |
           MODE="${{ inputs.mode }}"
           if [ -z "$MODE" ]; then
-            [ "${{ github.event.schedule }}" = "45 14 * * *" ] && MODE=grade || MODE=watch
+            [ "${{ github.event.schedule }}" = "5 12 * * *" ] && MODE=grade || MODE=watch
           fi
           if [ "$MODE" = watch ]; then
             MIN="${{ inputs.minutes }}"

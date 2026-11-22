@@ -1165,6 +1165,10 @@ def watch(minutes, sports):
                 n_alerts += record(found, seen, now)
         log(f"cycle {cycle}: {n_quotes} exchange prices checked, {n_alerts} alert(s); credits {st['used']}/{CREDIT_CAP}")
         time.sleep(max(0, min(CYCLE_S, t_end - time.time())))
+    try:   # free (ESPN finals): tonight's finished games are graded before the run ends
+        grade()
+    except Exception as e:  # noqa: BLE001
+        log(f"end-of-run grade failed: {type(e).__name__}")
 
 
 # ---------------- grading ----------------
