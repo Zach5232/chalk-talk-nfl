@@ -1054,6 +1054,20 @@ def _note_for(kind, text, other, better):
                if better else "The other one is the better value -- take only one."))
 
 
+def _taken_note(kind, text, o, p):
+    """Note on a new play when the owner already bet the other side (o, marked ✅)."""
+    bk = BOOK_NAMES.get(o["book"], o["book"])
+    stake = o.get("stake_taken") or o.get("stake_usd") or 0
+    ref = f"${stake:,.0f} on {o['label']} {price_str(o.get('odds_alerted') or o['odds'], o['book'], o.get('price_prob'))} @ {bk}"
+    if kind == "middle":
+        return f"🎯 **Middle:** you already bet {ref}. {text[0].upper() + text[1:]} -- fine to add this."
+    d_o = 1 + payout(o.get("odds_alerted") or o["odds"], o["book"], o["sport"])
+    d_p = 1 + payout(p["odds"], p["book"], p["sport"])
+    hedge = stake * d_o / d_p
+    return (f"💰 **Lock it in:** you already bet {ref}. Bet ${hedge:,.0f} here and you get "
+            f"${stake * d_o:,.2f} back either way ({'+' if stake * d_o - stake - hedge >= 0 else '-'}${abs(stake * d_o - stake - hedge):,.2f} locked).")
+
+
 def record(found, seen, now):
     """Save new plays. A game/market/side is posted once; a better number later (same line 10+ cents better, or
     another line with 2%+ more EV) edits that same Discord message instead of posting again."""
@@ -1075,8 +1089,19 @@ def record(found, seen, now):
         # plays already posted in this game: other side (middle / arb / conflict) or the same team another way
         notes, edits, skip = [], [], False
         for o in [x for x in seen.values() if x.get("alerted") and not x.get("superseded") and x["event_id"] == gid
-                  and x["sport"] == p["sport"] and x["kind"] in ("h2h", "spread", "total")]:
+                  and x["sport"] == p["sport"] and x["kind"] in ("h2h", "spread", "total") and x.get("taken") is not False]:
             r1, r2 = region(p), region(o)
+            if o.get("taken"):   # you already bet o: only a middle or a lock is worth a message
+                if r1[:2] == r2[:2] and (o["kind"], o["side"]) != (p["kind"], p["side"]):
+                    skip = True          # same team another way: that's doubling up
+                    break
+                rel = relation(p, o, g)
+                if rel and rel[0] in ("middle", "arb"):
+                    notes.append(_taken_note(rel[0], rel[1], o, p))
+                elif rel:
+                    skip = True          # the other side of a bet you hold, with a both-lose gap: don't send
+                    break
+                continue
             if r1[:2] == r2[:2] and (o["kind"], o["side"]) != (p["kind"], p["side"]):
                 # e.g. Nebraska ML and Nebraska -10.5: one bet on Nebraska, not two
                 if p["ev"] <= o["ev"]:
@@ -1130,6 +1155,12 @@ def record(found, seen, now):
             posted += 1
             continue
         last = sib[-1]
+        if last.get("taken"):   # already bet: a better number later is just noise
+            if not prev:
+                d_ = dict(base, found=now.isoformat(), alerted=False, skipped="already bet")
+                fs_set(f"scan_plays/{pid}", d_)
+                seen[pid] = d_
+            continue
         same_line = last["line"] == p["line"]
         better = (same_line and payout(p["odds"], "x", p["sport"]) * 100
                   >= payout(last.get("odds_alerted") or last["odds"], "x", p["sport"]) * 100 + REPOST_CENTS) \
@@ -1185,7 +1216,7 @@ def live_status(sport, games, quotes_, seen, now, full):
     edits = 0
     for x in list(seen.values()):
         if (x.get("sport") != sport or not x.get("alerted") or x.get("superseded") or not x.get("msg_id")
-                or x.get("status_final")):
+                or x.get("status_final") or x.get("taken") is not None):   # bet or passed: leave it alone
             continue
         g = games.get(x["event_id"])
         if not g:
@@ -1399,11 +1430,10 @@ def watch(minutes, sports):
                 n_edits += live_status(s, S["games"], q, seen, now, full or bool(reasons and S["pulled"] == now.isoformat()))
             except Exception as e:  # noqa: BLE001 -- status lines never stop the scan
                 log(f"[{s}] live status: {type(e).__name__}: {str(e)[:80]}")
-        if cycle % FULL_EVERY == 1:
-            try:
-                read_reactions(seen, now)
-            except Exception as e:  # noqa: BLE001
-                log(f"reactions: {type(e).__name__}")
+        try:   # ✅ / ❌ under alerts (one Discord call a minute; needs DISCORD_BOT_TOKEN)
+            read_reactions(seen, now)
+        except Exception as e:  # noqa: BLE001
+            log(f"reactions: {type(e).__name__}")
         log(f"cycle {cycle}: {n_quotes} exchange prices checked, {n_alerts} alert(s), {n_edits} status update(s); "
             f"credits {st['used']}/{CREDIT_CAP}")
         time.sleep(max(0, min(CYCLE_S, t_end - time.time())))
