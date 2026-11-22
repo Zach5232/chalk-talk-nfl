@@ -74,7 +74,7 @@ SPORTS = {
     "ligue1":  dict(odds="soccer_france_ligue_one", novig=None, poly=["fl1"], label="Ligue 1", three_way=True, alerts=False,
                     espn="soccer/fra.1", kalshi=dict(h2h="KXLIGUE1GAME", total="KXLIGUE1TOTAL"), sd=dict(total=1.7),
                     max_move=0.0, markets="h2h,totals"),
-    "mls":     dict(odds="soccer_usa_mls", novig="MLS", poly=["mls"], label="MLS", three_way=True, alerts=False,
+    "mls":     dict(odds="soccer_usa_mls", novig="MLS", poly=["mls"], label="MLS", three_way=True,
                     espn="soccer/usa.1", kalshi=dict(h2h="KXMLSGAME", total="KXMLSTOTAL"), sd=dict(total=1.7),
                     max_move=0.0, markets="h2h,totals"),
     # tennis: the Odds API lists each tournament separately ('tennis_atp_paris_masters'); every active one is pulled
