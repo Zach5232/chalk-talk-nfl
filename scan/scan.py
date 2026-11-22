@@ -59,10 +59,13 @@ SPORTS = {
 SHARP = "pinnacle"
 # 10 named books = 1 region of credits per market (fewer books cost the same). Two jobs:
 #   BET_BOOKS -- where the owner bets (the only books alerts can name)
-#   the rest  -- pricing only: they sharpen the consensus fair line but are never alerted
+#   the rest  -- pricing only (Pinnacle): sharpens the consensus fair line but is never alerted
 # No DraftKings (unfunded), Fanatics or Bovada.
-BOOKS = ["pinnacle", "novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag"]
-BET_BOOKS = {"novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betmgm"}
+# Kalshi and Polymarket come from their free feeds every minute, so they don't take paid slots.
+BOOKS = ["pinnacle", "novig", "prophetx", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag", "williamhill_us",
+         "espnbet"]
+BET_BOOKS = {"novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag",
+             "williamhill_us", "espnbet"}
 WEIGHTS = {"pinnacle": 3.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
 # pregame taker fees, checked on real slips (see nhl-model model_config.json exchange_fees)
 FEES = {"kalshi": ("parabolic", 0.07), "polymarket": ("parabolic", 0.07), "prophetx": ("winnings", 0.02)}
@@ -839,7 +842,8 @@ def discord_send(text, edit_id=None):
 
 BOOK_NAMES = {"novig": "Novig", "prophetx": "ProphetX", "kalshi": "Kalshi", "polymarket": "Polymarket",
               "fanduel": "FanDuel", "betrivers": "BetRivers", "ballybet": "Bally Bet", "betmgm": "BetMGM",
-              "betonlineag": "BetOnline", "espnbet": "ESPN Bet"}
+              "betonlineag": "BetOnline", "espnbet": "theScore Bet",
+              "williamhill_us": "Caesars"}
 
 
 def _pct(p):
