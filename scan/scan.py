@@ -82,6 +82,7 @@ MOVE_TRIGGER = 0.025
 BASE_GAP_MIN = 180
 MIN_PULL_GAP_MIN = 15
 CLOSE_WINDOW_MIN = 20
+START_BUFFER_MIN = 3       # no plays this close to (or after) the start: prices turn live and the fair line is pregame
 
 
 def log(*a):
@@ -183,6 +184,8 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     pay = payout(odds, book, sport)
     ev, ev_pin = pw * pay - (1 - pw), ppw * pay - (1 - ppw)
     hrs = (datetime.fromisoformat(g["start"]) - now).total_seconds() / 3600
+    if hrs * 60 < START_BUFFER_MIN:
+        return None
     bar = bar_for(book, hrs)
     if not (bar <= ev <= MAX_EV and ev_pin >= bar):
         return None
@@ -416,8 +419,10 @@ def find_game(games, t1, t2, day=None, start=None):
     return hits[0] if len(hits) == 1 else None
 
 
-def ex_quote(gid, g, kind, side, line, book, prob_, size_usd):
-    return dict(gid=gid, g=g, kind=kind, side=side, line=line, book=book, odds=american(prob_), prob=prob_, size=size_usd)
+def ex_quote(gid, g, kind, side, line, book, prob_, size_usd, start=None):
+    """start = the venue's own start time, when it lists one (a game moved earlier still counts as started)."""
+    return dict(gid=gid, g=g, kind=kind, side=side, line=line, book=book, odds=american(prob_), prob=prob_, size=size_usd,
+                start=start)
 
 
 def novig_quotes(sport, games):
@@ -453,6 +458,7 @@ def novig_quotes(sport, games):
         gid, g, ok = hit
         if not ok:
             continue
+        m_start = datetime.fromtimestamp(m["startsTs"] / 1000, tz=timezone.utc)
         o1, o2 = m["outcomes"]
         for me, other in ((o1, o2), (o2, o1)):
             bid = other.get("bid") or {}
@@ -465,7 +471,7 @@ def novig_quotes(sport, games):
                 t = re.match(r"(Over|Under)\s+([\d.]+)", name)
                 if not t:
                     continue
-                out.append(ex_quote(gid, g, "total", "a" if t.group(1) == "Over" else "b", float(t.group(2)), "novig", p, size))
+                out.append(ex_quote(gid, g, "total", "a" if t.group(1) == "Over" else "b", float(t.group(2)), "novig", p, size, m_start))
                 continue
             team = re.match(r"(\S+)(?:\s+([+-][\d.]+))?$", name)
             side = abbr.get(m["eventId"], {}).get(team.group(1)) if team else None
@@ -473,10 +479,10 @@ def novig_quotes(sport, games):
                 continue
             s = "a" if side == "home" else "b"
             if m["marketType"] == "MONEY":
-                out.append(ex_quote(gid, g, "h2h", s, None, "novig", p, size))
+                out.append(ex_quote(gid, g, "h2h", s, None, "novig", p, size, m_start))
             elif team.group(2):
                 h = float(team.group(2))
-                out.append(ex_quote(gid, g, "spread", s, h if s == "a" else -h, "novig", p, size))
+                out.append(ex_quote(gid, g, "spread", s, h if s == "a" else -h, "novig", p, size, m_start))
     return out
 
 
@@ -602,7 +608,7 @@ def poly_quotes(sport, games):
                     if line is None or outs[0].lower() != "over":
                         continue
                     for s, p in (("a", p0), ("b", p1)):
-                        out.append(ex_quote(gid, g, "total", s, float(line), "polymarket", p, size))
+                        out.append(ex_quote(gid, g, "total", s, float(line), "polymarket", p, size, start))
                     continue
                 sides = []
                 for o in outs:
@@ -612,7 +618,7 @@ def poly_quotes(sport, games):
                     continue
                 if typ == "moneyline":
                     for s, p in zip(sides, (p0, p1)):
-                        out.append(ex_quote(gid, g, "h2h", s, None, "polymarket", p, size))
+                        out.append(ex_quote(gid, g, "h2h", s, None, "polymarket", p, size, start))
                 else:   # 'Spread: Spurs (-15.5)': line belongs to outcome 0
                     line = m.get("line")
                     if line is None:
@@ -620,18 +626,21 @@ def poly_quotes(sport, games):
                     l0 = float(line)
                     home_h = l0 if sides[0] == "a" else -l0
                     for s, p in zip(sides, (p0, p1)):
-                        out.append(ex_quote(gid, g, "spread", s, home_h, "polymarket", p, size))
+                        out.append(ex_quote(gid, g, "spread", s, home_h, "polymarket", p, size, start))
     return out
 
 
 def exchange_quotes(sport, games):
+    """Pregame prices only: games past (or within minutes of) their start are dropped, by our start time or the venue's."""
+    cut = datetime.now(timezone.utc) + timedelta(minutes=START_BUFFER_MIN)
+    games = {k: g for k, g in games.items() if datetime.fromisoformat(g["start"]) > cut}
     res = []
     for name, fn in (("novig", novig_quotes), ("kalshi", kalshi_quotes), ("polymarket", poly_quotes)):
         try:
             res += fn(sport, games)
         except Exception as e:  # noqa: BLE001 -- one venue down never stops the scan
             log(f"[{sport}] {name}: {type(e).__name__}: {str(e)[:120]}")
-    return res
+    return [q for q in res if not q.get("start") or q["start"] > cut]
 
 
 def ml_mid(quotes_, gid):
@@ -998,6 +1007,10 @@ def grade():
                 fs_set(f"scan_plays/{p['_id']}", {**{k: v for k, v in p.items() if k != "_id"}, "result": "no result"})
             continue
         f = fin[0]
+        if (p.get("alerted_at") or p.get("found") or "") >= p["start"]:
+            fs_set(f"scan_plays/{p['_id']}", {**{k: v for k, v in p.items() if k != "_id"},
+                                             "result": "void: posted after the start", "graded_at": now.isoformat()})
+            continue
         if p["kind"] == "h2h":
             m = f["hs"] - f["as_"]
             res = "push" if m == 0 else ("win" if (m > 0) == (p["side"] == "a") else "loss")
