@@ -83,7 +83,7 @@ BANKROLL = float(os.environ.get("SCAN_BANKROLL", "2000"))
 EXPOSURE_CAP = float(os.environ.get("SCAN_EXPOSURE", "0.5"))   # pending bets above this share of bankroll: only 5%+ EV posts
 EXPOSURE_OVERRIDE_EV = 0.05
 KELLY = 1 / 8
-MAX_STAKE = 0.02
+MAX_STAKE = 0.02           # stakes are shown rounded to the nearest $5 ($5 minimum) -- what actually gets bet
 HOURS_AHEAD = 24
 CREDIT_CAP = int(os.environ.get("SCAN_CREDIT_CAP", "3000"))
 CYCLE_S = 60               # moneylines every minute (free) ...
@@ -225,7 +225,7 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     good = american(pw / (1 + bar))
     return dict(sport=sport, kind=kind, side=side, line=line, book=book, odds=int(odds), label=label(g, kind, side, line),
                 p_fair=round(pw, 4), fair_odds=american(pw), ev=round(ev, 4), ev_pin=round(ev_pin, 4),
-                stake_pct=round(stake, 4), stake_usd=round(stake * BANKROLL), good_to=good, bar=bar,
+                stake_pct=round(stake, 4), stake_usd=max(5, 5 * round(stake * BANKROLL / 5)), good_to=good, bar=bar,
                 price_prob=round(price_prob if price_prob is not None else prob(odds), 4))
 
 
