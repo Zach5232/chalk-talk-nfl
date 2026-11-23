@@ -1348,6 +1348,15 @@ def parse_price(v):
     raise ValueError(v)
 
 
+def _line_str(x):
+    """The alert's line as you'd read it on the bet: '+3.5' for your side of a spread, '144.5' for a total."""
+    if x.get("line") is None:
+        return ""
+    if x["kind"] == "total":
+        return f"{x['line']:g}"
+    return f"{(x['line'] if x['side'] == 'a' else -x['line']):+g}"
+
+
 def _default_price(x):
     if x.get("odds") is None:
         return ""
@@ -1367,10 +1376,15 @@ def _answer(it):
                 TAPS.put((mid, "pass", None, None, None))
                 return note("Passed ❌")
             if it["data"]["custom_id"] == "moved":
-                return reply({"type": 9, "data": {"custom_id": f"moved:{mid}", "title": "Line moved", "components": [
-                    {"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": False,
-                                                "max_length": 10, "label": "Best price now (optional)",
-                                                "placeholder": "-257 or 52.5"}]}]}})
+                x_ = MSG_DOC.get(mid) or {}
+                comps = [{"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": False,
+                                                     "max_length": 10, "label": "Best price now (optional)",
+                                                     "placeholder": "-257 or 52.5"}]}]
+                if x_.get("line") is not None:   # spreads / totals: the number may have moved instead of the price
+                    comps.append({"type": 1, "components": [{"type": 4, "custom_id": "line", "style": 1, "required": False,
+                                                             "max_length": 8, "label": "Line now (blank = same as alert)",
+                                                             "placeholder": _line_str(x_)}]})
+                return reply({"type": 9, "data": {"custom_id": f"moved:{mid}", "title": "Line moved", "components": comps}})
             stake = x.get("stake_taken") or x.get("stake_usd") or ""
             return reply({"type": 9, "data": {"custom_id": f"bet:{mid}", "title": "Log your bet"[:45], "components": [
                 {"type": 1, "components": [{"type": 4, "custom_id": "amount", "label": "Amount ($)", "style": 1,
@@ -1380,16 +1394,22 @@ def _answer(it):
                                                       else "Odds (e.g. -115)"), "value": _default_price(x)}]}]}})
         if it["type"] == 5 and it["data"]["custom_id"].startswith("moved:"):
             mid = it["data"]["custom_id"].split(":", 1)[1]
-            raw = it["data"]["components"][0]["components"][0].get("value", "").strip()
-            odds = pr = None
-            if raw:
-                try:
-                    odds, pr = parse_price(raw)
-                except ValueError:
-                    return note("Couldn't read that price -- like -257 or 52.5. Tap Line moved again (or leave it blank).")
-            TAPS.put((mid, "moved", None, odds, pr))
+            vals = {c["components"][0]["custom_id"]: c["components"][0].get("value", "").strip()
+                    for c in it["data"]["components"]}
+            odds = pr = line_now = None
+            try:
+                if vals.get("price"):
+                    odds, pr = parse_price(vals["price"])
+                if vals.get("line"):
+                    line_now = float(vals["line"].replace(" ", ""))
+            except ValueError:
+                return note("Couldn't read that -- price like -110 or 52.5, line like 145.5 or +3.5. Tap Line moved again "
+                            "(blank boxes are fine).")
+            TAPS.put((mid, "moved", line_now, odds, pr))   # (the stake slot carries the new line for 'moved')
             x = MSG_DOC.get(mid) or {"book": ""}
-            return note("Noted: missed, line moved" + (f" (now {price_str(odds, x['book'], pr)})" if odds is not None else ""))
+            bits = ([f"line now {line_now:g}"] if line_now is not None else []) + \
+                   ([f"price now {price_str(odds, x['book'], pr)}"] if odds is not None else [])
+            return note("Noted: missed, line moved" + (f" ({', '.join(bits)})" if bits else ""))
         if it["type"] == 5:   # form submitted
             mid = it["data"]["custom_id"].split(":", 1)[1]
             vals = {c["components"][0]["custom_id"]: c["components"][0].get("value", "") for c in it["data"]["components"]}
@@ -1466,8 +1486,15 @@ def apply_taps(seen):
             x.update(taken=False, pass_reason="didn't want it")
             line = "❌ **Passed**"
         elif what == "moved":
-            x.update(taken=False, pass_reason="line moved", moved_odds=odds, moved_price=pr, moved_at=datetime.now(timezone.utc).isoformat())
-            line = "❌ **Missed -- line moved**" + (f" (now {price_str(odds, x['book'], pr)})" if odds is not None else "")
+            line_now = stake   # for 'moved' the stake slot carries the line you saw (or None = same as the alert)
+            x.update(taken=False, pass_reason="line moved", moved_odds=odds, moved_price=pr, moved_line_seen=line_now,
+                     moved_at=datetime.now(timezone.utc).isoformat())
+            bits = []
+            if line_now is not None:
+                bits.append(("Over " if x["side"] == "a" else "Under ") + f"{line_now:g}" if x["kind"] == "total" else f"{line_now:+g}")
+            if odds is not None:
+                bits.append(price_str(odds, x["book"], pr))
+            line = "❌ **Missed -- line moved**" + (f" (now {' '.join(bits)})" if bits else "")
         else:
             x.update(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr)
             line = f"✅ **You bet** ${stake:g} at {price_str(odds, x['book'], pr)}"
