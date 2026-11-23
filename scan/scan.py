@@ -1874,8 +1874,10 @@ def day_summary(now):
                      + (f", beat the close {sum(c > 0 for c in cl)}/{len(cl)} (avg {sum(cl) / len(cl):+.1%})" if cl else ""))
         mine = [x for x in gr if x.get("taken")]
         if mine:
+            ct = [x["clv_taken"] for x in mine if x.get("clv_taken") is not None]
             lines.append(f"Your bets: {sum(x['result'] == 'win' for x in mine)}-{sum(x['result'] == 'loss' for x in mine)}, "
-                         f"{sum(x.get('pl_taken_usd') or 0 for x in mine):+,.0f} at your prices and stakes")
+                         f"{sum(x.get('pl_taken_usd') or 0 for x in mine):+,.0f} at your prices and stakes"
+                         + (f", beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})" if ct else ""))
     life = {}
     for x in ps:
         if x.get("gone_at") and x.get("alerted_at"):
@@ -1976,6 +1978,8 @@ def grade():
             pay_t = payout(p.get("taken_odds") or p["odds"], p["book"], p["sport"])
             doc["pl_taken_usd"] = round({"win": pay_t, "loss": -1.0, "push": 0.0}[res]
                                         * (p.get("stake_taken") or p.get("stake_usd") or 0), 2)
+            if p.get("p_close") is not None:   # strict CLV at YOUR price: vs the sharp no-vig consensus at close
+                doc["clv_taken"] = round(p["p_close"] * (1 + pay_t) - 1, 4)
         doc.update(result=res, pl_unit=round(pl, 4), pl_usd=round(pl * (p.get("stake_usd") or 0), 2),
                    clv=round(p["p_close"] * (1 + pay) - 1, 4) if p.get("p_close") is not None else None,
                    clv_pin=round(p["p_close_pin"] * (1 + pay) - 1, 4) if p.get("p_close_pin") is not None else None,
@@ -2063,7 +2067,9 @@ def main():
             print(f"{label:34s} alerts {len(xs):3d} | graded {len(gr):3d}: {w}-{l_}, {usd:+.0f} at suggested stakes"
                   + (f" | beat close {sum(c > 0 for c in cl)}/{len(cl)} avg {sum(cl) / len(cl):+.1%}" if cl else " | no closing lines")
                   + (f" | your bets {sum(x['result'] == 'win' for x in mine)}-{sum(x['result'] == 'loss' for x in mine)} "
-                     f"{sum(x.get('pl_taken_usd') or 0 for x in mine):+.0f}" if mine else ""))
+                     f"{sum(x.get('pl_taken_usd') or 0 for x in mine):+.0f}"
+                     + (lambda ct: f" CLV {sum(c > 0 for c in ct)}/{len(ct)} {sum(ct) / len(ct):+.1%}" if ct else "")(
+                         [x["clv_taken"] for x in mine if x.get("clv_taken") is not None]) if mine else ""))
         print(f"alerts posted {day}: {len(ps)}")
         for b in ("real value plays", "bug: posted after the start", "bug: longshot math (before fix)"):
             xs = [x for x in ps if bucket(x) == b]
