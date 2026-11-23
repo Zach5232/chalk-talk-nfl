@@ -1264,6 +1264,14 @@ def parse_price(v):
     raise ValueError(v)
 
 
+def _line_str(x):
+    """The line as you'd read it on the bet: '+3.5' for the side you're on, '140.5' for a total."""
+    if x["kind"] == "total":
+        return f"{x['line']:g}"
+    h = x["line"] if x["side"] == "a" else -x["line"]
+    return f"{h:+g}"
+
+
 def _default_price(x):
     if x["book"] in EXCHANGES:
         return _pct(x.get("price_prob") or prob(x["odds"]))
@@ -1293,7 +1301,10 @@ def _answer(it):
                                             "value": f"{stake:g}", "required": True, "max_length": 10}]},
                 {"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": True, "max_length": 10,
                                             "label": ("Price in cents (e.g. 46.5)" if x["book"] in EXCHANGES
-                                                      else "Odds (e.g. -115)"), "value": _default_price(x)}]}]}})
+                                                      else "Odds (e.g. -115)"), "value": _default_price(x)}]}]
+                + ([{"type": 1, "components": [{"type": 4, "custom_id": "line", "style": 1, "required": True, "max_length": 8,
+                                                "label": "Line (change it if you bet another number)",
+                                                "value": _line_str(x)}]}] if x.get("line") is not None else [])}})
         if it["type"] == 5 and it["data"]["custom_id"].startswith("moved:"):
             mid = it["data"]["custom_id"].split(":", 1)[1]
             raw = it["data"]["components"][0]["components"][0].get("value", "").strip()
@@ -1312,9 +1323,11 @@ def _answer(it):
             try:
                 stake = float(vals["amount"].replace("$", "").strip())
                 odds, pr = parse_price(vals["price"])
+                line_t = float(vals["line"].replace(" ", "")) if vals.get("line", "").strip() else None
             except (ValueError, KeyError):
-                return note("Couldn't read that -- amount like 10, price like 46.5 (cents) or -110 (odds). Tap Bet it again.")
-            TAPS.put((mid, "bet", stake, odds, pr))
+                return note("Couldn't read that -- amount like 10, price like 46.5 (cents) or -110 (odds), line like +3.5 "
+                            "or 140.5. Tap Bet it again.")
+            TAPS.put((mid, "bet", stake, odds, pr, line_t))
             x = MSG_DOC.get(mid) or {"book": "", "odds": odds}
             return note(f"Logged ✅ ${stake:g} at {price_str(odds, x['book'], pr)}")
     except Exception as e:  # noqa: BLE001
@@ -1368,9 +1381,11 @@ def apply_taps(seen):
     n = 0
     while True:
         try:
-            mid, what, stake, odds, pr = TAPS.get_nowait()
+            item = TAPS.get_nowait()
         except queue.Empty:
             return n
+        mid, what, stake, odds, pr = item[:5]
+        line_t = item[5] if len(item) > 5 else None
         x = MSG_DOC.get(mid)
         if not x:
             continue
@@ -1382,7 +1397,13 @@ def apply_taps(seen):
             line = "❌ **Missed -- line moved**" + (f" (now {price_str(odds, x['book'], pr)})" if odds is not None else "")
         else:
             x.update(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr)
-            line = f"✅ **You bet** ${stake:g} at {price_str(odds, x['book'], pr)}"
+            shown = ""
+            if line_t is not None and x.get("line") is not None:
+                home_h = line_t if (x["kind"] == "total" or x["side"] == "a") else -line_t
+                x["taken_line"] = home_h if abs(home_h - x["line"]) > 1e-9 else None
+                if x["taken_line"] is not None:
+                    shown = f" on {'Over' if x['side'] == 'a' else 'Under'} {line_t:g}" if x["kind"] == "total" else f" on {line_t:+g}"
+            line = f"✅ **You bet** ${stake:g}{shown} at {price_str(odds, x['book'], pr)}"
         x.update(status_line=line, status_final=True)
         discord_send((x.get("msg_text") or alert_text(x, x)) + "\n" + line, edit_id=mid)
         fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
@@ -1803,6 +1824,9 @@ def close_lines(sport, games, plays, now):
             continue
         doc = {k: v for k, v in p.items() if k != "_id"}
         doc.update(p_close=round(pc, 4), p_close_pin=round(pp, 4) if pp is not None else None, close_at=now.isoformat())
+        if p.get("taken_line") is not None:   # you bet another number: its own closing chance
+            pt = fair_side(sport, p["kind"], views, p["taken_line"], p["side"])
+            doc["p_close_taken"] = round(pt, 4) if pt is not None else None
         fs_set(f"scan_plays/{p.get('_id') or play_id(p, p['event_id'])}", doc)
         p.update(doc)
         n += 1
@@ -2101,12 +2125,19 @@ def grade():
         pay = payout(p["odds"], p["book"], p["sport"])
         pl = {"win": pay, "loss": -1.0, "push": 0.0}[res]
         doc = {k: v for k, v in p.items() if k != "_id"}
-        if p.get("taken"):   # your bet at the price and stake you actually got
+        if p.get("taken"):   # your bet at the price, stake and line you actually got
             pay_t = payout(p.get("taken_odds") or p["odds"], p["book"], p["sport"])
-            doc["pl_taken_usd"] = round({"win": pay_t, "loss": -1.0, "push": 0.0}[res]
+            res_t = res
+            if p.get("taken_line") is not None:
+                L = p["taken_line"]
+                m_t = (f["hs"] + f["as_"] - L) if p["kind"] == "total" else (f["hs"] - f["as_"] + L)
+                res_t = "push" if m_t == 0 else ("win" if (m_t > 0) == (p["side"] == "a") else "loss")
+                doc["result_taken"] = res_t
+            doc["pl_taken_usd"] = round({"win": pay_t, "loss": -1.0, "push": 0.0}[res_t]
                                         * (p.get("stake_taken") or p.get("stake_usd") or 0), 2)
-            if p.get("p_close") is not None:   # strict CLV at YOUR price: vs the sharp no-vig consensus at close
-                doc["clv_taken"] = round(p["p_close"] * (1 + pay_t) - 1, 4)
+            pc_t = p.get("p_close_taken") if p.get("taken_line") is not None else p.get("p_close")
+            if pc_t is not None:   # strict CLV at YOUR price and line: vs the sharp no-vig consensus at close
+                doc["clv_taken"] = round(pc_t * (1 + pay_t) - 1, 4)
         doc.update(result=res, pl_unit=round(pl, 4), pl_usd=round(pl * (p.get("stake_usd") or 0), 2),
                    clv=round(p["p_close"] * (1 + pay) - 1, 4) if p.get("p_close") is not None else None,
                    clv_pin=round(p["p_close_pin"] * (1 + pay) - 1, 4) if p.get("p_close_pin") is not None else None,
