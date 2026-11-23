@@ -2044,7 +2044,8 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day"])
+    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+                                     "altprobe"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -2052,6 +2053,25 @@ def main():
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
         return grade()
+    if a.mode == "altprobe":   # which books return alternate spreads / totals (counts only), ~2 credits per sport
+        key = os.environ["ODDS_API_KEY"]
+        for sk in ("basketball_nba", "icehockey_nhl", "americanfootball_nfl", "basketball_ncaab", "soccer_epl"):
+            evs = requests.get(f"{ODDS}/{sk}/events", params=dict(apiKey=key), timeout=30).json()
+            evs = [e for e in evs if e["commence_time"] > datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
+            if not evs:
+                print(sk, "no upcoming events"); continue
+            e = evs[0]
+            r = requests.get(f"{ODDS}/{sk}/events/{e['id']}/odds", timeout=30, params=dict(
+                apiKey=key, bookmakers=",".join(BOOKS + ["kalshi", "polymarket"]), oddsFormat="american",
+                markets="alternate_spreads,alternate_totals"))
+            print(sk, "status", r.status_code, "credits", r.headers.get("x-requests-last"))
+            if r.status_code != 200:
+                print("  ", r.text[:200]); continue
+            for bm in r.json().get("bookmakers", []):
+                for mk in bm.get("markets", []):
+                    pts = sorted({o.get("point") for o in mk["outcomes"] if o.get("point") is not None})
+                    print(f"   {bm['key']:14s} {mk['key']:18s} {len(mk['outcomes']):3d} prices, lines {pts[:3]}..{pts[-3:]}")
+        return
     if a.mode == "day":   # grade now, then yesterday's alerts split into the bug-era plays and the rest (totals only)
         grade()
         now = datetime.now(timezone.utc)
