@@ -2253,6 +2253,25 @@ def _band_lines(xs, bands):
     return out
 
 
+PRICE_BANDS = [(0, 1 / 3 + 1e-9, "-300 or shorter"), (1 / 3 + 1e-9, 1.5, "-300 to +150"), (1.5, 1e9, "+150 or longer")]
+
+
+def _price_lines(xs, mine=False):
+    """Record / profit / CLV by price range (heavy favorites vs the middle vs underdogs)."""
+    out = []
+    for lo, hi, label in PRICE_BANDS:
+        ys = [p for p in xs if lo <= payout((p.get("taken_odds") if mine else None) or p["odds"], p["book"], p["sport"]) < hi]
+        if not ys:
+            continue
+        res = (lambda p: p.get("result_taken") or p["result"]) if mine else (lambda p: p["result"])
+        w = sum(res(p) == "win" for p in ys); l_ = sum(res(p) == "loss" for p in ys)
+        usd = sum((p.get("pl_taken_usd") if mine else p.get("pl_usd")) or 0 for p in ys)
+        cl = [c for c in ((p.get("clv_taken") if mine else p.get("clv")) for p in ys) if c is not None]
+        out.append(f"`{label:<15s}` {len(ys):>3d} · {w}-{l_} · {usd:+,.0f}"
+                   + (f" · beat close {100 * sum(c > 0 for c in cl) / len(cl):.0f}% · CLV {sum(cl) / len(cl):+.1%}" if cl else ""))
+    return out
+
+
 def morning_report(now):
     """Posted to Discord after the morning grade: your card (yesterday's logged bets with CLV, day + running totals)
     and the scorecard for every edge size, posted and logged."""
@@ -2311,6 +2330,10 @@ def morning_report(now):
         cl = [p["clv"] for p in posted if p.get("clv") is not None]
         lines.append(f"**All alerts:** {len(posted)} · {w}-{l_} · {sum(p.get('pl_usd') or 0 for p in posted):+,.0f} at suggested stakes"
                      + (f" · beat close {100 * sum(c > 0 for c in cl) / len(cl):.0f}% · CLV {sum(cl) / len(cl):+.1%}" if cl else ""))
+    if posted:
+        lines += ["", "**By price · last 30 days** (alerts, at suggested stakes)"] + _price_lines(posted)
+    if mine_all:
+        lines += ["**By price · your bets**"] + _price_lines(mine_all, mine=True)
     fs_set("scan_state/morning", {"day": yday, "at": now.isoformat()})
     # Discord caps a message at 2000 characters: split on lines
     chunk = ""
