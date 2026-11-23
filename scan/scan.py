@@ -2031,7 +2031,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing"])
+    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -2039,6 +2039,47 @@ def main():
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
         return grade()
+    if a.mode == "day":   # grade now, then yesterday's alerts split into the bug-era plays and the rest (totals only)
+        grade()
+        now = datetime.now(timezone.utc)
+        day = (now - timedelta(hours=5)).astimezone(ET).strftime("%Y-%m-%d")
+        ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(days=2)).isoformat())
+              if x.get("alerted") and not x.get("superseded")
+              and datetime.fromisoformat(x.get("alerted_at") or x["start"]).astimezone(ET).strftime("%Y-%m-%d") == day]
+
+        def bucket(x):
+            if (x.get("alerted_at") or "") >= x["start"]:
+                return "bug: posted after the start"
+            if (x.get("p_fair") or 1) < LONGSHOT_P and (x.get("alerted_at") or "") < "2026-11-22T17:20":
+                return "bug: longshot math (before fix)"
+            return "real value plays"
+
+        def line(label, xs):
+            gr = [x for x in xs if x.get("result") in ("win", "loss", "push")]
+            w = sum(x["result"] == "win" for x in gr); l_ = sum(x["result"] == "loss" for x in gr)
+            usd = sum(x.get("pl_usd") or 0 for x in gr)
+            mine = [x for x in gr if x.get("taken")]
+            cl = [x["clv"] for x in gr if x.get("clv") is not None]
+            print(f"{label:34s} alerts {len(xs):3d} | graded {len(gr):3d}: {w}-{l_}, {usd:+.0f} at suggested stakes"
+                  + (f" | beat close {sum(c > 0 for c in cl)}/{len(cl)} avg {sum(cl) / len(cl):+.1%}" if cl else " | no closing lines")
+                  + (f" | your bets {sum(x['result'] == 'win' for x in mine)}-{sum(x['result'] == 'loss' for x in mine)} "
+                     f"{sum(x.get('pl_taken_usd') or 0 for x in mine):+.0f}" if mine else ""))
+        print(f"alerts posted {day}: {len(ps)}")
+        for b in ("real value plays", "bug: posted after the start", "bug: longshot math (before fix)"):
+            xs = [x for x in ps if bucket(x) == b]
+            if xs:
+                line(b, xs)
+        for sport in SPORTS:
+            xs = [x for x in ps if x["sport"] == sport and bucket(x) == "real value plays"]
+            if xs:
+                line(f"  real plays: {SPORTS[sport]['label']}", xs)
+        for bk in sorted({x["book"] for x in ps}):
+            xs = [x for x in ps if x["book"] == bk and bucket(x) == "real value plays"]
+            if xs:
+                line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
+        pend = [x for x in ps if not x.get("result")]
+        print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
     if a.mode == "timing":
         return print(timing_report(datetime.now(timezone.utc)))
     if a.mode == "cfbrecord":   # CFB plays posted to Discord this season, by kind (totals only -- public log)
