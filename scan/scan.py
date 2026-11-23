@@ -105,6 +105,8 @@ BAR_STRICT = 0.04          # Kalshi / Polymarket, and plays found more than EARL
 STRICT_BOOKS = {"kalshi", "polymarket"}
 EARLY_H = 6
 LONGSHOT_P = 0.20          # sides the market gives under 20% also need the stricter bar
+TEST_SPORTS = {"nfl", "ncaaf", "nhl"}   # sharp markets: 1%-to-bar plays are logged + graded (not posted) as a test
+TEST_MIN = 0.01
 POST_WITHIN_H = float(os.environ.get("SCAN_POST_WITHIN_H", "12"))   # plays further out are logged + graded, not posted
 MAX_EV = 0.12              # above this it's a stale quote or a mismatched game, not value
 MIN_BOOKS = 3              # books left in the consensus after removing the one being checked
@@ -288,7 +290,7 @@ def bar_for(book, hours_to_start):
     return BAR_STRICT if book in STRICT_BOOKS or hours_to_start > EARLY_H else BAR
 
 
-def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
+def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None, allow_test=False):
     """A play dict if (book, odds) on this side clears the bar, else None. g = saved game (with views)."""
     views = (g.get("views") or {}).get(kind)
     if not views:
@@ -305,8 +307,12 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     bar = bar_for(book, hrs)
     if pw < LONGSHOT_P:
         bar = max(bar, BAR_STRICT)
+    test = False
     if not (bar <= ev <= MAX_EV and ev_pin >= bar):
-        return None
+        # sharp-market test: 1%+ vs consensus AND Pinnacle, under the bar -> logged and graded, never posted
+        if not (allow_test and sport in TEST_SPORTS and TEST_MIN <= ev < bar and ev_pin >= TEST_MIN):
+            return None
+        test = True
     pin = [l0 for bk, w, l0, q in views if bk == SHARP and l0 is not None]
     off_main = round(abs(line - pin[0]), 1) if (pin and line is not None) else 0.0
     kelly = ev / pay
@@ -317,7 +323,8 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     return dict(sport=sport, kind=kind, side=side, line=line, book=book, odds=int(odds), label=label(g, kind, side, line),
                 p_fair=round(pw, 4), fair_odds=american(pw), ev=round(ev, 4), ev_pin=round(ev_pin, 4),
                 stake_pct=round(stake, 4), stake_usd=bet_size(stake * BANKROLL), to_win=round(to_win, 2), good_to=good, bar=bar,
-                price_prob=round(price_prob if price_prob is not None else prob(odds), 4), off_main=off_main)
+                price_prob=round(price_prob if price_prob is not None else prob(odds), 4), off_main=off_main,
+                **({"test": True} if test else {}))
 
 
 def label(g, kind, side, line):
@@ -655,7 +662,7 @@ def pull_alts(sport, S, now, st):
                     continue
                 for side in ("a", "b"):
                     aq[(gid, kind, side, row["line"], row["book"])] = int(row[side])
-                    p = evaluate(sport, g, kind, side, row["line"], row["book"], row[side], now)
+                    p = evaluate(sport, g, kind, side, row["line"], row["book"], row[side], now, allow_test=True)
                     if p:
                         plays.append((gid, g, p, None))
     if n:
@@ -718,7 +725,7 @@ def pull(sport, now, st, reason):
                 if row["book"] not in BET_BOOKS:
                     continue
                 for side in sides_of(row):
-                    p = evaluate(sport, g, kind, side, row["line"], row["book"], row[side], now)
+                    p = evaluate(sport, g, kind, side, row["line"], row["book"], row[side], now, allow_test=True)
                     if p:
                         plays.append((ev["id"], g, p, None))
     try:
@@ -1508,7 +1515,7 @@ def record(found, seen, now):
     another line with 2%+ more EV) edits that same Discord message instead of posting again."""
     best = {}
     for gid, g, p, size in found:   # one play per game / market / side: the best EV across books and alt lines
-        k = (p["sport"], gid, p["kind"], p["side"])
+        k = (p["sport"], gid, p["kind"], p["side"], bool(p.get("test")))   # test plays never crowd out real ones
         if k not in best or p["ev"] > best[k][2]["ev"]:
             best[k] = (gid, g, p, size)
     posted = 0
@@ -1522,6 +1529,12 @@ def record(found, seen, now):
         extra = {"size_usd": round(size)} if size else {}
         base = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], fair_at=g["at"],
                     **({"okey": g["okey"]} if g.get("okey") else {}), **extra)
+        if p.get("test"):   # 1%-to-bar play in a sharp market: logged and graded, never posted
+            if not prev:
+                d_ = dict(base, found=now.isoformat(), alerted=False, shadow=True, test=True)
+                fs_set(f"scan_plays/{pid}", d_)
+                seen[pid] = d_
+            continue
         hrs_out = (datetime.fromisoformat(g["start"]) - now).total_seconds() / 3600
         window = float(os.environ.get(f"SCAN_POST_WITHIN_{p['sport'].upper()}", POST_WITHIN_H))
         if hrs_out > window and not sib:   # too far out to trust yet: logged and graded (timing test)
@@ -1882,7 +1895,7 @@ def watch(minutes, sports):
             for x in q:
                 if x["size"] and x["size"] < MIN_SIZE_USD:
                     continue
-                p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"])
+                p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"], allow_test=True)
                 if not p:
                     continue
                 if age_min < STALE_FAIR_MIN:
@@ -1911,7 +1924,7 @@ def watch(minutes, sports):
                     for x in q:
                         if x["size"] and x["size"] < MIN_SIZE_USD:
                             continue
-                        p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"])
+                        p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"], allow_test=True)
                         if p:
                             found.append((x["gid"], x["g"], p, x["size"]))
                     n_quotes += len(q)
@@ -2133,6 +2146,15 @@ def timing_report(now, days=30):
             ys = [p for p in xs if lo <= hrs(p) < hi]
             cells.append(f"{lo}-{hi if hi < 999 else '+'}h: {len(ys)} @ {sum(p['clv'] for p in ys) / len(ys):+.1%}" if ys else f"{lo}-{hi if hi < 999 else '+'}h: -")
         out.append(f"  {SPORTS[sport]['label']:10s} " + " | ".join(cells))
+    # the sharp-market test: 1%-to-bar plays (logged only), by sport and EV band
+    for sport in TEST_SPORTS:
+        for lo, hi in ((0.01, 0.02), (0.02, 0.03), (0.03, 1)):
+            xs = [p for p in ps if p.get("sport") == sport and lo <= (p.get("ev") or 0) < hi
+                  and (p.get("test") or (lo >= 0.03 and p.get("alerted")))]
+            if xs:
+                w = sum(p["result"] == "win" for p in xs); l_ = sum(p["result"] == "loss" for p in xs)
+                out.append(f"  test {SPORTS[sport]['label']:4s} EV {lo:.0%}-{hi if hi < 1 else 99:.0%} {len(xs):4d}  "
+                           f"{sum(p['clv'] for p in xs) / len(xs):+6.2%}  {sum(p['clv'] > 0 for p in xs) / len(xs):5.0%}  {w}-{l_}")
     # main line vs alternate lines (points from Pinnacle's line when found)
     for lo, hi, name in ((0, 0.01, "main line"), (0.01, 1.01, "alt 0.5-1 pt"), (1.01, 3.01, "alt 1.5-3 pts"), (3.01, 99, "alt 3+ pts")):
         xs = [p for p in ps if p.get("kind") != "h2h" and lo <= (p.get("off_main") or 0) < hi and "off_main" in p]
@@ -2267,7 +2289,7 @@ def main():
                 save_fair(s, games, now.isoformat(), {})
                 found = list(plays)
                 for x in exchange_quotes(s, games):
-                    p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"])
+                    p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"], allow_test=True)
                     if p and not (x["size"] and x["size"] < MIN_SIZE_USD):
                         found.append((x["gid"], x["g"], p, x["size"]))
                 log(f"[{s}] {record(found, seen, now)} alert(s)")
