@@ -2716,6 +2716,14 @@ def main():
             t = datetime.fromisoformat(x["alerted_at"]).astimezone(ET).strftime("%-I:%M %p") if x.get("alerted_at") else ""
             print(f"{t:>8s}  {mark:10s} {SPORTS[x['sport']]['label']:4s} {x['label'][:34]:34s} @ {BOOK_NAMES.get(x['book'], x['book']):11s}"
                   f" {'msg' if x.get('msg_id') else 'no msg'}")
+        print("tapped or answered (all docs, superseded too):")
+        for x in sorted((x for x in fs_recent("scan_plays", "start", (now - timedelta(days=1)).isoformat())
+                         if x.get("tapped_at") or x.get("taken") is not None or x.get("status_final")),
+                        key=lambda x: x.get("alerted_at") or ""):
+            print(f"  {SPORTS[x['sport']]['label']:4s} {x['label'][:30]:30s} taken={x.get('taken')!s:5s} "
+                  f"reason={x.get('pass_reason')!s:14s} tapped={'y' if x.get('tapped_at') else 'n'} "
+                  f"final={'y' if x.get('status_final') else 'n'} sup={'y' if x.get('superseded') else 'n'} "
+                  f"alerted={'y' if x.get('alerted') else 'n'} via={x.get('via')}")
         return print(f"{sum(1 for x in ps if x.get('taken'))} marked bet, {sum(1 for x in ps if x.get('taken') is False)} passed, "
                      f"{len(ps)} alerts in the last day")
     if a.mode == "cbbbooks":
