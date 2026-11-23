@@ -290,6 +290,79 @@ def fair_at(sport, kind, views, line, without=None, only=None):
 SPORT_BAR = {"nfl": 0.02, "ncaaf": 0.02, "nhl": 0.02, "ncaab": 0.02, "nba": 0.02}   # sharp markets + CBB (logger: 2% bar, +2% CLV)
 
 
+def _fair_w(sport, kind, views, line, side, without, weight):
+    """Like fair_side, but with a custom weight per (book, base weight) -- for the logged fair-line variants."""
+    if not views:
+        return None
+    if isinstance(views[0][3], list):
+        use = [(weight(bk, w), q[SIDE_IX[side]]) for bk, w, l0, q in views if bk != without]
+        use = [(w, q) for w, q in use if w > 0]
+        if len(use) < MIN_BOOKS:
+            return None
+        return sum(w * q for w, q in use) / sum(w for w, _ in use)
+    if side == "d":
+        return None
+    mm = SPORTS[sport]["max_move"]
+    best = {}
+    for bk, w, l0, q in views:
+        if bk == without:
+            continue
+        d = 0.0 if kind == "h2h" else abs(l0 - line)
+        if d <= mm + 1e-9 and (bk not in best or d < best[bk][0]):
+            best[bk] = (d, weight(bk, w), l0, q)
+    use = [(w, mover(sport, kind, l0, q)) for d, w, l0, q in best.values() if w > 0]
+    if len(use) < MIN_BOOKS:
+        return None
+    pa = sum(w * fn(line) for w, fn in use) / sum(w for w, _ in use)
+    return pa if side == "a" else 1 - pa
+
+
+FRESH_HALF_MIN = 30        # 'fresh' variant: a book's weight halves for every 30 minutes since its last update
+
+
+def fair_variants(sport, g, kind, side, line, book, now):
+    """The fair chance for this side under each candidate method, for the side-by-side test (vs Pinnacle's close):
+    live (what alerts use) · pin (Pinnacle only) · equal (every book weight 1) · fresh (stale prices discounted)
+    · exblend (live averaged with the exchanges' live bid/ask midpoint, when there is one)."""
+    views = (g.get("views") or {}).get(kind)
+    if not views:
+        return {}
+    upd = (g.get("upd") or {}).get(kind) or {}
+
+    def age_w(bk, w):
+        t = upd.get(bk) or g.get("at")
+        try:
+            age = (now - datetime.fromisoformat(t.replace("Z", "+00:00"))).total_seconds() / 60
+        except (AttributeError, ValueError):
+            return w
+        return w * 0.5 ** (max(age, 0) / FRESH_HALF_MIN)
+    out = dict(live=fair_side(sport, kind, views, line, side, without=book),
+               pin=fair_side(sport, kind, views, line, side, only=SHARP),
+               equal=_fair_w(sport, kind, views, line, side, book, lambda bk, w: 1.0),
+               fresh=_fair_w(sport, kind, views, line, side, book, age_w))
+    mid = (g.get("exmid") or {}).get(f"{kind}|{line}")
+    if mid and out["live"] is not None and (now - datetime.fromisoformat(mid[1])).total_seconds() < 600 and side in ("a", "b"):
+        m = mid[0] if side == "a" else 1 - mid[0]
+        out["exblend"] = (out["live"] + m) / 2
+    return {k: round(v, 4) for k, v in out.items() if v is not None}
+
+
+def exchange_mids(games, quotes_, now):
+    """Live bid/ask midpoint per game / market / line from the exchanges' two-sided prices (for the exblend variant)."""
+    by = {}
+    for x in quotes_:
+        if x["side"] in ("a", "b"):
+            by.setdefault((x["gid"], x["kind"], x["line"], x["book"]), {})[x["side"]] = x["prob"]
+    agg = {}
+    for (gid, kind, line, bk), v in by.items():
+        if "a" in v and "b" in v and 0.98 <= v["a"] + v["b"] <= 1.15:
+            agg.setdefault((gid, kind, line), []).append((v["a"] + 1 - v["b"]) / 2)
+    for (gid, kind, line), mids in agg.items():
+        g = games.get(gid)
+        if g is not None:
+            g.setdefault("exmid", {})[f"{kind}|{line}"] = (round(sum(mids) / len(mids), 4), now.isoformat())
+
+
 def bar_for(book, hours_to_start, sport=None):
     if book in STRICT_BOOKS or hours_to_start > EARLY_H:
         return BAR_STRICT
@@ -718,9 +791,15 @@ def pull(sport, now, st, reason):
         q = quotes(ev, three)
         if not any(r_["book"] == SHARP for rows in q.values() for r_ in rows):
             continue
+        upd = {}
+        for bm in ev.get("bookmakers", []):
+            for mk in bm.get("markets", []):
+                k_ = {"h2h": "h2h", "spreads": "spread", "totals": "total"}.get(mk["key"])
+                if k_ and (mk.get("last_update") or bm.get("last_update")):
+                    upd.setdefault(k_, {})[bm["key"]] = mk.get("last_update") or bm.get("last_update")
         g = dict(home=ev["home_team"], away=ev["away_team"], start=ev["commence_time"].replace("Z", "+00:00"),
                  at=now.isoformat(), views={k: fair_views(sport, k, rows) for k, rows in q.items() if rows},
-                 okey=ev.get("_okey"), **({"three_way": True} if three else {}))
+                 okey=ev.get("_okey"), upd=upd, **({"three_way": True} if three else {}))
         games[ev["id"]] = g
         for_tally.append((g, q))
         for kind, rows in q.items():
@@ -1540,6 +1619,10 @@ def record(found, seen, now):
         extra = {"size_usd": round(size)} if size else {}
         base = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], fair_at=g["at"],
                     **({"okey": g["okey"]} if g.get("okey") else {}), **extra)
+        try:
+            base["fv"] = fair_variants(p["sport"], g, p["kind"], p["side"], p["line"], p["book"], now)
+        except Exception:  # noqa: BLE001 -- the test never blocks an alert
+            pass
         if p.get("test"):   # 1%-to-bar play in a sharp market: logged and graded, never posted
             if not prev:
                 d_ = dict(base, found=now.isoformat(), alerted=False, shadow=True, test=True)
@@ -1884,6 +1967,7 @@ def watch(minutes, sports):
             full = cycle % FULL_EVERY == 1
             q = exchange_quotes(s, S["games"], ml_only=not full) if upcoming else []
             n_quotes += len(q)
+            exchange_mids(S["games"], q, now)
             # line moves since the last pull
             moved = []
             for gid in upcoming:
@@ -2205,6 +2289,24 @@ def grade():
     print(timing_report(now))
 
 
+def fair_report(ps):
+    """Which fair-line method best predicts Pinnacle's no-vig close, and whose 2%+ picks beat it most."""
+    xs = [p for p in ps if p.get("fv") and p.get("p_close_pin") is not None]
+    if len(xs) < 10:
+        return [f"  fair-line test: {len(xs)} plays with variants + Pinnacle close so far"]
+    out = ["  fair-line test (truth = Pinnacle no-vig close): method / plays / avg miss / 2%+ picks / beat close / CLV"]
+    for v in ("live", "pin", "equal", "fresh", "exblend"):
+        ys = [p for p in xs if v in p["fv"]]
+        if not ys:
+            continue
+        miss = sum(abs(p["fv"][v] - p["p_close_pin"]) for p in ys) / len(ys)
+        picks = [p for p in ys if p["fv"][v] * (1 + payout(p["odds"], p["book"], p["sport"])) - 1 >= 0.02]
+        clv = [p["p_close_pin"] * (1 + payout(p["odds"], p["book"], p["sport"])) - 1 for p in picks]
+        out.append(f"  {v:8s} {len(ys):5d}  {miss * 100:5.2f} pts  {len(picks):4d}"
+                   + (f"  {sum(c > 0 for c in clv) / len(clv):5.0%}  {sum(clv) / len(clv):+6.2%}" if clv else ""))
+    return out
+
+
 def timing_report(now, days=30):
     """CLV by how far before the start each play was found -- posted and log-only plays (totals only)."""
     ps = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=days)).isoformat())
@@ -2228,6 +2330,8 @@ def timing_report(now, days=30):
             ys = [p for p in xs if lo <= hrs(p) < hi]
             cells.append(f"{lo}-{hi if hi < 999 else '+'}h: {len(ys)} @ {sum(p['clv'] for p in ys) / len(ys):+.1%}" if ys else f"{lo}-{hi if hi < 999 else '+'}h: -")
         out.append(f"  {SPORTS[sport]['label']:10s} " + " | ".join(cells))
+    out += fair_report([p for p in fs_recent("scan_plays", "start", (now - timedelta(days=days)).isoformat())
+                        if p.get("result") in ("win", "loss", "push") and not p.get("superseded")])
     # every edge size: posted alerts and logged tests (1-2% under the bar, 12-30% over the cap)
     out.append("  edge size: plays / avg CLV / beat close / record   (posted = alerts; logged = tests, never posted)")
     for lo, hi in ((0.01, 0.02), (0.02, 0.04), (0.04, 0.07), (0.07, 0.12), (0.12, 0.30)):
