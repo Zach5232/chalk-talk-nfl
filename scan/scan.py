@@ -1183,7 +1183,8 @@ def webhook():
 BUTTONS = [{"type": 1, "components": [
     {"type": 2, "style": 3, "label": "Bet it", "custom_id": "bet"},
     {"type": 2, "style": 2, "label": "Line moved", "custom_id": "moved"},
-    {"type": 2, "style": 2, "label": "Pass", "custom_id": "pass"}]}]
+    {"type": 2, "style": 2, "label": "Pass", "custom_id": "pass"},
+    {"type": 2, "style": 2, "label": "No funds", "custom_id": "nofunds"}]}]
 BOT_MSGS = set()          # alert messages the bot posted (it edits those; the webhook edits its own)
 BOT_CAN_POST = [True]
 
@@ -1302,6 +1303,8 @@ def taps_from_text(content, x):
         return dict(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr, status_final=True, restored=True)
     if "❌ **Missed -- line moved**" in content:
         return dict(taken=False, pass_reason="line moved", status_final=True, restored=True)
+    if "💸 **No funds**" in content:
+        return dict(taken=False, pass_reason="no funds", status_final=True, restored=True)
     if "❌ **Passed**" in content:
         return dict(taken=False, pass_reason="didn't want it", status_final=True, restored=True)
     return None
@@ -1416,6 +1419,9 @@ def _answer(it):
             if it["data"]["custom_id"] == "pass":
                 TAPS.put((mid, "pass", None, None, None))
                 return note("Passed ❌")
+            if it["data"]["custom_id"] == "nofunds":
+                TAPS.put((mid, "nofunds", None, None, None))
+                return note("Noted: no funds at that book 💸 (tracked separately)")
             if it["data"]["custom_id"] == "moved":
                 x_ = MSG_DOC.get(mid) or {}
                 comps = [{"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": False,
@@ -1526,6 +1532,9 @@ def apply_taps(seen):
         if what == "pass":
             x.update(taken=False, pass_reason="didn't want it")
             line = "❌ **Passed**"
+        elif what == "nofunds":
+            x.update(taken=False, pass_reason="no funds")
+            line = f"💸 **No funds** at {BOOK_NAMES.get(x['book'], x['book'])}"
         elif what == "moved":
             line_now = stake   # for 'moved' the stake slot carries the line you saw (or None = same as the alert)
             x.update(taken=False, pass_reason="line moved", moved_odds=odds, moved_price=pr, moved_line_seen=line_now,
@@ -1711,6 +1720,13 @@ def record(found, seen, now):
         k = (p["sport"], gid, p["kind"], p["side"], bool(p.get("test")))   # test plays never crowd out real ones
         if k not in best or p["ev"] > best[k][2]["ev"]:
             best[k] = (gid, g, p, size)
+    backup = {}   # best play at a sportsbook (not Novig) per game/market/side, shown on Novig alerts
+    for gid, g, p, size in found:
+        if p["book"] in BACKUP_SKIP or p.get("test") or p.get("overcap"):
+            continue
+        k = (p["sport"], gid, p["kind"], p["side"])
+        if k not in backup or p["ev"] > backup[k]["ev"]:
+            backup[k] = p
     posted = 0
     for gid, g, p, size in sorted(best.values(), key=lambda b: -b[2]["ev"]):
         pid = play_id(p, gid)
@@ -1793,6 +1809,10 @@ def record(found, seen, now):
                 fs_set(f"scan_plays/{pid}", dict(base, found=now.isoformat(), alerted=False, conflict=True))
                 seen[pid] = dict(base, found=now.isoformat(), alerted=False, conflict=True)
             continue
+        bu = backup.get((p["sport"], gid, p["kind"], p["side"])) if p["book"] == "novig" else None
+        if bu:
+            notes.append(f"↪️ **Also at {BOOK_NAMES.get(bu['book'], bu['book'])}:** {bu['label']} "
+                         f"{price_str(bu['odds'], bu['book'], bu.get('price_prob'))} (EV {bu['ev']:+.1%}) · bet ${bu['stake_usd']:g}")
         note = ("\n" + "\n".join(notes)) if notes else ""
         if EXPOSURE_CAP and not sib and p["ev"] < EXPOSURE_OVERRIDE_EV:
             exp = open_exposure(seen, now)
@@ -1890,6 +1910,7 @@ def _ev_now(sport, g, kind, side, line, book, odds, pin_only=False):
     return pw * (1 + payout(odds, book, sport)) - 1
 
 
+BACKUP_SKIP = {"novig"}   # backups come from any other book you use
 MISSES = {}        # alert message id -> price checks in a row that couldn't find its price
 MISS_CHECKS = 3
 
@@ -2315,8 +2336,10 @@ def day_summary(now):
     if any(x.get("taken") is not None for x in ps):
         tk = [x for x in ps if x.get("taken")]
         mv = sum(x.get("taken") is False and x.get("pass_reason") == "line moved" for x in ps)
+        nf = sum(x.get("taken") is False and x.get("pass_reason") == "no funds" for x in ps)
         lines.append(f"You took {len(tk)} (${sum(x.get('stake_taken') or x.get('stake_usd') or 0 for x in tk):,.0f}), "
-                     f"passed {sum(x.get('taken') is False for x in ps) - mv}, missed (line moved) {mv}, "
+                     f"passed {sum(x.get('taken') is False for x in ps) - mv - nf}, missed (line moved) {mv}, "
+                     + (f"no funds {nf}, " if nf else "") +
                      f"no answer {sum(x.get('taken') is None for x in ps)}")
     pend = [x for x in ps if not x.get("result") and x.get("taken") is not False]
     if pend:
