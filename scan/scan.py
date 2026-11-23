@@ -2617,6 +2617,20 @@ def main():
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
         return
+    if a.mode == "fields":   # health check: are the tracking fields being saved on today's plays? (counts only)
+        now = datetime.now(timezone.utc)
+        ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(hours=6)).isoformat())
+              if (x.get("found") or x.get("alerted_at") or "") >= (now - timedelta(hours=10)).isoformat()]
+        print(f"plays found in the last 10h: {len(ps)} (posted {sum(1 for x in ps if x.get('alerted'))})")
+        for f in ("fv", "off_main", "test", "overcap", "early", "shadow", "rel", "msg_id", "taken", "tapped_at", "clv_taken",
+                  "p_close", "result"):
+            print(f"  {f:10s} {sum(1 for x in ps if x.get(f) not in (None, False, ''))}")
+        print("  fv methods:", {k: sum(1 for x in ps if k in (x.get('fv') or {})) for k in ("live", "pin", "equal", "fresh", "exblend")})
+        print("  by sport:", {SPORTS[s_]['label']: sum(1 for x in ps if x['sport'] == s_) for s_ in SPORTS if any(x['sport'] == s_ for x in ps)})
+        print("  credits:", (fs_get("scan_state/credits") or {}).get("used"), "this month;",
+              ((fs_get("scan_state/credits") or {}).get("days") or {}))
+        print("  morning report posted for:", (fs_get("scan_state/morning") or {}).get("day"))
+        return
     if a.mode == "timing":
         return print(timing_report(datetime.now(timezone.utc)))
     if a.mode == "cfbrecord":   # CFB plays posted to Discord this season, by kind (totals only -- public log)
