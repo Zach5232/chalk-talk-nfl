@@ -286,8 +286,13 @@ def fair_at(sport, kind, views, line, without=None, only=None):
     return sum(w * fn(line) for w, fn in use) / sum(w for w, _ in use)
 
 
-def bar_for(book, hours_to_start):
-    return BAR_STRICT if book in STRICT_BOOKS or hours_to_start > EARLY_H else BAR
+SPORT_BAR = {"nfl": 0.02, "ncaaf": 0.02, "nhl": 0.02, "ncaab": 0.02}   # sharp markets + CBB (logger: 2% bar, +2% CLV)
+
+
+def bar_for(book, hours_to_start, sport=None):
+    if book in STRICT_BOOKS or hours_to_start > EARLY_H:
+        return BAR_STRICT
+    return SPORT_BAR.get(sport, BAR)
 
 
 def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None, allow_test=False):
@@ -304,7 +309,7 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None, allow
     hrs = (datetime.fromisoformat(g["start"]) - now).total_seconds() / 3600
     if hrs * 60 < START_BUFFER_MIN:
         return None
-    bar = bar_for(book, hrs)
+    bar = bar_for(book, hrs, sport)
     if pw < LONGSHOT_P:
         bar = max(bar, BAR_STRICT)
     test = False
@@ -1425,7 +1430,8 @@ def alert_text(p, g, first=None):
         good = f" · good to {price_str(p['good_to'], p['book'])}"
     size = f" · ${p['size_usd']:,} avail" if p.get("size_usd") else ""
     at_ = " vs " if SPORTS[p["sport"]].get("odds_prefix") else " @ "   # tennis has no home side
-    txt = (f"🔎 **{SPORTS[p['sport']]['label']}** {g['away']}{at_}{g['home']} · {t} ET\n"
+    small = " · 🔹 small edge" if p.get("ev", 1) < BAR else ""
+    txt = (f"🔎 **{SPORTS[p['sport']]['label']}** {g['away']}{at_}{g['home']} · {t} ET{small}\n"
            f"**{p['label']} · {price_str(p['odds'], p['book'], p.get('price_prob'))} @ {bk}**\n"
            f"Fair {_pct(p['p_fair'])}% ({p['fair_odds']:+d}) · EV {p['ev']:+.1%} · bet ${p['stake_usd']} to win ${p.get('to_win') or p['stake_usd'] * payout(p['odds'], p['book'], p['sport']):,.0f}{good}{size}")
     if first:
