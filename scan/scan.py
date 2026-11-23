@@ -1879,8 +1879,11 @@ def status_suffix(x):
     return ("\n" + x["status_line"]) if x.get("status_line") else ""
 
 
-def _ev_now(sport, g, kind, side, line, book, odds):
+def _ev_now(sport, g, kind, side, line, book, odds, pin_only=False):
     views = (g.get("views") or {}).get(kind)
+    if pin_only:   # odds still priced at the alert's book; fair from Pinnacle alone
+        pw = fair_side(sport, kind, views, line, side, only=SHARP) if views else None
+        return None if pw is None else pw * (1 + payout(odds, book, sport)) - 1
     pw = fair_side(sport, kind, views, line, side, without=book) if views else None
     if pw is None:
         return None
@@ -1932,7 +1935,14 @@ def live_status(sport, games, quotes_, seen, now, full):
             if ok:
                 state, line_ = "good", f"🟢 **Still good** {when} · {ps} @ {bk} (EV {ok['ev']:+.1%})"
             elif ev is not None and ev > 0:
-                state, line_ = "gone", f"🔴 **Gone** {when} -- edge down to {ev:+.1%} at {ps} @ {bk}"
+                bar_ = x.get("bar") or SPORT_BAR.get(sport, 0.02)
+                evp = _ev_now(sport, g, x["kind"], x["side"], x["line"], x["book"], odds, pin_only=True)
+                if ev >= bar_ and evp is not None and evp < bar_:   # the consensus still likes it; Pinnacle moved
+                    state, line_ = "gone", (f"🔴 **Gone** {when} -- same price ({ps} @ {bk}), but Pinnacle moved: "
+                                            f"by Pinnacle alone the edge is now {evp:+.1%} (needs {bar_:.0%})")
+                else:
+                    state, line_ = "gone", (f"🔴 **Gone** {when} -- the fair line moved: edge now {ev:+.1%} at {ps} @ {bk} "
+                                            f"(needs {bar_:.0%})")
             else:
                 state, line_ = "gone", f"🔴 **Gone** {when} -- now {ps} @ {bk}" + (f" (EV {ev:+.1%})" if ev is not None else "")
         # Only what changes a decision is shown: 'Gone' when the price dies (removed if it comes back) and
