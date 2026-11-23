@@ -1626,6 +1626,34 @@ def _bounds(axis, lo, hi, g):
     return f"{g['away']} wins by less than {-lo:g} or {g['home']} wins by less than {hi:g}"
 
 
+def _odds_held(x):
+    return x.get("taken_odds") or x.get("odds_alerted") or x["odds"]
+
+
+def middle_math(over, under, axis, lo, hi):
+    """(hit chance or None, break-even chance) for holding both sides. Break-even = the pair's combined implied
+    chance minus 1 (what the vig costs when only one side wins). Hit chance: scores are whole numbers, each one
+    strictly between the lines counted from the sport's normal spread/total SD centered on the middle."""
+    d_o = 1 + payout(_odds_held(over), over["book"], over["sport"])
+    d_u = 1 + payout(_odds_held(under), under["book"], under["sport"])
+    be = max(0.0, 1 / d_o + 1 / d_u - 1)
+    sd = (SPORTS.get(over["sport"], {}).get("sd") or {}).get("total" if axis == "total" else "spread")
+    if not sd:
+        return None, be
+    mu = (lo + hi) / 2
+    ks = [k for k in range(math.floor(lo) + 1, math.ceil(hi)) if not (axis == "margin" and k == 0)]
+    return sum(N.pdf((k - mu) / sd) / sd for k in ks), be
+
+
+def middle_words(text, mm):
+    hit, be = mm
+    if be <= 0:
+        return f"🔥 **Free middle**: {text}. The pair can't lose -- worst case you break even or better."
+    odds = (f"Middle hits ~{hit:.1%}, needs {be:.1%} to pay for the vig on its own" if hit is not None
+            else f"Middle needs {be:.1%} to pay for the vig on its own")
+    return f"🎯 **Middle**: {text}. {odds} -- this bet stands on its own EV; the middle is a bonus."
+
+
 def relation(p, q, g):
     """p and q on opposite sides of the same game: ('middle' | 'arb' | 'conflict', text) or None if not opposed."""
     if region(p) is None or region(q) is None:
@@ -1637,7 +1665,7 @@ def relation(p, q, g):
     over, under = (p, q) if d1 == ">" else (q, p)
     lo, hi = region(over)[2], region(under)[2]
     if lo < hi:
-        return "middle", f"both win if {_bounds(ax1, lo, hi, g)}"
+        return "middle", (f"both win if {_bounds(ax1, lo, hi, g)}", middle_math(over, under, ax1, lo, hi))
     if lo == hi:
         d_o = 1 + payout(over["odds"], over["book"], over["sport"])
         d_u = 1 + payout(under["odds"], under["book"], under["sport"])
@@ -1653,7 +1681,7 @@ def _note_for(kind, text, other, better):
     bk = BOOK_NAMES.get(other["book"], other["book"])
     ref = f"{other['label']} {price_str(other.get('odds_alerted') or other['odds'], other['book'], other.get('price_prob'))} @ {bk} (EV {other['ev']:+.1%})"
     if kind == "middle":
-        return f"🎯 **Middle** with {ref}: {text} -- fine to hold both"
+        return middle_words(f"with {ref}, {text[0]}", text[1])
     if kind == "arb":
         return f"💰 **Arb** with {ref}: {text}"
     return (f"⚠️ **Opposite side** of {ref}: {text}. "
@@ -1667,7 +1695,7 @@ def _taken_note(kind, text, o, p):
     stake = o.get("stake_taken") or o.get("stake_usd") or 0
     ref = f"${stake:,.0f} on {o['label']} {price_str(o.get('odds_alerted') or o['odds'], o['book'], o.get('price_prob'))} @ {bk}"
     if kind == "middle":
-        return f"🎯 **Middle:** you already bet {ref}. {text[0].upper() + text[1:]} -- fine to add this."
+        return middle_words(f"you already bet {ref}; {text[0]}", text[1])
     d_o = 1 + payout(o.get("odds_alerted") or o["odds"], o["book"], o["sport"])
     d_p = 1 + payout(p["odds"], p["book"], p["sport"])
     hedge = stake * d_o / d_p
