@@ -271,8 +271,14 @@ def fair_side(sport, kind, views, line, side, without=None, only=None):
 def fair_at(sport, kind, views, line, without=None, only=None):
     """Consensus P(side A) at `line` from saved views, or None if too few books."""
     mm = SPORTS[sport]["max_move"]
-    use = [(w, mover(sport, kind, l0, q)) for bk, w, l0, q in views
-           if bk != without and (only is None or bk == only) and (kind == "h2h" or abs(l0 - line) <= mm + 1e-9)]
+    best = {}   # each book once: its view at (or nearest to) the line being priced
+    for bk, w, l0, q in views:
+        if bk == without or (only is not None and bk != only):
+            continue
+        d = 0.0 if kind == "h2h" else abs(l0 - line)
+        if d <= mm + 1e-9 and (bk not in best or d < best[bk][0]):
+            best[bk] = (d, w, l0, q)
+    use = [(w, mover(sport, kind, l0, q)) for d, w, l0, q in best.values()]
     if not use or (only is None and len(use) < MIN_BOOKS):
         return None
     return sum(w * fn(line) for w, fn in use) / sum(w for w, _ in use)
@@ -563,6 +569,98 @@ def odds_keys(sport, key):
             log(f"sports list: {type(e).__name__}")
             return []
     return [k for k in _ACTIVE[0] if k.startswith(pre)]
+
+
+# ---------------- alternate lines (per game, Pinnacle's own alternates as the fair price) ----------------
+ALT_SPORTS = {"nfl", "ncaaf", "nhl", "nba"}
+ALT_WINDOW_H = 6           # only games starting within this many hours (when alerts post)
+ALT_REFRESH_MIN = 120
+ALT_Q, ALT_Q_AT = {}, {}   # sport -> {(gid, kind, side, line, book): odds} from alternate pulls (kept apart from BOOK_Q)
+
+
+def alt_rows(event, three_way=False):
+    """{'spread': [...], 'total': [...]} rows from alternate_spreads / alternate_totals (each line a row)."""
+    home, away = event["home_team"], event["away_team"]
+    out = {"spread": [], "total": []}
+    for bm in event.get("bookmakers", []):
+        for mk in bm.get("markets", []):
+            if mk["key"] == "alternate_spreads":
+                hb = {o["point"]: o["price"] for o in mk["outcomes"] if o.get("name") == home and o.get("point") is not None}
+                ab = {o["point"]: o["price"] for o in mk["outcomes"] if o.get("name") == away and o.get("point") is not None}
+                for h, pr in hb.items():
+                    if -h in ab:
+                        out["spread"].append(dict(book=bm["key"], line=h, a=pr, b=ab[-h]))
+            elif mk["key"] == "alternate_totals":
+                ov = {o["point"]: o["price"] for o in mk["outcomes"] if o.get("name") == "Over" and o.get("point") is not None}
+                un = {o["point"]: o["price"] for o in mk["outcomes"] if o.get("name") == "Under" and o.get("point") is not None}
+                for L, pr in ov.items():
+                    if L in un:
+                        out["total"].append(dict(book=bm["key"], line=L, a=pr, b=un[L]))
+    for k in out:
+        out[k] = [r for r in out[k] if all(100 <= abs(float(r[x])) <= 1500 for x in ("a", "b"))]
+    return out
+
+
+def merge_alt_views(S):
+    """Put saved alternate-line views back into the games (a main pull replaces the game list)."""
+    for gid, kinds in S.get("alt_views", {}).items():
+        g = S["games"].get(gid)
+        if not g:
+            continue
+        for kind, vs in kinds.items():
+            have = {(v[0], v[2]) for v in g.setdefault("views", {}).setdefault(kind, [])}
+            g["views"][kind] += [v for v in vs if (v[0], v[2]) not in have]
+
+
+def pull_alts(sport, S, now, st):
+    """Alternate spreads / totals for games starting soon: their views join the fair line (Pinnacle prices each of
+    its alternates itself -- no half-point estimate), and every book's alternate at those numbers is checked."""
+    key = os.environ.get("ODDS_API_KEY")
+    okey = SPORTS[sport].get("odds")
+    if not key or not okey or sport not in ALT_SPORTS:
+        return []
+    S.setdefault("alt_at", {})
+    S.setdefault("alt_views", {})
+    plays, cost, n = [], 0, 0
+    for gid, g in list(S["games"].items()):
+        st_ = datetime.fromisoformat(g["start"])
+        if not (now < st_ < now + timedelta(hours=ALT_WINDOW_H)):
+            continue
+        last = S["alt_at"].get(gid)
+        if last and (now - datetime.fromisoformat(last)).total_seconds() < ALT_REFRESH_MIN * 60:
+            continue
+        if not can_spend(st, now, 2):
+            break
+        r = requests.get(f"{ODDS}/{okey}/events/{gid}/odds", timeout=30, params=dict(
+            apiKey=key, bookmakers=",".join(BOOKS), oddsFormat="american", markets="alternate_spreads,alternate_totals"))
+        S["alt_at"][gid] = now.isoformat()
+        if r.status_code != 200:
+            continue
+        c = int(r.headers.get("x-requests-last") or 2)
+        cost += c
+        charge(st, now, c)
+        rows = alt_rows(r.json())
+        if not any(x["book"] == SHARP for v in rows.values() for x in v):
+            continue          # no Pinnacle alternates: nothing trustworthy to price against
+        n += 1
+        S["alt_views"][gid] = {k: fair_views(sport, k, v) for k, v in rows.items() if v}
+        merge_alt_views({"games": {gid: g}, "alt_views": {gid: S["alt_views"][gid]}})
+        aq = ALT_Q.setdefault(sport, {})
+        for k_ in [k_ for k_ in aq if k_[0] == gid]:
+            del aq[k_]
+        ALT_Q_AT[(sport, gid)] = now
+        for kind, rs in rows.items():
+            for row in rs:
+                if row["book"] not in BET_BOOKS:
+                    continue
+                for side in ("a", "b"):
+                    aq[(gid, kind, side, row["line"], row["book"])] = int(row[side])
+                    p = evaluate(sport, g, kind, side, row["line"], row["book"], row[side], now)
+                    if p:
+                        plays.append((gid, g, p, None))
+    if n:
+        log(f"[{sport}] alternate lines: {n} game(s), {cost} credits, {len(plays)} play(s)")
+    return plays
 
 
 # ---------------- paid pull ----------------
@@ -1586,6 +1684,8 @@ def live_status(sport, games, quotes_, seen, now, full):
         else:
             odds, pp = BOOK_Q.get(sport, {}).get(key), None
             at, src = BOOK_Q_AT.get(sport), "pull"
+            if odds is None and key in ALT_Q.get(sport, {}):   # an alternate line: priced by the alternate pull
+                odds, at = ALT_Q[sport][key], ALT_Q_AT.get((sport, x["event_id"]), at)
         if at is None:
             continue
         hhmm = at.astimezone(ET).strftime("%-I:%M %p")
@@ -1798,6 +1898,7 @@ def watch(minutes, sports):
                 games, plays = pull(s, now, st, ", ".join(reasons))
                 if games is not None:
                     S["games"], S["pulled"], S["mids"] = games, now.isoformat(), {}
+                    merge_alt_views(S)
                     if cur is not None:
                         S["inj"] = cur
                     for gid in games:   # re-base the move detector on this pull
@@ -1816,6 +1917,11 @@ def watch(minutes, sports):
                     n_quotes += len(q)
                     close_lines(s, S["games"], list(seen.values()), now)
                     save_fair(s, S["games"], S["pulled"], S["mids"])
+            if s in ALT_SPORTS and upcoming:
+                try:
+                    found += pull_alts(s, S, now, st)
+                except Exception as e:  # noqa: BLE001 -- alternates never stop the scan
+                    log(f"[{s}] alternate lines: {type(e).__name__}: {str(e)[:80]}")
             if found:
                 n_alerts += record(found, seen, now)
             try:
