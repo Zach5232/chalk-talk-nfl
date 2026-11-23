@@ -2076,6 +2076,10 @@ def morning_report(now):
     """Posted to Discord after the morning grade: your card (yesterday's logged bets with CLV, day + running totals)
     and the scorecard for every edge size, posted and logged."""
     yday = (now.astimezone(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
+    done = fs_get("scan_state/morning") or {}
+    if done.get("day") == yday:   # several grade runs a morning (GitHub's schedule is unreliable): post once
+        log(f"morning report for {yday} already posted")
+        return
     allp = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=60)).isoformat())
             if not p.get("superseded") and p.get("result") in ("win", "loss", "push")]
     day_of = lambda p: datetime.fromisoformat(p["start"]).astimezone(ET).strftime("%Y-%m-%d")
@@ -2119,6 +2123,7 @@ def morning_report(now):
         cl = [p["clv"] for p in posted if p.get("clv") is not None]
         lines.append(f"**All alerts:** {len(posted)} · {w}-{l_} · {sum(p.get('pl_usd') or 0 for p in posted):+,.0f} at suggested stakes"
                      + (f" · beat close {100 * sum(c > 0 for c in cl) / len(cl):.0f}% · CLV {sum(cl) / len(cl):+.1%}" if cl else ""))
+    fs_set("scan_state/morning", {"day": yday, "at": now.isoformat()})
     # Discord caps a message at 2000 characters: split on lines
     chunk = ""
     for ln in lines + [None]:

@@ -1,16 +1,18 @@
 name: Value scanner
 
 # NFL / NBA / college basketball / NHL game lines vs the sharp market (scan/scan.py).
-#   watch -- long-running loop, 10 AM to midnight ET: free Novig / Kalshi / Polymarket checks every 3 minutes,
+#   watch -- long-running loop, 9 AM to midnight ET: free Novig / Kalshi / Polymarket checks every 3 minutes,
 #            paid Odds API pulls (~3 credits for a whole sport) only on triggers; hard monthly credit cap.
 #            Started hourly; the concurrency group queues the next start behind the running loop, so a late
 #            GitHub schedule never leaves a gap and two loops never run at once.
-#   grade -- 7:05 AM ET (and at the end of every watch run): finals from ESPN (free), win/loss, profit, closing-line value.
+#   grade -- 7:05, 8:35 and 9:35 AM ET (GitHub's schedule can skip; the morning report posts once) and at the end of every watch run: finals from ESPN (free), win/loss, profit, closing-line value.
 # Prices go to Firestore (scan_plays) and Discord only -- this repo is public, the log prints counts.
 on:
   schedule:
-    - cron: '0 15-23,0-3 * * *'
+    - cron: '0 14-23,0-3 * * *'
     - cron: '5 12 * * *'
+    - cron: '35 13 * * *'
+    - cron: '35 14 * * *'
   workflow_dispatch:
     inputs:
       mode: {description: "watch, pull, grade or books (book scorecard)", required: true, default: "watch", type: choice, options: [watch, pull, grade, books, cbbbooks, taken, cfbrecord, timing, day, altprobe]}
@@ -19,7 +21,7 @@ on:
       post: {description: "Post alerts to Discord", type: boolean, default: true}
 
 concurrency:
-  group: scan-${{ (inputs.mode == 'grade' || inputs.mode == 'books' || inputs.mode == 'cbbbooks' || inputs.mode == 'taken' || inputs.mode == 'cfbrecord' || inputs.mode == 'timing' || inputs.mode == 'day' || inputs.mode == 'altprobe' || github.event.schedule == '5 12 * * *') && 'grade' || 'watch' }}
+  group: scan-${{ (inputs.mode == 'grade' || inputs.mode == 'books' || inputs.mode == 'cbbbooks' || inputs.mode == 'taken' || inputs.mode == 'cfbrecord' || inputs.mode == 'timing' || inputs.mode == 'day' || inputs.mode == 'altprobe' || (github.event.schedule == '5 12 * * *' || github.event.schedule == '35 13 * * *' || github.event.schedule == '35 14 * * *')) && 'grade' || 'watch' }}
   cancel-in-progress: false
 
 jobs:
@@ -43,7 +45,7 @@ jobs:
         run: |
           MODE="${{ inputs.mode }}"
           if [ -z "$MODE" ]; then
-            [ "${{ github.event.schedule }}" = "5 12 * * *" ] && MODE=grade || MODE=watch
+            case "${{ github.event.schedule }}" in "5 12 * * *"|"35 13 * * *"|"35 14 * * *") MODE=grade ;; *) MODE=watch ;; esac
           fi
           if [ "$MODE" = watch ]; then
             MIN="${{ inputs.minutes }}"
