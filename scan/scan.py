@@ -107,6 +107,7 @@ EARLY_H = 6
 LONGSHOT_P = 0.20          # sides the market gives under 20% also need the stricter bar
 TEST_SPORTS = {"nfl", "ncaaf", "nhl", "nba"}   # sharp markets: 1%-to-bar plays are logged + graded (not posted) as a test
 TEST_MIN = 0.01
+OVERCAP_MAX = 0.30         # 12-30% "edges" (above MAX_EV) are logged + graded, not posted, to test the cap
 POST_WITHIN_H = float(os.environ.get("SCAN_POST_WITHIN_H", "12"))   # plays further out are logged + graded, not posted
 MAX_EV = 0.12              # above this it's a stale quote or a mismatched game, not value
 MIN_BOOKS = 3              # books left in the consensus after removing the one being checked
@@ -312,12 +313,14 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None, allow
     bar = bar_for(book, hrs, sport)
     if pw < LONGSHOT_P:
         bar = max(bar, BAR_STRICT)
-    test = False
+    test = overcap = False
     if not (bar <= ev <= MAX_EV and ev_pin >= bar):
-        # sharp-market test: 1%+ vs consensus AND Pinnacle, under the bar -> logged and graded, never posted
-        if not (allow_test and sport in TEST_SPORTS and TEST_MIN <= ev < bar and ev_pin >= TEST_MIN):
+        if allow_test and MAX_EV < ev <= OVERCAP_MAX and ev_pin >= bar:
+            test = overcap = True     # above the cap: usually stale or mismatched -- logged to prove it either way
+        elif allow_test and sport in TEST_SPORTS and TEST_MIN <= ev < bar and ev_pin >= TEST_MIN:
+            test = True               # sharp-market test: 1%+ vs consensus AND Pinnacle, under the bar
+        else:
             return None
-        test = True
     pin = [l0 for bk, w, l0, q in views if bk == SHARP and l0 is not None]
     off_main = round(abs(line - pin[0]), 1) if (pin and line is not None) else 0.0
     kelly = ev / pay
@@ -329,7 +332,7 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None, allow
                 p_fair=round(pw, 4), fair_odds=american(pw), ev=round(ev, 4), ev_pin=round(ev_pin, 4),
                 stake_pct=round(stake, 4), stake_usd=bet_size(stake * BANKROLL), to_win=round(to_win, 2), good_to=good, bar=bar,
                 price_prob=round(price_prob if price_prob is not None else prob(odds), 4), off_main=off_main,
-                **({"test": True} if test else {}))
+                **({"test": True} if test else {}), **({"overcap": True} if overcap else {}))
 
 
 def label(g, kind, side, line):
@@ -2152,6 +2155,15 @@ def timing_report(now, days=30):
             ys = [p for p in xs if lo <= hrs(p) < hi]
             cells.append(f"{lo}-{hi if hi < 999 else '+'}h: {len(ys)} @ {sum(p['clv'] for p in ys) / len(ys):+.1%}" if ys else f"{lo}-{hi if hi < 999 else '+'}h: -")
         out.append(f"  {SPORTS[sport]['label']:10s} " + " | ".join(cells))
+    # every edge size: posted alerts and logged tests (1-2% under the bar, 12-30% over the cap)
+    out.append("  edge size: plays / avg CLV / beat close / record   (posted = alerts; logged = tests, never posted)")
+    for lo, hi in ((0.01, 0.02), (0.02, 0.04), (0.04, 0.07), (0.07, 0.12), (0.12, 0.30)):
+        for label, sub in (("posted", [p for p in ps if p.get("alerted")]), ("logged", [p for p in ps if p.get("test")])):
+            xs = [p for p in sub if lo <= (p.get("ev") or 0) < hi]
+            if xs:
+                w = sum(p["result"] == "win" for p in xs); l_ = sum(p["result"] == "loss" for p in xs)
+                out.append(f"  EV {lo:>4.0%}-{hi:<4.0%} {label:6s} {len(xs):4d}  {sum(p['clv'] for p in xs) / len(xs):+6.2%}  "
+                           f"{sum(p['clv'] > 0 for p in xs) / len(xs):5.0%}  {w}-{l_}")
     # the sharp-market test: 1%-to-bar plays (logged only), by sport and EV band
     for sport in TEST_SPORTS:
         for lo, hi in ((0.01, 0.02), (0.02, 0.03), (0.03, 1)):
