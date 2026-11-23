@@ -105,6 +105,7 @@ BAR_STRICT = 0.04          # Kalshi / Polymarket, and plays found more than EARL
 STRICT_BOOKS = {"kalshi", "polymarket"}
 EARLY_H = 6
 LONGSHOT_P = 0.20          # sides the market gives under 20% also need the stricter bar
+POST_WITHIN_H = float(os.environ.get("SCAN_POST_WITHIN_H", "12"))   # plays further out are logged + graded, not posted
 MAX_EV = 0.12              # above this it's a stale quote or a mismatched game, not value
 MIN_BOOKS = 3              # books left in the consensus after removing the one being checked
 MIN_SIZE_USD = 25          # exchange liquidity at the quoted price
@@ -1421,6 +1422,13 @@ def record(found, seen, now):
         extra = {"size_usd": round(size)} if size else {}
         base = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], fair_at=g["at"],
                     **({"okey": g["okey"]} if g.get("okey") else {}), **extra)
+        hrs_out = (datetime.fromisoformat(g["start"]) - now).total_seconds() / 3600
+        if hrs_out > POST_WITHIN_H and not sib:   # too far out to trust yet: logged and graded (timing test)
+            if not prev:
+                d_ = dict(base, found=now.isoformat(), alerted=False, shadow=True, early=True)
+                fs_set(f"scan_plays/{pid}", d_)
+                seen[pid] = d_
+            continue
         if not SPORTS[p["sport"]].get("alerts", True):   # log-only league: priced and graded, never posted
             if not prev:
                 d_ = dict(base, found=now.isoformat(), alerted=False, shadow=True)
@@ -1986,11 +1994,32 @@ def grade():
     rep_ = book_report(now)
     if rep_:
         print("book scorecard this month:\n" + rep_)
+    print(timing_report(now))
+
+
+def timing_report(now, days=30):
+    """CLV by how far before the start each play was found -- posted and log-only plays (totals only)."""
+    ps = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=days)).isoformat())
+          if p.get("clv") is not None and not p.get("superseded") and p.get("found")]
+    if not ps:
+        return "timing: no graded plays with a closing line yet"
+    out = ["timing (last 30 days): hours before start found / plays / avg CLV / beat close / record"]
+    for lo, hi in ((0, 1), (1, 3), (3, 6), (6, 12), (12, 24), (24, 999)):
+        xs = [p for p in ps if lo <= (datetime.fromisoformat(p["start"]) - datetime.fromisoformat(p["found"])).total_seconds() / 3600 < hi]
+        if xs:
+            w = sum(p["result"] == "win" for p in xs); l_ = sum(p["result"] == "loss" for p in xs)
+            out.append(f"  {lo:>2}-{hi:<3}h {len(xs):5d}  {sum(p['clv'] for p in xs) / len(xs):+6.2%}  "
+                       f"{sum(p['clv'] > 0 for p in xs) / len(xs):5.0%}  {w}-{l_}")
+    for label, sub in (("posted", [p for p in ps if p.get("alerted")]), ("logged only", [p for p in ps if p.get("shadow")])):
+        if sub:
+            out.append(f"  {label:12s} {len(sub):5d}  {sum(p['clv'] for p in sub) / len(sub):+6.2%}  "
+                       f"{sum(p['clv'] > 0 for p in sub) / len(sub):5.0%}")
+    return "\n".join(out)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord"])
+    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -1998,6 +2027,8 @@ def main():
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
         return grade()
+    if a.mode == "timing":
+        return print(timing_report(datetime.now(timezone.utc)))
     if a.mode == "cfbrecord":   # CFB plays posted to Discord this season, by kind (totals only -- public log)
         st = fs_get("cfb_odds_state/current") or {}
         ps = [x for x in (st.get("posted") or {}).values() if x.get("result") in ("win", "loss", "push")]
