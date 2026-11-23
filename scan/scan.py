@@ -1512,7 +1512,7 @@ def apply_taps(seen):
         else:
             x.update(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr)
             line = f"✅ **You bet** ${stake:g} at {price_str(odds, x['book'], pr)}"
-        x.update(status_line=line, status_final=True)
+        x.update(status_line=line, status_final=True, tapped_at=datetime.now(timezone.utc).isoformat())
         discord_send((x.get("msg_text") or alert_text(x, x)) + "\n" + line, edit_id=mid)
         fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
         n += 1
@@ -1744,19 +1744,30 @@ def record(found, seen, now):
                     fs_set(f"scan_plays/{pid}", d_)
                     seen[pid] = d_
                 continue
-        for o, onote in edits:   # tell the earlier message about the new one
-            if o.get("msg_id"):
+        fam_key = f"{p['sport']}_{gid}_{p['kind']}_{p['side']}"
+
+        def tell_others():   # only once this play is really posted (or re-posted at a better number)
+            for o, onote in edits:
+                if not o.get("msg_id"):
+                    continue
                 first = seen.get(o.get("first_id")) if o.get("updated") else None
-                body = (o.get("msg_text") or alert_text(o, o, first=first)) + "\n" + onote
+                o.setdefault("msg_base", o.get("msg_text") or alert_text(o, o, first=first))
+                notes = dict(o.get("notes") or {})
+                if notes.get(fam_key) == onote:
+                    continue          # same note already there: no edit
+                notes[fam_key] = onote    # one note per other play: a newer one replaces it
+                o["notes"] = notes
+                body = o["msg_base"] + "".join("\n" + n for n in notes.values())
                 discord_send(body + status_suffix(o), edit_id=o["msg_id"])
                 o["msg_text"] = body
                 fs_set(f"scan_plays/{o.get('_id') or play_id(o, o['event_id'])}", {k: v for k, v in o.items() if k != "_id"})
         if not sib:
+            tell_others()
             text = alert_text({**p, **extra}, g) + note
             mid = discord_send(text)
             add_buttons(mid)
             doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
-                       alerted_at=now.isoformat(), msg_id=mid, first_id=pid, msg_text=text,
+                       alerted_at=now.isoformat(), msg_id=mid, first_id=pid, msg_text=text, msg_base=text,
                        via="bot" if mid in BOT_MSGS else "webhook")
             fs_set(f"scan_plays/{pid}", doc)
             seen[pid] = doc
@@ -1780,6 +1791,7 @@ def record(found, seen, now):
                 fs_set(f"scan_plays/{pid}", dict(base, found=now.isoformat(), alerted=False))
                 seen[pid] = dict(base, found=now.isoformat(), alerted=False)
             continue
+        tell_others()
         first = seen.get(last.get("first_id")) or last
         text = alert_text({**p, **extra}, g, first=first) + note
         mid = discord_send(text, edit_id=last.get("msg_id"))
@@ -1791,7 +1803,8 @@ def record(found, seen, now):
         last["superseded"] = True
         doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
                    alerted_at=now.isoformat(), msg_id=mid, first_id=last.get("first_id") or pid, updated=True,
-                   msg_text=text, taken=last.get("taken"), stake_taken=last.get("stake_taken"), via=last.get("via"))
+                   msg_text=text, msg_base=text, taken=last.get("taken"), stake_taken=last.get("stake_taken"),
+                   via=last.get("via"))
         fs_set(f"scan_plays/{pid}", doc)
         seen[pid] = doc
         if mid:
