@@ -1291,6 +1291,22 @@ def parse_reply(text):
     return stake, odds, price
 
 
+def taps_from_text(content, x):
+    """Read the tap line the scanner wrote on an alert ('✅ You bet $10 at 45.5¢ (+120)', '❌ Missed -- line moved',
+    '❌ Passed') back into record fields."""
+    m = re.search(r"✅ \*\*You bet\*\* \$([\d.]+)(?: on [^@]*?)? at (?:([\d.]+)¢ \(([+-]\d+)\)|([+-]\d+) \()", content)
+    if m:
+        stake = float(m.group(1))
+        odds = int(m.group(3) or m.group(4))
+        pr = float(m.group(2)) / 100 if m.group(2) else None
+        return dict(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr, status_final=True, restored=True)
+    if "❌ **Missed -- line moved**" in content:
+        return dict(taken=False, pass_reason="line moved", status_final=True, restored=True)
+    if "❌ **Passed**" in content:
+        return dict(taken=False, pass_reason="didn't want it", status_final=True, restored=True)
+    return None
+
+
 def read_reactions(seen, now):
     """Mark alerts taken (✅) or passed (❌) from the owner's reactions; a reply like '$20' sets the stake taken."""
     if not bot_on():
@@ -1325,6 +1341,17 @@ def read_reactions(seen, now):
         x = live.get(m["id"])
         if not x:
             continue
+        if m["id"] in BOT_MSGS or x.get("via") == "bot":
+            # button alerts: the message itself shows what you tapped -- restore the record from it if it was lost
+            if x.get("taken") is None:
+                got = taps_from_text(m.get("content") or "", x)
+                if got:
+                    x.update(got)
+                    fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
+                    changed += 1
+            continue
+        if x.get("tapped_at"):
+            continue   # never let reactions override a button tap
         mine = {r["emoji"].get("name"): r["count"] - (1 if r.get("me") else 0) for r in m.get("reactions") or []}
         taken = True if mine.get(TAKE, 0) > 0 else False if mine.get(PASS, 0) > 0 else None
         stake, odds_t, price_t = stakes.get(m["id"], (None, None, None))
