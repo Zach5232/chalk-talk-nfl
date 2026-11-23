@@ -1646,12 +1646,12 @@ def middle_math(over, under, axis, lo, hi):
 
 
 def middle_words(text, mm):
-    hit, be = mm
+    hit, be = mm   # verdict only; the numbers stay out of the alert
     if be <= 0:
-        return f"🔥 **Free middle**: {text}. The pair can't lose -- worst case you break even or better."
-    odds = (f"Middle hits ~{hit:.1%}, needs {be:.1%} to pay for the vig on its own" if hit is not None
-            else f"Middle needs {be:.1%} to pay for the vig on its own")
-    return f"🎯 **Middle**: {text}. {odds} -- this bet stands on its own EV; the middle is a bonus."
+        return f"🔥 **Middle -- TAKE IT** (free: the pair can't lose). {text[0].upper() + text[1:]}."
+    if hit is not None and hit >= be:
+        return f"🎯 **Middle -- TAKE IT** (good middle). {text[0].upper() + text[1:]}."
+    return f"🎯 **Middle -- TAKE IT** (good bet on its own; the middle is a bonus). {text[0].upper() + text[1:]}."
 
 
 def relation(p, q, g):
