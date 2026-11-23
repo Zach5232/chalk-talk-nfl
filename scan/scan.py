@@ -1890,6 +1890,10 @@ def _ev_now(sport, g, kind, side, line, book, odds, pin_only=False):
     return pw * (1 + payout(odds, book, sport)) - 1
 
 
+MISSES = {}        # alert message id -> price checks in a row that couldn't find its price
+MISS_CHECKS = 3
+
+
 def live_status(sport, games, quotes_, seen, now, full):
     """Re-check every posted alert's own price (same book / line / side) and keep a status line on its message:
     🟢 still good · 🟡 price there, edge under the bar · 🔴 gone · ⏱️ game started. Records when each alert died."""
@@ -1899,6 +1903,7 @@ def live_status(sport, games, quotes_, seen, now, full):
         if k not in free or payout(x["odds"], x["book"], sport) > payout(free[k][0], x["book"], sport):
             free[k] = (x["odds"], x.get("prob"))
     edits = 0
+    feed_books = {k[4] for k in free}   # exchanges that answered this cycle (a feed that returned nothing proves nothing)
     for x in list(seen.values()):
         if (x.get("sport") != sport or not x.get("alerted") or x.get("superseded") or not x.get("msg_id")
                 or x.get("status_final") or x.get("taken") is not None):   # bet or passed: leave it alone
@@ -1926,8 +1931,16 @@ def live_status(sport, games, quotes_, seen, now, full):
         if started:
             state, line_ = "started", f"⏱️ **Game started** -- {'last seen ' + price_str(odds, x['book'], pp) if odds is not None else 'off the board'} @ {bk}"
         elif odds is None:
-            state, line_ = "gone", f"🔴 **Gone** as of {hhmm} -- no longer offered at {bk}"
+            # one missing read is often an API hiccup: only call it gone after MISS_CHECKS reads in a row miss it
+            if x["book"] in FREE_FEED and x["book"] not in feed_books:
+                continue
+            MISSES[x["msg_id"]] = MISSES.get(x["msg_id"], 0) + 1
+            need = MISS_CHECKS if x["book"] in FREE_FEED else 2   # sportsbooks are only re-pulled every ~15 min
+            if MISSES[x["msg_id"]] < need:
+                continue
+            state, line_ = "gone", f"🔴 **Gone** as of {hhmm} -- no longer offered at {bk} (missing from {need} checks in a row)"
         else:
+            MISSES.pop(x["msg_id"], None)
             ev = _ev_now(sport, g, x["kind"], x["side"], x["line"], x["book"], odds)
             ok = evaluate(sport, g, x["kind"], x["side"], x["line"], x["book"], odds, now, pp)
             ps = price_str(odds, x["book"], pp)
@@ -1944,7 +1957,8 @@ def live_status(sport, games, quotes_, seen, now, full):
                     state, line_ = "down", (f"🟡 **Value down** {when} -- still {ps} @ {bk}, but the fair line moved: "
                                             f"edge now {ev:+.1%} (bar {bar_:.0%}). Your call.")
             else:
-                state, line_ = "gone", f"🔴 **Gone** {when} -- no value left: now {ps} @ {bk}" + (f" (EV {ev:+.1%})" if ev is not None else "")
+                state, line_ = "gone", (f"🔴 **Gone** {when} -- no value left: now {ps} @ {bk}, "
+                                        + (f"value now {ev:+.1%}" if ev is not None else "value can't be priced right now"))
         # Only what changes a decision is shown: 'Gone' when the price dies (removed if it comes back) and
         # 'Game started'. A still-good alert is left alone -- no edits every few minutes.
         prev_state = x.get("status") or "good"
