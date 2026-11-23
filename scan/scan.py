@@ -1095,7 +1095,7 @@ BOT_MSGS = set()          # alert messages the bot posted (it edits those; the w
 BOT_CAN_POST = [True]
 
 
-def discord_send(text, edit_id=None):
+def discord_send(text, edit_id=None, buttons=True):
     """Post one alert (returns its message id), or edit an earlier one in place (no new notification).
     With the bot: posted by the bot with Bet it / Pass buttons. Without it (or no Send Messages permission): webhook."""
     if DRY:
@@ -1111,8 +1111,10 @@ def discord_send(text, edit_id=None):
                 time.sleep(0.3)
                 return edit_id
             try:
-                m = bot("POST", f"/channels/{channel_id()}/messages", json={"content": text, "components": BUTTONS})
-                BOT_MSGS.add(m["id"])
+                m = bot("POST", f"/channels/{channel_id()}/messages",
+                        json={"content": text, **({"components": BUTTONS} if buttons else {})})
+                if buttons:
+                    BOT_MSGS.add(m["id"])
                 time.sleep(0.3)
                 return m["id"]
             except requests.HTTPError as e:
@@ -1968,9 +1970,80 @@ def watch(minutes, sports):
         try:
             txt = day_summary(end)
             if txt:
-                discord_send(txt)
+                discord_send(txt, buttons=False)
         except Exception as e:  # noqa: BLE001
             log(f"summary failed: {type(e).__name__}")
+
+
+def _band_lines(xs, bands):
+    out = []
+    for lo, hi, label in bands:
+        ys = [p for p in xs if lo <= (p.get("ev") or 0) < hi]
+        if not ys:
+            continue
+        w = sum(p["result"] == "win" for p in ys); l_ = sum(p["result"] == "loss" for p in ys)
+        cl = [p["clv"] for p in ys if p.get("clv") is not None]
+        out.append(f"`{label:<15s}` {len(ys):>3d} · {w}-{l_}"
+                   + (f" · beat close {100 * sum(c > 0 for c in cl) / len(cl):.0f}% · CLV {sum(cl) / len(cl):+.1%}" if cl else ""))
+    return out
+
+
+def morning_report(now):
+    """Posted to Discord after the morning grade: your card (yesterday's logged bets with CLV, day + running totals)
+    and the scorecard for every edge size, posted and logged."""
+    yday = (now.astimezone(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
+    allp = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=60)).isoformat())
+            if not p.get("superseded") and p.get("result") in ("win", "loss", "push")]
+    day_of = lambda p: datetime.fromisoformat(p["start"]).astimezone(ET).strftime("%Y-%m-%d")
+    mine_all = [p for p in allp if p.get("taken")]
+    mine_day = sorted((p for p in mine_all if day_of(p) == yday), key=lambda p: p["start"])
+    icon = {"win": "✅", "loss": "❌", "push": "➖"}
+
+    def mine_totals(ps):
+        res = lambda p: p.get("result_taken") or p["result"]
+        w = sum(res(p) == "win" for p in ps); l_ = sum(res(p) == "loss" for p in ps)
+        usd = sum(p.get("pl_taken_usd") or 0 for p in ps)
+        ct = [p["clv_taken"] for p in ps if p.get("clv_taken") is not None]
+        return (f"{w}-{l_}, {usd:+,.0f}" + (f" · beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})"
+                                             if ct else ""))
+    lines = [f"📊 **Morning report · {datetime.fromisoformat(yday).strftime('%a %b %-d')}**", "", "**Your card**"]
+    if mine_day:
+        for p in mine_day[:25]:
+            res = p.get("result_taken") or p["result"]
+            stake = p.get("stake_taken") or p.get("stake_usd") or 0
+            ps_ = price_str(p.get("taken_odds") or p["odds"], p["book"], p.get("taken_price"))
+            c = p.get("clv_taken")
+            lines.append(f"{icon[res]} {SPORTS[p['sport']]['label']} {p['label']} · ${stake:g} @ {ps_} "
+                         f"{BOOK_NAMES.get(p['book'], p['book'])} · {p.get('pl_taken_usd') or 0:+.2f}"
+                         + (f" · CLV {c:+.1%}" if c is not None else ""))
+        if len(mine_day) > 25:
+            lines.append(f"…and {len(mine_day) - 25} more")
+        lines.append(f"**Day:** {mine_totals(mine_day)}")
+    else:
+        lines.append("No logged bets graded for that day (tap Bet it on the alerts you take).")
+    if mine_all:
+        lines.append(f"**Since you started logging:** {mine_totals(mine_all)} over {len(mine_all)} bets")
+    recent = [p for p in allp if p.get("found") and datetime.fromisoformat(p["start"]) > now - timedelta(days=30)]
+    posted = [p for p in recent if p.get("alerted")]
+    logged = [p for p in recent if p.get("test")]
+    lines += ["", "**Scorecard · last 30 days** (posted = alerts · logged = tests, never posted)"]
+    lines += _band_lines(logged, [(0.01, 0.02, "1-2% logged")])
+    lines += _band_lines(posted, [(0.02, 0.04, "2-4% posted"), (0.04, 0.07, "4-7% posted"), (0.07, 0.121, "7-12% posted")])
+    lines += _band_lines(logged, [(0.121, 0.31, "12-30% logged")])
+    if posted:
+        w = sum(p["result"] == "win" for p in posted); l_ = sum(p["result"] == "loss" for p in posted)
+        cl = [p["clv"] for p in posted if p.get("clv") is not None]
+        lines.append(f"**All alerts:** {len(posted)} · {w}-{l_} · {sum(p.get('pl_usd') or 0 for p in posted):+,.0f} at suggested stakes"
+                     + (f" · beat close {100 * sum(c > 0 for c in cl) / len(cl):.0f}% · CLV {sum(cl) / len(cl):+.1%}" if cl else ""))
+    # Discord caps a message at 2000 characters: split on lines
+    chunk = ""
+    for ln in lines + [None]:
+        if ln is None or len(chunk) + len(ln) + 1 > 1900:
+            if chunk.strip():
+                discord_send(chunk, buttons=False)
+            chunk = ""
+        if ln is not None:
+            chunk += ln + "\n"
 
 
 def day_summary(now):
@@ -2198,7 +2271,12 @@ def main():
     a = ap.parse_args()
     sports = [s for s in (a.sport or a.sports).split(",") if s in SPORTS]
     if a.mode == "grade":
-        return grade()
+        grade()
+        try:
+            morning_report(datetime.now(timezone.utc))
+        except Exception as e:  # noqa: BLE001
+            log(f"morning report failed: {type(e).__name__}: {str(e)[:100]}")
+        return
     if a.mode == "altprobe":   # which books return alternate spreads / totals (counts only), ~2 credits per sport
         key = os.environ["ODDS_API_KEY"]
         for sk in ("basketball_nba", "icehockey_nhl", "americanfootball_nfl", "basketball_ncaab", "soccer_epl"):
