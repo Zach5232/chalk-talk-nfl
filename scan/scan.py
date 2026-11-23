@@ -105,7 +105,7 @@ BAR_STRICT = 0.04          # Kalshi / Polymarket, and plays found more than EARL
 STRICT_BOOKS = {"kalshi", "polymarket"}
 EARLY_H = 6
 LONGSHOT_P = 0.20          # sides the market gives under 20% also need the stricter bar
-TEST_SPORTS = {"nfl", "ncaaf", "nhl"}   # sharp markets: 1%-to-bar plays are logged + graded (not posted) as a test
+TEST_SPORTS = {"nfl", "ncaaf", "nhl", "nba"}   # sharp markets: 1%-to-bar plays are logged + graded (not posted) as a test
 TEST_MIN = 0.01
 POST_WITHIN_H = float(os.environ.get("SCAN_POST_WITHIN_H", "12"))   # plays further out are logged + graded, not posted
 MAX_EV = 0.12              # above this it's a stale quote or a mismatched game, not value
@@ -286,7 +286,7 @@ def fair_at(sport, kind, views, line, without=None, only=None):
     return sum(w * fn(line) for w, fn in use) / sum(w for w, _ in use)
 
 
-SPORT_BAR = {"nfl": 0.02, "ncaaf": 0.02, "nhl": 0.02, "ncaab": 0.02}   # sharp markets + CBB (logger: 2% bar, +2% CLV)
+SPORT_BAR = {"nfl": 0.02, "ncaaf": 0.02, "nhl": 0.02, "ncaab": 0.02, "nba": 0.02}   # sharp markets + CBB (logger: 2% bar, +2% CLV)
 
 
 def bar_for(book, hours_to_start, sport=None):
