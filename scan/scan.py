@@ -1349,6 +1349,8 @@ def parse_price(v):
 
 
 def _default_price(x):
+    if x.get("odds") is None:
+        return ""
     if x["book"] in EXCHANGES:
         return _pct(x.get("price_prob") or prob(x["odds"]))
     return f"{x['odds']:+d}"
@@ -1360,9 +1362,7 @@ def _answer(it):
     try:
         if it["type"] == 3:   # button
             mid = it["message"]["id"]
-            x = MSG_DOC.get(mid)
-            if not x:
-                return note("That alert isn't live anymore (game started or the scan restarted) -- nothing logged.")
+            x = MSG_DOC.get(mid) or {"book": "", "odds": None, "kind": "", "stake_usd": ""}
             if it["data"]["custom_id"] == "pass":
                 TAPS.put((mid, "pass", None, None, None))
                 return note("Passed ❌")
@@ -1371,10 +1371,10 @@ def _answer(it):
                     {"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": False,
                                                 "max_length": 10, "label": "Best price now (optional)",
                                                 "placeholder": "-257 or 52.5"}]}]}})
-            stake = x.get("stake_taken") or x.get("stake_usd") or 0
+            stake = x.get("stake_taken") or x.get("stake_usd") or ""
             return reply({"type": 9, "data": {"custom_id": f"bet:{mid}", "title": "Log your bet"[:45], "components": [
                 {"type": 1, "components": [{"type": 4, "custom_id": "amount", "label": "Amount ($)", "style": 1,
-                                            "value": f"{stake:g}", "required": True, "max_length": 10}]},
+                                            "value": f"{stake:g}" if stake != "" else "", "required": True, "max_length": 10}]},
                 {"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": True, "max_length": 10,
                                             "label": ("Price in cents (e.g. 46.5)" if x["book"] in EXCHANGES
                                                       else "Odds (e.g. -115)"), "value": _default_price(x)}]}]}})
@@ -1449,14 +1449,18 @@ def gateway():
 
 def apply_taps(seen):
     """Main loop: record button taps / forms on the play, and show it on the alert."""
-    n = 0
+    n, later = 0, []
     while True:
         try:
-            mid, what, stake, odds, pr = TAPS.get_nowait()
+            item = TAPS.get_nowait()
         except queue.Empty:
-            return n
+            break
+        mid, what, stake, odds, pr = item[:5]
+        tapped = item[5] if len(item) > 5 else time.time()
         x = MSG_DOC.get(mid)
-        if not x:
+        if not x:   # the scan doesn't know this alert yet (e.g. just restarted): keep the tap and retry for 30 min
+            if time.time() - tapped < 1800:
+                later.append((mid, what, stake, odds, pr, tapped))
             continue
         if what == "pass":
             x.update(taken=False, pass_reason="didn't want it")
@@ -1471,6 +1475,9 @@ def apply_taps(seen):
         discord_send((x.get("msg_text") or alert_text(x, x)) + "\n" + line, edit_id=mid)
         fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
         n += 1
+    for it_ in later:
+        TAPS.put(it_)
+    return n
 
 
 def open_exposure(seen, now):
@@ -1712,6 +1719,8 @@ def record(found, seen, now):
                        via="bot" if mid in BOT_MSGS else "webhook")
             fs_set(f"scan_plays/{pid}", doc)
             seen[pid] = doc
+            if mid:
+                MSG_DOC[mid] = doc   # buttons work on it right away, not after the cycle ends
             posted += 1
             continue
         last = sib[-1]
@@ -1744,6 +1753,8 @@ def record(found, seen, now):
                    msg_text=text, taken=last.get("taken"), stake_taken=last.get("stake_taken"), via=last.get("via"))
         fs_set(f"scan_plays/{pid}", doc)
         seen[pid] = doc
+        if mid:
+            MSG_DOC[mid] = doc
         posted += 1
     return posted
 

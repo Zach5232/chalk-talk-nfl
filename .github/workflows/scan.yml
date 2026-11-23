@@ -1,7 +1,7 @@
 name: Value scanner
 
 # NFL / NBA / college basketball / NHL game lines vs the sharp market (scan/scan.py).
-#   watch -- long-running loop, 9 AM to midnight ET: free Novig / Kalshi / Polymarket checks every 3 minutes,
+#   watch -- long-running loop, 9 AM (weekends 7 AM) to midnight ET: free Novig / Kalshi / Polymarket checks every 3 minutes,
 #            paid Odds API pulls (~3 credits for a whole sport) only on triggers; hard monthly credit cap.
 #            Started hourly; the concurrency group queues the next start behind the running loop, so a late
 #            GitHub schedule never leaves a gap and two loops never run at once.
@@ -10,6 +10,7 @@ name: Value scanner
 on:
   schedule:
     - cron: '0 14-23,0-3 * * *'
+    - cron: '0 12-13 * * 0,6'   # Sat/Sun from 7 AM ET (early EPL kickoffs)
     - cron: '5 12 * * *'
     - cron: '35 13 * * *'
     - cron: '35 14 * * *'
@@ -54,7 +55,9 @@ jobs:
               NOW=$(date -u +%s); END=$(date -u -d "$(date -u +%Y-%m-%d) 05:00" +%s)
               [ "$END" -le "$NOW" ] && END=$((END + 86400))
               MIN=$(( (END - NOW) / 60 )); [ "$MIN" -gt 330 ] && MIN=330
-              [ "$(date -u +%H)" -ge 5 ] && [ "$(date -u +%H)" -lt 14 ] && { echo "overnight -- nothing to watch"; exit 0; }
+              H=$(date -u +%-H); DOW=$(date -u +%u)   # weekends start at 12 UTC (7 AM ET), weekdays at 14 UTC
+              START=14; [ "$DOW" -ge 6 ] && START=12
+              [ "$H" -ge 5 ] && [ "$H" -lt "$START" ] && { echo "overnight -- nothing to watch"; exit 0; }
             fi
             echo "watching for $MIN minutes"
             python3 scan/scan.py watch --minutes "$MIN"
