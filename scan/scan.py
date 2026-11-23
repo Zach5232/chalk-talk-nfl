@@ -1692,7 +1692,7 @@ def record(found, seen, now):
                 seen[pid] = d_
             continue
         # plays already posted in this game: other side (middle / arb / conflict) or the same team another way
-        notes, edits, skip = [], [], False
+        notes, edits, skip, rel_tags = [], [], False, []
         for o in [x for x in seen.values() if x.get("alerted") and not x.get("superseded") and x["event_id"] == gid
                   and x["sport"] == p["sport"] and x["kind"] in ("h2h", "spread", "total") and x.get("taken") is not False]:
             r1, r2 = region(p), region(o)
@@ -1705,6 +1705,7 @@ def record(found, seen, now):
                 rel = relation(p, o, g)
                 if rel and rel[0] in ("middle", "arb"):
                     notes.append(_taken_note(rel[0], rel[1], o, p))
+                    rel_tags.append(rel[0] + "_with_bet")
                 elif rel:
                     skip = True          # the other side of a bet you hold, with a both-lose gap: don't send
                     break
@@ -1714,6 +1715,7 @@ def record(found, seen, now):
                 if p["ev"] <= o["ev"]:
                     skip = True
                     break
+                rel_tags.append("same_side")
                 notes.append(f"↪️ **Same side** as {o['label']} @ {BOOK_NAMES.get(o['book'], o['book'])} (EV {o['ev']:+.1%}) "
                              f"-- that's one bet on the same result; this is the better way. If you took that one, skip this.")
                 edits.append((o, f"↪️ A better way to bet this side was posted: {p['label']} "
@@ -1728,6 +1730,7 @@ def record(found, seen, now):
                 skip = True   # the play already posted is the better value: don't post the weaker opposite
                 break
             notes.append(_note_for(kind, text, o, better=True))
+            rel_tags.append(kind)
             edits.append((o, _note_for(kind, text, {**p, **extra}, better=False) if kind == "conflict"
                           else _note_for(kind, text, {**p, **extra}, better=True)))
         if skip:
@@ -1768,7 +1771,7 @@ def record(found, seen, now):
             add_buttons(mid)
             doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
                        alerted_at=now.isoformat(), msg_id=mid, first_id=pid, msg_text=text, msg_base=text,
-                       via="bot" if mid in BOT_MSGS else "webhook")
+                       via="bot" if mid in BOT_MSGS else "webhook", **({"rel": sorted(set(rel_tags))} if rel_tags else {}))
             fs_set(f"scan_plays/{pid}", doc)
             seen[pid] = doc
             if mid:
@@ -1804,7 +1807,7 @@ def record(found, seen, now):
         doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
                    alerted_at=now.isoformat(), msg_id=mid, first_id=last.get("first_id") or pid, updated=True,
                    msg_text=text, msg_base=text, taken=last.get("taken"), stake_taken=last.get("stake_taken"),
-                   via=last.get("via"))
+                   via=last.get("via"), **({"rel": sorted(set(rel_tags))} if rel_tags else {}))
         fs_set(f"scan_plays/{pid}", doc)
         seen[pid] = doc
         if mid:
