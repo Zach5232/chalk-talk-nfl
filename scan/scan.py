@@ -1938,13 +1938,13 @@ def live_status(sport, games, quotes_, seen, now, full):
                 bar_ = x.get("bar") or SPORT_BAR.get(sport, 0.02)
                 evp = _ev_now(sport, g, x["kind"], x["side"], x["line"], x["book"], odds, pin_only=True)
                 if ev >= bar_ and evp is not None and evp < bar_:   # the consensus still likes it; Pinnacle moved
-                    state, line_ = "gone", (f"🔴 **Gone** {when} -- same price ({ps} @ {bk}), but Pinnacle moved: "
-                                            f"by Pinnacle alone the edge is now {evp:+.1%} (needs {bar_:.0%})")
+                    state, line_ = "down", (f"🟡 **Value down** {when} -- still {ps} @ {bk}, but Pinnacle moved: "
+                                            f"by Pinnacle alone the edge is now {evp:+.1%} (bar {bar_:.0%}). Your call.")
                 else:
-                    state, line_ = "gone", (f"🔴 **Gone** {when} -- the fair line moved: edge now {ev:+.1%} at {ps} @ {bk} "
-                                            f"(needs {bar_:.0%})")
+                    state, line_ = "down", (f"🟡 **Value down** {when} -- still {ps} @ {bk}, but the fair line moved: "
+                                            f"edge now {ev:+.1%} (bar {bar_:.0%}). Your call.")
             else:
-                state, line_ = "gone", f"🔴 **Gone** {when} -- now {ps} @ {bk}" + (f" (EV {ev:+.1%})" if ev is not None else "")
+                state, line_ = "gone", f"🔴 **Gone** {when} -- no value left: now {ps} @ {bk}" + (f" (EV {ev:+.1%})" if ev is not None else "")
         # Only what changes a decision is shown: 'Gone' when the price dies (removed if it comes back) and
         # 'Game started'. A still-good alert is left alone -- no edits every few minutes.
         prev_state = x.get("status") or "good"
@@ -1954,7 +1954,7 @@ def live_status(sport, games, quotes_, seen, now, full):
         if state == "good":
             line_ = ""
         x.update(status=state, status_line=line_, status_at=now.isoformat())
-        if state == "gone" and not x.get("gone_at"):
+        if state in ("gone", "down") and not x.get("gone_at"):
             x["gone_at"] = now.isoformat()
         if state == "started":
             x["status_final"] = True
