@@ -301,6 +301,8 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
         bar = max(bar, BAR_STRICT)
     if not (bar <= ev <= MAX_EV and ev_pin >= bar):
         return None
+    pin = [l0 for bk, w, l0, q in views if bk == SHARP and l0 is not None]
+    off_main = round(abs(line - pin[0]), 1) if (pin and line is not None) else 0.0
     kelly = ev / pay
     stake = min(kelly * KELLY, MAX_STAKE)
     to_win = bet_size(stake * BANKROLL) * pay
@@ -309,7 +311,7 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None):
     return dict(sport=sport, kind=kind, side=side, line=line, book=book, odds=int(odds), label=label(g, kind, side, line),
                 p_fair=round(pw, 4), fair_odds=american(pw), ev=round(ev, 4), ev_pin=round(ev_pin, 4),
                 stake_pct=round(stake, 4), stake_usd=bet_size(stake * BANKROLL), to_win=round(to_win, 2), good_to=good, bar=bar,
-                price_prob=round(price_prob if price_prob is not None else prob(odds), 4))
+                price_prob=round(price_prob if price_prob is not None else prob(odds), 4), off_main=off_main)
 
 
 def label(g, kind, side, line):
@@ -2025,6 +2027,13 @@ def timing_report(now, days=30):
             ys = [p for p in xs if lo <= hrs(p) < hi]
             cells.append(f"{lo}-{hi if hi < 999 else '+'}h: {len(ys)} @ {sum(p['clv'] for p in ys) / len(ys):+.1%}" if ys else f"{lo}-{hi if hi < 999 else '+'}h: -")
         out.append(f"  {SPORTS[sport]['label']:10s} " + " | ".join(cells))
+    # main line vs alternate lines (points from Pinnacle's line when found)
+    for lo, hi, name in ((0, 0.01, "main line"), (0.01, 1.01, "alt 0.5-1 pt"), (1.01, 3.01, "alt 1.5-3 pts"), (3.01, 99, "alt 3+ pts")):
+        xs = [p for p in ps if p.get("kind") != "h2h" and lo <= (p.get("off_main") or 0) < hi and "off_main" in p]
+        if xs:
+            w = sum(p["result"] == "win" for p in xs); l_ = sum(p["result"] == "loss" for p in xs)
+            out.append(f"  {name:14s} {len(xs):4d}  {sum(p['clv'] for p in xs) / len(xs):+6.2%}  "
+                       f"{sum(p['clv'] > 0 for p in xs) / len(xs):5.0%}  {w}-{l_}")
     # per-sport posting windows can be set with SCAN_POST_WITHIN_<SPORT> once this says so
     for label, sub in (("posted", [p for p in ps if p.get("alerted")]), ("logged only", [p for p in ps if p.get("shadow")])):
         if sub:
