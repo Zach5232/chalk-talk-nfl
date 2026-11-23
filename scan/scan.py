@@ -1131,6 +1131,20 @@ def poly_quotes(sport, games, ml_only=False):
     return out
 
 
+HEALTH = {"exchange_disagree": {}}
+
+
+def note_disagreements(sport, quotes_):
+    by = {}
+    for x in quotes_:
+        if 0.1 < x["prob"] < 0.9:
+            by.setdefault((x["gid"], x["kind"], x["line"], x["side"]), {})[x["book"]] = x["prob"]
+    n = sum(1 for v in by.values() if len(v) >= 2 and max(v.values()) - min(v.values()) > 0.15)
+    if n:
+        d = HEALTH["exchange_disagree"]
+        d[SPORTS[sport]["label"]] = max(d.get(SPORTS[sport]["label"], 0), n)
+
+
 def exchange_quotes(sport, games, ml_only=False):
     """Pregame prices only: games past (or within minutes of) their start are dropped, by our start time or the venue's."""
     cut = datetime.now(timezone.utc) + timedelta(minutes=START_BUFFER_MIN)
@@ -1963,7 +1977,14 @@ def refresh_msg_doc(seen, now):
 
 
 def watch(minutes, sports):
+    global POST
     bot_check()
+    bad = selftest()
+    if bad:   # never post alerts off broken math
+        log(f"SELF-TEST FAILED: {bad} -- alerts paused for this run")
+        discord_send(f"🚨 **Scanner paused:** a math self-test failed ({', '.join(bad)}). No alerts until it's fixed.",
+                     buttons=False)
+        POST = False
     t_end = time.time() + minutes * 60
     seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (datetime.now(timezone.utc) - timedelta(days=2)).isoformat())}
     BOT_MSGS.update(x["msg_id"] for x in seen.values() if x.get("via") == "bot" and x.get("msg_id"))
@@ -2006,6 +2027,7 @@ def watch(minutes, sports):
             q = exchange_quotes(s, S["games"], ml_only=not full) if upcoming else []
             n_quotes += len(q)
             exchange_mids(S["games"], q, now)
+            note_disagreements(s, q)
             # line moves since the last pull
             moved = []
             for gid in upcoming:
@@ -2089,6 +2111,10 @@ def watch(minutes, sports):
     except Exception as e:  # noqa: BLE001
         log(f"end-of-run grade failed: {type(e).__name__}")
     end = datetime.now(timezone.utc)
+    try:
+        fs_set("scan_state/health", {"day": end.astimezone(ET).strftime("%Y-%m-%d"), **HEALTH})
+    except Exception:  # noqa: BLE001
+        pass
     if end.astimezone(ET).hour >= 23 or end.astimezone(ET).hour < 5:   # the night's last run: post the wrap-up
         try:
             txt = day_summary(end)
@@ -2153,6 +2179,10 @@ def morning_report(now):
     recent = [p for p in allp if p.get("found") and datetime.fromisoformat(p["start"]) > now - timedelta(days=30)]
     posted = [p for p in recent if p.get("alerted")]
     logged = [p for p in recent if p.get("test")]
+    try:
+        lines += [""] + health_report(now)
+    except Exception as e:  # noqa: BLE001
+        lines += ["", f"🩺 checks could not run: {type(e).__name__}"]
     lines += ["", "**Scorecard · last 30 days** (posted = alerts · logged = tests, never posted)"]
     lines += _band_lines(logged, [(0.01, 0.02, "1-2% logged")])
     lines += _band_lines(posted, [(0.02, 0.04, "2-4% posted"), (0.04, 0.07, "4-7% posted"), (0.07, 0.121, "7-12% posted")])
@@ -2269,6 +2299,101 @@ def tennis_finals(okey):
     return out
 
 
+def grade_result(p, hs, as_):
+    """win / loss / push for a play given the final home and away scores."""
+    if p["kind"] == "h2h" and (p["side"] == "d" or SPORTS[p["sport"]].get("three_way")):
+        m = hs - as_     # soccer: 90 minutes + stoppage; a draw loses both team bets
+        return "win" if (m == 0) == (p["side"] == "d") and (p["side"] == "d" or (m > 0) == (p["side"] == "a")) else "loss"
+    if p["kind"] == "h2h":
+        m = hs - as_
+    elif p["kind"] == "spread":
+        m = hs - as_ + p["line"]
+    else:
+        m = hs + as_ - p["line"]
+    return "push" if m == 0 else ("win" if (m > 0) == (p["side"] == "a") else "loss")
+
+
+# ---------------- health checks ----------------
+def selftest():
+    """Known answers the math must get right. Any failure stops alerts (returns the list of failures)."""
+    bad = []
+
+    def check(name, ok):
+        if not ok:
+            bad.append(name)
+    check("devig -110/-110 = 50%", abs(devig(prob(-110), prob(-110)) - 0.5) < 1e-6)
+    check("devig sums to 1", abs(devig(prob(-150), prob(130)) + devig(prob(130), prob(-150)) - 1) < 1e-6)
+    check("power devig shades the longshot", devig(prob(950), prob(-1450)) < prob(950) / (prob(950) + prob(-1450)))
+    check("3-way devig sums to 1", abs(sum(devig_n([prob(130), prob(215), prob(240)])) - 1) < 1e-6)
+    check("payout +100 = 1.0", abs(payout(100, "fanduel", "nba") - 1.0) < 1e-9)
+    check("payout -110 = 0.909", abs(payout(-110, "fanduel", "nba") - 100 / 110) < 1e-9)
+    check("Kalshi fee lowers payout", payout(100, "kalshi", "nba") < 1.0 and payout(100, "kalshi", "nba") > 0.93)
+    check("Novig has no pregame fee", abs(payout(100, "novig", "nba") - 1.0) < 1e-9)
+    check("american(0.5) = -100/+100", abs(american(0.5)) == 100)
+    check("price_str exchange cents", price_str(115, "novig", 0.465).startswith("46.5"))
+    g = dict(views={"spread": [[b, w, -4.0, 0.5] for b, w in (("pinnacle", 3), ("fanduel", 1), ("betmgm", 1), ("betrivers", 1))]})
+    pa = fair_side("ncaab", "spread", g["views"]["spread"], -4.0, "a")
+    pb = fair_side("ncaab", "spread", g["views"]["spread"], -4.0, "b")
+    check("fair at the market line = 50%", pa is not None and abs(pa - 0.5) < 1e-6 and abs(pa + pb - 1) < 1e-9)
+    p5 = fair_side("ncaab", "spread", g["views"]["spread"], -5.0, "a")
+    check("laying an extra point lowers the favorite's chance", p5 is not None and 0.42 < p5 < 0.5)
+    t = lambda kind, side, line, hs, as_, sp="nba": grade_result(dict(sport=sp, kind=kind, side=side, line=line), hs, as_)
+    check("home -3.5 wins by 4 = win", t("spread", "a", -3.5, 104, 100) == "win")
+    check("away +3.5 loses by 4 = loss", t("spread", "b", -3.5, 104, 100) == "loss")
+    check("home -4 wins by 4 = push", t("spread", "a", -4.0, 104, 100) == "push")
+    check("over 200.5 at 201 = win", t("total", "a", 200.5, 101, 100) == "win")
+    check("under 200.5 at 201 = loss", t("total", "b", 200.5, 101, 100) == "loss")
+    check("away ML wins", t("h2h", "b", None, 99, 100) == "win")
+    check("soccer draw: home ML loses", t("h2h", "a", None, 1, 1, "epl") == "loss")
+    check("soccer draw: draw wins", t("h2h", "d", None, 1, 1, "epl") == "win")
+    check("soccer: draw loses when home wins", t("h2h", "d", None, 2, 1, "epl") == "loss")
+    return bad
+
+
+def health_report(now):
+    """Daily checks on real plays (last 2 days). Returns lines for the morning report; '' items mean all clear."""
+    ps = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=2)).isoformat()) if not p.get("superseded")]
+    out, warn = [], 0
+    bad = selftest()
+    out.append("🩺 **Checks**")
+    out.append("✅ math self-test passed" if not bad else f"🚨 math self-test FAILED: {', '.join(bad)} -- alerts are paused")
+    warn += bool(bad)
+    al = [p for p in ps if p.get("alerted")]
+    far = [p for p in al if (p.get("fv") or {}).get("pin") is not None and abs(p["p_fair"] - p["fv"]["pin"]) > 0.06]
+    if far:
+        warn += 1
+        out.append(f"⚠️ {len(far)} alert(s) where our fair price was 6+ points from Pinnacle's -- e.g. "
+                   + "; ".join(f"{SPORTS[p['sport']]['label']} {p['label']} ({p['p_fair']:.0%} vs {p['fv']['pin']:.0%})" for p in far[:3]))
+    worse = [p for p in al if p.get("clv") is not None and p["clv"] < -0.08]
+    if worse:
+        warn += 1
+        out.append(f"⚠️ {len(worse)} alert(s) closed 8%+ worse than our price (stale or wrong number?) -- e.g. "
+                   + "; ".join(f"{SPORTS[p['sport']]['label']} {p['label']} @ {BOOK_NAMES.get(p['book'], p['book'])} ({p['clv']:+.0%})" for p in worse[:3]))
+    mism = [p for p in ps if p.get("final_hs") is not None and p.get("result") in ("win", "loss", "push")
+            and grade_result(p, p["final_hs"], p["final_as"]) != p["result"]]
+    if mism:
+        warn += 1
+        out.append(f"🚨 {len(mism)} graded result(s) don't match the saved final score -- e.g. "
+                   + "; ".join(f"{p['label']} ({p['result']})" for p in mism[:3]))
+    nores = [p for p in ps if p.get("result") == "no result"]
+    if nores:
+        out.append(f"ℹ️ {len(nores)} play(s) couldn't be matched to a final score (not graded)")
+    exd = (fs_get("scan_state/health") or {}).get("exchange_disagree") or {}
+    if sum(exd.values()) > 0:
+        out.append("ℹ️ exchange prices disagreeing by 15+ points (same side): " + ", ".join(f"{k} {v}" for k, v in exd.items() if v))
+    recent = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=21)).isoformat())
+              if p.get("alerted") and not p.get("superseded") and p.get("clv") is not None]
+    for sport in SPORTS:
+        xs = sorted((p for p in recent if p["sport"] == sport), key=lambda p: p["start"])[-50:]
+        if len(xs) >= 20 and sum(p["clv"] for p in xs) / len(xs) < -0.005:
+            warn += 1
+            out.append(f"⚠️ {SPORTS[sport]['label']}: last {len(xs)} alerts are LOSING to the close on average "
+                       f"({sum(p['clv'] for p in xs) / len(xs):+.1%}) -- worth a look before betting more of them")
+    if warn == 0:
+        out.append("✅ no pricing, matching or grading problems found")
+    return out
+
+
 def grade():
     now = datetime.now(timezone.utc)
     plays = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=6)).isoformat()) if not p.get("result")
@@ -2290,18 +2415,7 @@ def grade():
             fs_set(f"scan_plays/{p['_id']}", {**{k: v for k, v in p.items() if k != "_id"},
                                              "result": "void: posted after the start", "graded_at": now.isoformat()})
             continue
-        if p["kind"] == "h2h" and (p["side"] == "d" or SPORTS[p["sport"]].get("three_way")):
-            m = f["hs"] - f["as_"]     # soccer: 90 minutes + stoppage; a draw loses both team bets
-            res = "win" if (m == 0) == (p["side"] == "d") and (p["side"] == "d" or (m > 0) == (p["side"] == "a")) else "loss"
-        elif p["kind"] == "h2h":
-            m = f["hs"] - f["as_"]
-            res = "push" if m == 0 else ("win" if (m > 0) == (p["side"] == "a") else "loss")
-        elif p["kind"] == "spread":
-            m = f["hs"] - f["as_"] + p["line"]
-            res = "push" if m == 0 else ("win" if (m > 0) == (p["side"] == "a") else "loss")
-        else:
-            m = f["hs"] + f["as_"] - p["line"]
-            res = "push" if m == 0 else ("win" if (m > 0) == (p["side"] == "a") else "loss")
+        res = grade_result(p, f["hs"], f["as_"])
         pay = payout(p["odds"], p["book"], p["sport"])
         pl = {"win": pay, "loss": -1.0, "push": 0.0}[res]
         doc = {k: v for k, v in p.items() if k != "_id"}
@@ -2314,7 +2428,7 @@ def grade():
         doc.update(result=res, pl_unit=round(pl, 4), pl_usd=round(pl * (p.get("stake_usd") or 0), 2),
                    clv=round(p["p_close"] * (1 + pay) - 1, 4) if p.get("p_close") is not None else None,
                    clv_pin=round(p["p_close_pin"] * (1 + pay) - 1, 4) if p.get("p_close_pin") is not None else None,
-                   graded_at=now.isoformat())
+                   graded_at=now.isoformat(), final_hs=f["hs"], final_as=f["as_"])
         fs_set(f"scan_plays/{p['_id']}", doc)
         done += 1
     allp = [p for p in fs_list("scan_plays") if p.get("result") in ("win", "loss", "push") and p.get("alerted")
