@@ -1423,7 +1423,8 @@ def record(found, seen, now):
         base = dict(**p, event_id=gid, home=g["home"], away=g["away"], start=g["start"], fair_at=g["at"],
                     **({"okey": g["okey"]} if g.get("okey") else {}), **extra)
         hrs_out = (datetime.fromisoformat(g["start"]) - now).total_seconds() / 3600
-        if hrs_out > POST_WITHIN_H and not sib:   # too far out to trust yet: logged and graded (timing test)
+        window = float(os.environ.get(f"SCAN_POST_WITHIN_{p['sport'].upper()}", POST_WITHIN_H))
+        if hrs_out > window and not sib:   # too far out to trust yet: logged and graded (timing test)
             if not prev:
                 d_ = dict(base, found=now.isoformat(), alerted=False, shadow=True, early=True)
                 fs_set(f"scan_plays/{pid}", d_)
@@ -2010,6 +2011,17 @@ def timing_report(now, days=30):
             w = sum(p["result"] == "win" for p in xs); l_ = sum(p["result"] == "loss" for p in xs)
             out.append(f"  {lo:>2}-{hi:<3}h {len(xs):5d}  {sum(p['clv'] for p in xs) / len(xs):+6.2%}  "
                        f"{sum(p['clv'] > 0 for p in xs) / len(xs):5.0%}  {w}-{l_}")
+    hrs = lambda p: (datetime.fromisoformat(p["start"]) - datetime.fromisoformat(p["found"])).total_seconds() / 3600
+    for sport in SPORTS:   # by sport: under / over 6 and 12 hours (NHL moves late on goalies, NFL early in the week...)
+        xs = [p for p in ps if p.get("sport") == sport]
+        if len(xs) < 5:
+            continue
+        cells = []
+        for lo, hi in ((0, 6), (6, 12), (12, 999)):
+            ys = [p for p in xs if lo <= hrs(p) < hi]
+            cells.append(f"{lo}-{hi if hi < 999 else '+'}h: {len(ys)} @ {sum(p['clv'] for p in ys) / len(ys):+.1%}" if ys else f"{lo}-{hi if hi < 999 else '+'}h: -")
+        out.append(f"  {SPORTS[sport]['label']:10s} " + " | ".join(cells))
+    # per-sport posting windows can be set with SCAN_POST_WITHIN_<SPORT> once this says so
     for label, sub in (("posted", [p for p in ps if p.get("alerted")]), ("logged only", [p for p in ps if p.get("shadow")])):
         if sub:
             out.append(f"  {label:12s} {len(sub):5d}  {sum(p['clv'] for p in sub) / len(sub):+6.2%}  "
