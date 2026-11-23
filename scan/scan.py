@@ -2069,6 +2069,7 @@ def watch(minutes, sports):
                 except Exception as e:  # noqa: BLE001 -- alternates never stop the scan
                     log(f"[{s}] alternate lines: {type(e).__name__}: {str(e)[:80]}")
             if found:
+                apply_taps(seen)   # your latest taps (Bet it / Line moved / Pass) count before anything new is posted
                 n_alerts += record(found, seen, now)
             try:
                 n_edits += live_status(s, S["games"], q, seen, now, full or bool(reasons and S["pulled"] == now.isoformat()))
