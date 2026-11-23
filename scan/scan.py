@@ -2261,6 +2261,9 @@ def morning_report(now):
     if done.get("day") == yday:   # several grade runs a morning (GitHub's schedule is unreliable): post once
         log(f"morning report for {yday} already posted")
         return
+    if now.astimezone(ET).hour >= 12:   # GitHub can start a morning grade hours late: a report after noon is noise
+        log(f"morning report for {yday} skipped (too late in the day)")
+        return
     allp = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=60)).isoformat())
             if not p.get("superseded") and p.get("result") in ("win", "loss", "push")]
     day_of = lambda p: datetime.fromisoformat(p["start"]).astimezone(ET).strftime("%Y-%m-%d")

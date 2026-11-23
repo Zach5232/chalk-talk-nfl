@@ -25,6 +25,10 @@ concurrency:
   group: scan-${{ (inputs.mode == 'grade' || inputs.mode == 'books' || inputs.mode == 'cbbbooks' || inputs.mode == 'taken' || inputs.mode == 'cfbrecord' || inputs.mode == 'timing' || inputs.mode == 'day' || inputs.mode == 'altprobe' || inputs.mode == 'fields' || (github.event.schedule == '5 12 * * *' || github.event.schedule == '35 13 * * *' || github.event.schedule == '35 14 * * *')) && 'grade' || 'watch' }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: write   # a finished watch loop starts the next one (GitHub's hourly schedule mostly doesn't fire)
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -57,10 +61,20 @@ jobs:
               MIN=$(( (END - NOW) / 60 )); [ "$MIN" -gt 330 ] && MIN=330
               H=$(date -u +%-H); DOW=$(date -u +%u)   # weekends start at 12 UTC (7 AM ET), weekdays at 14 UTC
               START=14; [ "$DOW" -ge 6 ] && START=12
-              [ "$H" -ge 5 ] && [ "$H" -lt "$START" ] && { echo "overnight -- nothing to watch"; exit 0; }
+              if [ "$H" -ge 5 ] && [ "$H" -lt "$START" ]; then
+                # overnight: wait (free on a public repo) until the morning start, at most 5.5h, then hand off
+                WAKE=$(date -u -d "$(date -u +%Y-%m-%d) $START:00" +%s); WAIT=$(( WAKE - NOW )); [ "$WAIT" -gt 19800 ] && WAIT=19800
+                echo "overnight -- waiting $((WAIT / 60)) minutes"; sleep "$WAIT"; exit 0
+              fi
+              python3 scan/scan.py grade || true   # finals + the morning report (posts once, mornings only)
             fi
             echo "watching for $MIN minutes"
             python3 scan/scan.py watch --minutes "$MIN"
           else
             python3 scan/scan.py $MODE
           fi
+      - name: Start the next watch loop
+        if: ${{ !cancelled() && (inputs.mode == 'watch' || (github.event_name == 'schedule' && github.event.schedule != '5 12 * * *' && github.event.schedule != '35 13 * * *' && github.event.schedule != '35 14 * * *')) && (inputs.minutes == '' || inputs.minutes == null) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run scan.yml --repo "${{ github.repository }}" --ref master -f mode=watch
