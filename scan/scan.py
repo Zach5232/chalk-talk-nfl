@@ -2540,11 +2540,13 @@ def morning_report(now):
     and the scorecard for every edge size, posted and logged."""
     yday = (now.astimezone(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
     done = fs_get("scan_state/morning") or {}
-    if done.get("day") == yday:   # several grade runs a morning (GitHub's schedule is unreliable): post once
+    early = lambda iso: datetime.fromisoformat(iso).astimezone(ET).hour < 6
+    if done.get("day") == yday and not (done.get("at") and early(done["at"])):   # post once a morning
         log(f"morning report for {yday} already posted")
         return
-    if now.astimezone(ET).hour >= 12:   # GitHub can start a morning grade hours late: a report after noon is noise
-        log(f"morning report for {yday} skipped (too late in the day)")
+    h_et = now.astimezone(ET).hour
+    if not 6 <= h_et < 12:   # mornings only: late-night grades miss West Coast finals; after noon is noise
+        log(f"morning report for {yday} not posted (outside 6 AM - noon ET)")
         return
     allp = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=60)).isoformat())
             if not p.get("superseded") and p.get("result") in ("win", "loss", "push")]

@@ -68,6 +68,7 @@ jobs:
                 WAKE=$(date -u -d "$(date -u +%Y-%m-%d) $START:00" +%s); WAIT=$(( WAKE - NOW )); [ "$WAIT" -gt 19800 ] && WAIT=19800
                 echo "overnight -- waiting $((WAIT / 60)) minutes"; sleep "$WAIT"; exit 0
               fi
+              [ "$MIN" -lt 10 ] && { echo "under 10 minutes left tonight -- handing off"; exit 0; }
               python3 scan/scan.py grade || true   # finals + the morning report (posts once, mornings only)
             fi
             echo "watching for $MIN minutes"
