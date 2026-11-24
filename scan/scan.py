@@ -1306,6 +1306,25 @@ def px_probe():
         print(f"[{sp}] upcoming games {len(g_)}, matched {len({x['gid'] for x in q_})}, prices {len(q_)} "
               f"(ML {sum(x['kind'] == 'h2h' for x in q_)}, spread {sum(x['kind'] == 'spread' for x in q_)}, "
               f"total {sum(x['kind'] == 'total' for x in q_)}), clearing the bar now {n_ok}")
+    # soccer: which market types an upcoming EPL / Champions League match carries, and how its moneyline is shaped
+    socc = [e for e in px_events() if e.get("tournament_name") in ("Premier League", "UEFA Champions League", "Major League Soccer")
+            and e.get("status") == "not_started" and e.get("competitors")]
+    print(f"soccer events upcoming: {len(socc)}")
+    if socc:
+        e = socc[0]
+        ms = px_get("/v4/mm/get_markets", {"event_id": e["event_id"]}) or []
+        if isinstance(ms, dict):
+            ms = ms.get("markets") or list(ms.values())
+        print("  sample:", e.get("name"), "|", e.get("tournament_name"))
+        subs = {}
+        for m in ms:
+            if isinstance(m, dict):
+                subs[(m.get("type"), m.get("sub_type"), m.get("name"))] = m
+        for (t, st_, nm), m in sorted(subs.items(), key=lambda kv: str(kv[0]))[:40]:
+            sel = m.get("selections") or []
+            names = [(sd[0] if isinstance(sd, list) and sd else sd).get("name") for sd in sel if sd] if sel else \
+                [f"{len(m.get('market_strikes') or [])} strikes"]
+            print(f"   {t} / {st_} / {nm}: {names[:4]}")
     if os.environ.get("PX_PROBE_FULL") != "1":
         return
     ts = (px_get("/mm/get_tournaments") or {}).get("tournaments") or []
