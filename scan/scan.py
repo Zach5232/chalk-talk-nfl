@@ -92,7 +92,7 @@ SHARP = "pinnacle"
 #   the rest  -- pricing only (Pinnacle): sharpens the consensus fair line but is never alerted
 # No DraftKings (unfunded), Fanatics or Bovada.
 # Kalshi and Polymarket come from their free feeds every minute, so they don't take paid slots.
-BOOKS = ["pinnacle", "novig", "prophetx", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag", "williamhill_us",
+BOOKS = ["pinnacle", "novig", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag", "williamhill_us",
          "espnbet"]
 BET_BOOKS = {"novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag",
              "williamhill_us", "espnbet"}
@@ -783,12 +783,19 @@ def pull(sport, now, st, reason):
         events += evs
     charge(st, now, cost)
     games, plays, for_tally = {}, [], []
+    try:
+        pxr = px_rows(sport, events) if "prophetx" not in BOOKS else {}
+    except Exception as e:  # noqa: BLE001 -- ProphetX down never stops a pull
+        log(f"[{sport}] prophetx rows: {type(e).__name__}: {str(e)[:80]}")
+        pxr = {}
     bq = BOOK_Q.setdefault(sport, {})
     bq.clear()
     BOOK_Q_AT[sport] = now
     for ev in events:
         three = bool(SPORTS[sport].get("three_way"))
         q = quotes(ev, three)
+        for k_, rws in (pxr.get(ev["id"]) or {}).items():
+            q.setdefault(k_, []).extend(rws)
         if not any(r_["book"] == SHARP for rows in q.values() for r_ in rows):
             continue
         upd = {}
@@ -1189,6 +1196,92 @@ def px_get(path, params=None):
     return (r.json() or {}).get("data")
 
 
+PX_LEAGUE = {"nba": "NBA", "ncaab": "College Basketball", "nhl": "NHL", "nfl": "NFL", "ncaaf": "College Football"}
+PX_EVENTS = {}
+
+
+def px_events():
+    """Every listed ProphetX event, re-read at most every 5 minutes (one call covers all sports)."""
+    if time.time() - PX_EVENTS.get("at", 0) > 300:
+        PX_EVENTS.update(at=time.time(), evs=(px_get("/mm/get_sport_events") or {}).get("sport_events") or [])
+    return PX_EVENTS["evs"]
+
+
+def px_quotes(sport, games, ml_only=False):
+    """ProphetX game lines from your own Trading API key: the best price to buy each side (top of its ladder)."""
+    lg = PX_LEAGUE.get(sport)
+    if not lg or not games or not os.environ.get("PROPHETX_ACCESS_KEY"):
+        return []
+    mine = {}
+    for e in px_events():
+        if e.get("tournament_name") != lg or e.get("status") not in ("not_started", None):
+            continue
+        cs = {c.get("side"): c.get("name") for c in e.get("competitors") or []}
+        if not (cs.get("home") and cs.get("away")):
+            continue
+        st = datetime.fromisoformat(e["scheduled"].replace("Z", "+00:00")) if e.get("scheduled") else None
+        hit = find_game(games, cs["home"], cs["away"], start=st)
+        if hit and hit[2]:
+            mine[str(e["event_id"])] = (hit[0], hit[1], cs, st)
+    out = []
+    ids = list(mine)
+    for i in range(0, len(ids), 60):
+        d = px_get("/v4/mm/get_multiple_markets", {"event_ids": ",".join(ids[i:i + 60])}) or {}
+        if isinstance(d, list):   # documented quirk: sometimes a flat list of markets
+            grouped = {}
+            for m in d:
+                grouped.setdefault(str(m.get("event_id")), []).append(m)
+            d = grouped
+        for eid, ms in d.items():
+            if eid not in mine:
+                continue
+            gid, g, cs, st = mine[eid]
+            for m in ms or []:
+                sub = m.get("sub_type")
+                if sub not in ("moneyline", "spread", "total") or (ml_only and sub != "moneyline"):
+                    continue
+                groups = [m] if sub == "moneyline" else (m.get("market_strikes") or [])
+                for grp in groups:
+                    for sd in grp.get("selections") or []:
+                        sd = sd if isinstance(sd, list) else [sd]
+                        top = next((x for x in sd if x.get("price") is not None), None)
+                        if not top:
+                            continue
+                        p_ = prob(top["price"])
+                        name = (top.get("name") or "").strip()
+                        if sub == "total":
+                            t = re.match(r"(over|under)\s+([\d.]+)", name, re.I)
+                            if t:
+                                out.append(ex_quote(gid, g, "total", "a" if t.group(1).lower() == "over" else "b",
+                                                    float(t.group(2)), "prophetx", p_, 0, st))
+                            continue
+                        team = re.sub(r"\s+[+-]?[\d.]+$", "", name) if sub == "spread" else name
+                        side = "a" if norm(team) == norm(cs["home"]) else "b" if norm(team) == norm(cs["away"]) else None
+                        if not side:
+                            continue
+                        if sub == "moneyline":
+                            out.append(ex_quote(gid, g, "h2h", side, None, "prophetx", p_, 0, st))
+                        elif top.get("strike") is not None:
+                            h = float(top["strike"])
+                            out.append(ex_quote(gid, g, "spread", side, h if side == "a" else -h, "prophetx", p_, 0, st))
+    return out
+
+
+def px_rows(sport, events):
+    """ProphetX rows for a paid pull's events, in quotes() format, so it still counts in the fair line without
+    taking a paid bookmaker slot."""
+    games = {ev["id"]: dict(home=ev["home_team"], away=ev["away_team"], start=ev["commence_time"].replace("Z", "+00:00"))
+             for ev in events}
+    by = {}
+    for x in px_quotes(sport, games):
+        by.setdefault((x["gid"], x["kind"], x["line"]), {})[x["side"]] = x["odds"]
+    rows = {}
+    for (gid, kind, line), sides in by.items():
+        if "a" in sides and "b" in sides and 0.97 < prob(sides["a"]) + prob(sides["b"]) < 1.15:
+            rows.setdefault(gid, {}).setdefault(kind, []).append(dict(book="prophetx", line=line, a=sides["a"], b=sides["b"]))
+    return rows
+
+
 def px_probe():
     """Counts and names only (this log is public): can we log in, which tournaments, what a market looks like."""
     if not os.environ.get("PROPHETX_ACCESS_KEY"):
@@ -1261,7 +1354,7 @@ def exchange_quotes(sport, games, ml_only=False):
     cut = datetime.now(timezone.utc) + timedelta(minutes=START_BUFFER_MIN)
     games = {k: g for k, g in games.items() if datetime.fromisoformat(g["start"]) > cut}
     res = []
-    for name, fn in (("novig", novig_quotes), ("kalshi", kalshi_quotes), ("polymarket", poly_quotes)):
+    for name, fn in (("novig", novig_quotes), ("kalshi", kalshi_quotes), ("polymarket", poly_quotes), ("prophetx", px_quotes)):
         try:
             res += fn(sport, games, ml_only)
         except Exception as e:  # noqa: BLE001 -- one venue down never stops the scan
@@ -2003,7 +2096,7 @@ def record(found, seen, now):
 
 
 # ---------------- live status on posted alerts ----------------
-FREE_FEED = {"novig", "kalshi", "polymarket"}
+FREE_FEED = {"novig", "kalshi", "polymarket", "prophetx"}
 
 
 def status_suffix(x):
