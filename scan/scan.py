@@ -1145,6 +1145,79 @@ def note_disagreements(sport, quotes_):
         d[SPORTS[sport]["label"]] = max(d.get(SPORTS[sport]["label"], 0), n)
 
 
+# ---------------- ProphetX Trading API (your own key pair; read-only use: tournaments, events, markets) ----------------
+PX = "https://cash.api.prophetx.co/partner"
+PX_TOK = {}
+
+
+def px_token():
+    """Bearer token: one login per run, refreshed before its 10-minute expiry (each login opens a session slot)."""
+    ak, sk = os.environ.get("PROPHETX_ACCESS_KEY"), os.environ.get("PROPHETX_SECRET_KEY")
+    if not (ak and sk):
+        return None
+    now = time.time()
+    if PX_TOK.get("access") and now < PX_TOK["exp"]:
+        return PX_TOK["access"]
+    d = None
+    if PX_TOK.get("refresh"):
+        r = requests.post(f"{PX}/auth/refresh", json={"refresh_token": PX_TOK["refresh"]}, timeout=20)
+        if r.ok:
+            d = (r.json() or {}).get("data")
+    if not d:
+        r = requests.post(f"{PX}/auth/login", json={"access_key": ak, "secret_key": sk}, timeout=20)
+        r.raise_for_status()
+        d = (r.json() or {}).get("data")
+    PX_TOK.update(access=d["access_token"], refresh=d.get("refresh_token") or PX_TOK.get("refresh"), exp=now + 8 * 60)
+    return PX_TOK["access"]
+
+
+def px_get(path, params=None):
+    tok = px_token()
+    if not tok:
+        return None
+    r = requests.get(f"{PX}{path}", params=params, timeout=20,
+                     headers={"Authorization": f"Bearer {tok}", "Accept-Encoding": "gzip"})
+    r.raise_for_status()
+    return (r.json() or {}).get("data")
+
+
+def px_probe():
+    """Counts and names only (this log is public): can we log in, which tournaments, what a market looks like."""
+    if not os.environ.get("PROPHETX_ACCESS_KEY"):
+        return print("PROPHETX_ACCESS_KEY / PROPHETX_SECRET_KEY secrets not set")
+    try:
+        px_token()
+    except Exception as e:  # noqa: BLE001
+        return print(f"login failed: {type(e).__name__}: {str(e)[:150]}")
+    print("login ok")
+    ts = (px_get("/mm/get_tournaments") or {}).get("tournaments") or []
+    print(f"tournaments: {len(ts)}")
+    for t in ts:
+        print(f"  {t.get('id')}  {t.get('name')}  ({(t.get('sport') or {}).get('name')})")
+    want = [t for t in ts if re.search(r"\bNBA\b", t.get("name") or "")][:1]
+    if not want:
+        return
+    evs = (px_get("/mm/get_sport_events", {"tournament_id": want[0]["id"]}) or {}).get("sport_events") or []
+    print(f"NBA events: {len(evs)}; first keys: {sorted(evs[0].keys()) if evs else None}")
+    if not evs:
+        return
+    e = evs[0]
+    print("  event:", e.get("name"), "|", e.get("scheduled"), "|", [(c.get("name"), c.get("side")) for c in e.get("competitors") or []])
+    ms = px_get("/v4/mm/get_markets", {"event_id": e["event_id"]}) or []
+    if isinstance(ms, dict):
+        ms = ms.get("markets") or list(ms.values())
+    print(f"  markets: {len(ms)}; types: {sorted({m.get('type') for m in ms if isinstance(m, dict)})}")
+    for m in [m for m in ms if isinstance(m, dict) and m.get("type") in ("moneyline", "spread", "total")][:4]:
+        sel = m.get("selections") or []
+        print(f"   {m.get('type')} / {m.get('sub_type')} / {m.get('name')}: {len(sel)} sides; market keys {sorted(m.keys())}")
+        for side in sel[:2]:
+            side = side if isinstance(side, list) else [side]
+            print("     side:", [(x.get("name"), x.get("strike"), "price" if x.get("price") is not None else "no price",
+                                  "qty" if x.get("quantity") else "no qty") for x in side[:3]], f"({len(side)} levels)")
+            if side:
+                print("     selection keys:", sorted(side[0].keys()))
+
+
 def exchange_quotes(sport, games, ml_only=False):
     """Pregame prices only: games past (or within minutes of) their start are dropped, by our start time or the venue's."""
     cut = datetime.now(timezone.utc) + timedelta(minutes=START_BUFFER_MIN)
@@ -2670,7 +2743,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields"])
+                                     "altprobe", "fields", "pxprobe"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -2683,6 +2756,8 @@ def main():
         except Exception as e:  # noqa: BLE001
             log(f"morning report failed: {type(e).__name__}: {str(e)[:100]}")
         return
+    if a.mode == "pxprobe":
+        return px_probe()
     if a.mode == "altprobe":   # which books return alternate spreads / totals (counts only), ~2 credits per sport
         key = os.environ["ODDS_API_KEY"]
         for sk in ("basketball_nba", "icehockey_nhl", "americanfootball_nfl", "basketball_ncaab", "soccer_epl"):
