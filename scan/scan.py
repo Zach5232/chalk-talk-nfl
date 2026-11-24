@@ -2958,7 +2958,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe", "mybooks", "listen"])
+                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -2970,6 +2970,40 @@ def main():
             morning_report(datetime.now(timezone.utc))
         except Exception as e:  # noqa: BLE001
             log(f"morning report failed: {type(e).__name__}: {str(e)[:100]}")
+        return
+    if a.mode == "yday":   # yesterday (ET) in one look -- counts, records, CLV; no dollar amounts (public log)
+        now = datetime.now(timezone.utc)
+        yd = (now.astimezone(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
+        ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(days=3)).isoformat())
+              if not x.get("superseded") and datetime.fromisoformat(x["start"]).astimezone(ET).strftime("%Y-%m-%d") == yd]
+        res = lambda x, mine: (x.get("result_taken") or x.get("result")) if mine else x.get("result")
+        def line(lab, xs, mine=False):
+            g_ = [x for x in xs if res(x, mine) in ("win", "loss", "push")]
+            w = sum(res(x, mine) == "win" for x in g_); l_ = sum(res(x, mine) == "loss" for x in g_)
+            ex = sum(x.get("p_fair") or 0 for x in g_ if res(x, mine) != "push")
+            cv = [c for c in ((x.get("clv_taken") if mine else x.get("clv")) for x in g_) if c is not None]
+            cp = [x["clv_pin"] for x in g_ if x.get("clv_pin") is not None] if not mine else []
+            roi_d = [x for x in g_ if (x.get("stake_taken") or x.get("stake_usd"))]
+            st_ = sum((x.get("stake_taken") if mine else x.get("stake_usd")) or 0 for x in roi_d)
+            pl = sum(((x.get("pl_taken_usd") if mine else x.get("pl_usd")) or 0) for x in roi_d)
+            print(f"{lab:22s} {len(xs):3d} plays, graded {len(g_)}: {w}-{l_} (fair line expected {ex:.1f} wins), "
+                  f"ROI {pl / st_ if st_ else 0:+.1%}"
+                  + (f", beat close {sum(c > 0 for c in cv)}/{len(cv)} avg CLV {sum(cv) / len(cv):+.2%}" if cv else ", no closes")
+                  + (f", vs Pinnacle close {sum(cp) / len(cp):+.2%}" if cp else ""))
+        print(f"day: {yd}")
+        mine = [x for x in ps if x.get("taken")]
+        line("your bets", mine, True)
+        for k in ("h2h", "spread", "total"):
+            line(f"  your {k}", [x for x in mine if x["kind"] == k], True)
+        line("  your main line", [x for x in mine if not x.get("off_main")], True)
+        line("  your off-main <3", [x for x in mine if 0 < (x.get("off_main") or 0) < 3], True)
+        line("  your off-main 3+", [x for x in mine if (x.get("off_main") or 0) >= 3], True)
+        post = [x for x in ps if x.get("alerted")]
+        line("all alerts", post)
+        for s_ in sorted({x["sport"] for x in post}):
+            line(f"  alerts {SPORTS[s_]['label']}", [x for x in post if x["sport"] == s_])
+        line("logged tests (1-2%)", [x for x in ps if x.get("test")])
+        line("DraftKings (log-only)", [x for x in ps if x.get("book") == "draftkings"])
         return
     if a.mode == "listen":
         return listen(a.minutes)
