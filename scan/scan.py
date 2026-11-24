@@ -2962,6 +2962,11 @@ def main():
                          f"{sum(res(x) == 'loss' for x in done)} · {sum(x.get('pl_taken_usd') or 0 for x in done):+,.2f} "
                          f"on ${sum(stake(x) for x in done):,.0f} staked · open {len(open_)} (${sum(stake(x) for x in open_):,.0f} riding)"
                          + (f" · beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})" if ct else ""))
+            st_ = sum(stake(x) for x in done)
+            print(f"{BOOK_NAMES.get(bk, bk)}: {len(xs)} bets, settled {sum(res(x) == 'win' for x in done)}-"
+                  f"{sum(res(x) == 'loss' for x in done)}, ROI {(sum(x.get('pl_taken_usd') or 0 for x in done) / st_ if st_ else 0):+.1%}, "
+                  f"open {len(open_)} ({sum(stake(x) for x in open_) / max(1, st_ + sum(stake(x) for x in open_)):.0%} of money staked)"
+                  + (f", beat close {sum(c > 0 for c in ct)}/{len(ct)} avg {sum(ct) / len(ct):+.1%}" if ct else ", no CLV yet"))
         discord_send("\n".join(lines), buttons=False)
         return print(f"posted to Discord ({len(ps)} bets)")
     if a.mode == "pxprobe":
