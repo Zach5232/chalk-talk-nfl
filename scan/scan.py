@@ -2355,6 +2355,25 @@ def refresh_msg_doc(seen, now):
                and datetime.fromisoformat(x["start"]) > now - timedelta(hours=6)}
 
 
+def listen(minutes):
+    """Overnight: no prices pulled, just Bet it / Line moved / Pass taps on alerts (e.g. tomorrow's early games)."""
+    if not bot_on():
+        return time.sleep(minutes * 60)
+    t_end = time.time() + minutes * 60
+    now = datetime.now(timezone.utc)
+    seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (now - timedelta(days=2)).isoformat())}
+    BOT_MSGS.update(x["msg_id"] for x in seen.values() if x.get("via") == "bot" and x.get("msg_id"))
+    refresh_msg_doc(seen, now)
+    threading.Thread(target=gateway, daemon=True).start()
+    log(f"listening for taps for {minutes:.0f} minutes ({len(MSG_DOC)} alerts open)")
+    while time.time() < t_end:
+        time.sleep(min(20, max(0, t_end - time.time())))
+        refresh_msg_doc(seen, datetime.now(timezone.utc))
+        n = apply_taps(seen)
+        if n:
+            log(f"applied {n} tap(s)")
+
+
 def watch(minutes, sports):
     global POST
     bot_check()
@@ -2496,9 +2515,11 @@ def watch(minutes, sports):
         pass
     if end.astimezone(ET).hour >= 23 or end.astimezone(ET).hour < 5:   # the night's last run: post the wrap-up
         try:
-            txt = day_summary(end)
+            wday = (end - timedelta(hours=5)).astimezone(ET).strftime("%Y-%m-%d")
+            txt = day_summary(end) if (fs_get("scan_state/wrapup") or {}).get("day") != wday else None
             if txt:
                 discord_send(txt, buttons=False)
+                fs_set("scan_state/wrapup", {"day": wday, "at": end.isoformat()})
         except Exception as e:  # noqa: BLE001
             log(f"summary failed: {type(e).__name__}")
 
@@ -2937,7 +2958,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe", "mybooks"])
+                                     "altprobe", "fields", "pxprobe", "mybooks", "listen"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -2950,6 +2971,8 @@ def main():
         except Exception as e:  # noqa: BLE001
             log(f"morning report failed: {type(e).__name__}: {str(e)[:100]}")
         return
+    if a.mode == "listen":
+        return listen(a.minutes)
     if a.mode == "mybooks":   # your logged bets by book -> Discord only (dollar amounts stay out of this public log)
         now = datetime.now(timezone.utc)
         ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(days=30)).isoformat())
