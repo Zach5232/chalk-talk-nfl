@@ -1554,6 +1554,25 @@ def parse_reply(text):
     return stake, odds, price
 
 
+BOOK_ALIASES = {"dk": "draftkings", "draft kings": "draftkings", "fd": "fanduel", "mgm": "betmgm", "caesars": "williamhill_us",
+                "czr": "williamhill_us", "score": "espnbet", "thescore": "espnbet", "espn": "espnbet", "bally": "ballybet",
+                "rivers": "betrivers", "betonline": "betonlineag", "bol": "betonlineag", "px": "prophetx", "prophet": "prophetx",
+                "poly": "polymarket"}
+
+
+def match_book(text):
+    t = re.sub(r"[^a-z ]", "", (text or "").lower()).strip()
+    if not t:
+        return None
+    if t in BOOK_ALIASES:
+        return BOOK_ALIASES[t]
+    for k, v in BOOK_NAMES.items():
+        if t == k or t == re.sub(r"[^a-z ]", "", v.lower()).strip() or t.replace(" ", "") == re.sub(r"[^a-z]", "", v.lower()):
+            return k
+    hits = [k for k, v in BOOK_NAMES.items() if t.replace(" ", "") in re.sub(r"[^a-z]", "", v.lower())]
+    return hits[0] if len(hits) == 1 else None
+
+
 def taps_from_text(content, x):
     """Read the tap line the scanner wrote on an alert ('✅ You bet $10 at 45.5¢ (+120)', '❌ Missed -- line moved',
     '❌ Passed') back into record fields."""
@@ -1562,7 +1581,10 @@ def taps_from_text(content, x):
         stake = float(m.group(1))
         odds = int(m.group(3) or m.group(4))
         pr = float(m.group(2)) / 100 if m.group(2) else None
-        return dict(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr, status_final=True, restored=True)
+        bk = re.search(r"✅ \*\*You bet\*\*[^\n]*? @ ([^\n(]+?)\s*$", content, re.M)
+        tb = match_book(bk.group(1)) if bk else None
+        return dict(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr, status_final=True, restored=True,
+                    **({"taken_book": tb} if tb and tb != x.get("book") else {}))
     if "❌ **Missed -- line moved**" in content:
         return dict(taken=False, pass_reason="line moved", status_final=True, restored=True)
     if "💸 **No funds**" in content:
@@ -1700,7 +1722,10 @@ def _answer(it):
                                             "value": f"{stake:g}" if stake != "" else "", "required": True, "max_length": 10}]},
                 {"type": 1, "components": [{"type": 4, "custom_id": "price", "style": 1, "required": True, "max_length": 10,
                                             "label": ("Price in cents (e.g. 46.5)" if x["book"] in EXCHANGES
-                                                      else "Odds (e.g. -115)"), "value": _default_price(x)}]}]}})
+                                                      else "Odds (e.g. -115)"), "value": _default_price(x)}]},
+                {"type": 1, "components": [{"type": 4, "custom_id": "book", "style": 1, "required": False, "max_length": 20,
+                                            "label": "Book, if not the alert's (blank = same)",
+                                            "placeholder": BOOK_NAMES.get(x["book"], x["book"])[:100] or "same"}]}]}})
         if it["type"] == 5 and it["data"]["custom_id"].startswith("moved:"):
             mid = it["data"]["custom_id"].split(":", 1)[1]
             vals = {c["components"][0]["custom_id"]: c["components"][0].get("value", "").strip()
@@ -1727,9 +1752,17 @@ def _answer(it):
                 odds, pr = parse_price(vals["price"])
             except (ValueError, KeyError):
                 return note("Couldn't read that -- amount like 10, price like 46.5 (cents) or -110 (odds). Tap Bet it again.")
-            TAPS.put((mid, "bet", stake, odds, pr))
             x = MSG_DOC.get(mid) or {"book": "", "odds": odds}
-            return note(f"Logged ✅ ${stake:g} at {price_str(odds, x['book'], pr)}")
+            bk = None
+            if (vals.get("book") or "").strip():
+                bk = match_book(vals["book"])
+                if not bk:
+                    return note(f"Didn't recognize the book '{vals['book'].strip()}' -- try e.g. Kalshi, FanDuel, BetMGM. "
+                                "Tap Bet it again.")
+            bk = bk if bk and bk != x.get("book") else None
+            TAPS.put((mid, "bet", stake, odds, pr, time.time(), bk))
+            shown = bk or x["book"]
+            return note(f"Logged ✅ ${stake:g} at {price_str(odds, shown, pr)}" + (f" @ {BOOK_NAMES.get(bk, bk)}" if bk else ""))
     except Exception as e:  # noqa: BLE001
         log(f"button answer failed: {type(e).__name__}")
 
@@ -1786,10 +1819,11 @@ def apply_taps(seen):
             break
         mid, what, stake, odds, pr = item[:5]
         tapped = item[5] if len(item) > 5 else time.time()
+        tbk = item[6] if len(item) > 6 else None
         x = MSG_DOC.get(mid)
         if not x:   # the scan doesn't know this alert yet (e.g. just restarted): keep the tap and retry for 30 min
             if time.time() - tapped < 1800:
-                later.append((mid, what, stake, odds, pr, tapped))
+                later.append((mid, what, stake, odds, pr, tapped, tbk))
             continue
         if what == "pass":
             x.update(taken=False, pass_reason="didn't want it")
@@ -1808,8 +1842,9 @@ def apply_taps(seen):
                 bits.append(price_str(odds, x["book"], pr))
             line = "❌ **Missed -- line moved**" + (f" (now {' '.join(bits)})" if bits else "")
         else:
-            x.update(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr)
-            line = f"✅ **You bet** ${stake:g} at {price_str(odds, x['book'], pr)}"
+            x.update(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr, taken_book=tbk)
+            line = f"✅ **You bet** ${stake:g} at {price_str(odds, tbk or x['book'], pr)}" + \
+                (f" @ {BOOK_NAMES.get(tbk, tbk)}" if tbk else "")
         x.update(status_line=line, status_final=True, tapped_at=datetime.now(timezone.utc).isoformat())
         discord_send((x.get("msg_text") or alert_text(x, x)) + "\n" + line, edit_id=mid)
         fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
@@ -2551,7 +2586,8 @@ def _price_lines(xs, mine=False):
     """Record / profit / CLV by price range (heavy favorites vs the middle vs underdogs)."""
     out = []
     for lo, hi, label in PRICE_BANDS:
-        ys = [p for p in xs if lo <= payout((p.get("taken_odds") if mine else None) or p["odds"], p["book"], p["sport"]) < hi]
+        ys = [p for p in xs if lo <= payout((p.get("taken_odds") if mine else None) or p["odds"],
+                                            (p.get("taken_book") if mine else None) or p["book"], p["sport"]) < hi]
         if not ys:
             continue
         res = (lambda p: p.get("result_taken") or p["result"]) if mine else (lambda p: p["result"])
@@ -2597,10 +2633,10 @@ def morning_report(now):
         for p in mine_day[:25]:
             res = p.get("result_taken") or p["result"]
             stake = p.get("stake_taken") or p.get("stake_usd") or 0
-            ps_ = price_str(p.get("taken_odds") or p["odds"], p["book"], p.get("taken_price"))
+            ps_ = price_str(p.get("taken_odds") or p["odds"], p.get("taken_book") or p["book"], p.get("taken_price"))
             c = p.get("clv_taken")
             lines.append(f"{icon[res]} {SPORTS[p['sport']]['label']} {p['label']} · ${stake:g} @ {ps_} "
-                         f"{BOOK_NAMES.get(p['book'], p['book'])} · {p.get('pl_taken_usd') or 0:+.2f}"
+                         f"{BOOK_NAMES.get(p.get('taken_book') or p['book'], p.get('taken_book') or p['book'])} · {p.get('pl_taken_usd') or 0:+.2f}"
                          + (f" · CLV {c:+.1%}" if c is not None else ""))
         if len(mine_day) > 25:
             lines.append(f"…and {len(mine_day) - 25} more")
@@ -2859,7 +2895,7 @@ def grade():
         pl = {"win": pay, "loss": -1.0, "push": 0.0}[res]
         doc = {k: v for k, v in p.items() if k != "_id"}
         if p.get("taken"):   # your bet at the price and stake you actually got
-            pay_t = payout(p.get("taken_odds") or p["odds"], p["book"], p["sport"])
+            pay_t = payout(p.get("taken_odds") or p["odds"], p.get("taken_book") or p["book"], p["sport"])
             doc["pl_taken_usd"] = round({"win": pay_t, "loss": -1.0, "push": 0.0}[res]
                                         * (p.get("stake_taken") or p.get("stake_usd") or 0), 2)
             if p.get("p_close") is not None:   # strict CLV at YOUR price: vs the sharp no-vig consensus at close
@@ -3019,8 +3055,9 @@ def main():
         ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(days=30)).isoformat())
               if x.get("taken") and not x.get("superseded")]
         lines = ["📒 **Your bets by book** (everything you tapped Bet it on)"]
-        for bk in sorted({x["book"] for x in ps}, key=lambda b: -sum(1 for x in ps if x["book"] == b)):
-            xs = [x for x in ps if x["book"] == bk]
+        tb = lambda x: x.get("taken_book") or x["book"]   # where you actually placed it
+        for bk in sorted({tb(x) for x in ps}, key=lambda b: -sum(1 for x in ps if tb(x) == b)):
+            xs = [x for x in ps if tb(x) == bk]
             done = [x for x in xs if (x.get("result_taken") or x.get("result")) in ("win", "loss", "push")]
             open_ = [x for x in xs if x not in done]
             res = lambda x: x.get("result_taken") or x.get("result")
