@@ -92,9 +92,11 @@ SHARP = "pinnacle"
 #   the rest  -- pricing only (Pinnacle): sharpens the consensus fair line but is never alerted
 # No DraftKings (unfunded), Fanatics or Bovada.
 # Kalshi and Polymarket come from their free feeds every minute, so they don't take paid slots.
-BOOKS = ["pinnacle", "novig", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag", "williamhill_us",
+# DraftKings: log-only (unfunded) -- found, logged and graded but never posted, to see if it's worth funding.
+LOG_ONLY_BOOKS = {"draftkings"}
+BOOKS = ["pinnacle", "novig", "draftkings", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag", "williamhill_us",
          "espnbet"]
-BET_BOOKS = {"novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag",
+BET_BOOKS = {"draftkings", "novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag",
              "williamhill_us", "espnbet"}
 WEIGHTS = {"pinnacle": 3.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
 # pregame taker fees, checked on real slips (see nhl-model model_config.json exchange_fees)
@@ -1833,7 +1835,7 @@ def open_exposure(seen, now):
     return tot
 
 
-BOOK_NAMES = {"novig": "Novig", "prophetx": "ProphetX", "kalshi": "Kalshi", "polymarket": "Polymarket",
+BOOK_NAMES = {"draftkings": "DraftKings", "novig": "Novig", "prophetx": "ProphetX", "kalshi": "Kalshi", "polymarket": "Polymarket",
               "fanduel": "FanDuel", "betrivers": "BetRivers", "ballybet": "Bally Bet", "betmgm": "BetMGM",
               "betonlineag": "BetOnline", "espnbet": "theScore Bet",
               "williamhill_us": "Caesars"}
@@ -1977,7 +1979,8 @@ def record(found, seen, now):
     another line with 2%+ more EV) edits that same Discord message instead of posting again."""
     best = {}
     for gid, g, p, size in found:   # one play per game / market / side: the best EV across books and alt lines
-        k = (p["sport"], gid, p["kind"], p["side"], bool(p.get("test")))   # test plays never crowd out real ones
+        k = (p["sport"], gid, p["kind"], p["side"], bool(p.get("test")),   # test plays never crowd out real ones,
+             p["book"] in LOG_ONLY_BOOKS)                                   # nor do log-only books (DraftKings)
         if k not in best or p["ev"] > best[k][2]["ev"]:
             best[k] = (gid, g, p, size)
     backup = {}   # best play at a sportsbook (not Novig) per game/market/side, shown on Novig alerts
@@ -2016,7 +2019,7 @@ def record(found, seen, now):
                 fs_set(f"scan_plays/{pid}", d_)
                 seen[pid] = d_
             continue
-        if not SPORTS[p["sport"]].get("alerts", True):   # log-only league: priced and graded, never posted
+        if not SPORTS[p["sport"]].get("alerts", True) or p["book"] in LOG_ONLY_BOOKS:   # log-only league / book: priced and graded, never posted
             if not prev:
                 d_ = dict(base, found=now.isoformat(), alerted=False, shadow=True)
                 fs_set(f"scan_plays/{pid}", d_)
@@ -2170,7 +2173,7 @@ def _ev_now(sport, g, kind, side, line, book, odds, pin_only=False):
     return pw * (1 + payout(odds, book, sport)) - 1
 
 
-BACKUP_SKIP = {"novig"}   # backups come from any other book you use
+BACKUP_SKIP = {"novig"} | LOG_ONLY_BOOKS   # backups come from any other book you use
 MISSES = {}        # alert message id -> price checks in a row that couldn't find its price
 MISS_CHECKS = 3
 
@@ -3016,6 +3019,8 @@ def main():
                   "p_close", "result"):
             print(f"  {f:10s} {sum(1 for x in ps if x.get(f) not in (None, False, ''))}")
         print("  fv methods:", {k: sum(1 for x in ps if k in (x.get('fv') or {})) for k in ("live", "pin", "equal", "fresh", "exblend")})
+        print("  DraftKings (log-only):", sum(1 for x in ps if x.get("book") == "draftkings"), "plays;",
+              sum(1 for x in ps if x.get("book") == "draftkings" and not x.get("test")), "at the bar")
         print("  by sport:", {SPORTS[s_]['label']: sum(1 for x in ps if x['sport'] == s_) for s_ in SPORTS if any(x['sport'] == s_ for x in ps)})
         print("  credits:", (fs_get("scan_state/credits") or {}).get("used"), "this month;",
               ((fs_get("scan_state/credits") or {}).get("days") or {}))
