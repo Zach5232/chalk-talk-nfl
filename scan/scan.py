@@ -2933,7 +2933,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe"])
+                                     "altprobe", "fields", "pxprobe", "mybooks"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -2946,6 +2946,24 @@ def main():
         except Exception as e:  # noqa: BLE001
             log(f"morning report failed: {type(e).__name__}: {str(e)[:100]}")
         return
+    if a.mode == "mybooks":   # your logged bets by book -> Discord only (dollar amounts stay out of this public log)
+        now = datetime.now(timezone.utc)
+        ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(days=30)).isoformat())
+              if x.get("taken") and not x.get("superseded")]
+        lines = ["📒 **Your bets by book** (everything you tapped Bet it on)"]
+        for bk in sorted({x["book"] for x in ps}, key=lambda b: -sum(1 for x in ps if x["book"] == b)):
+            xs = [x for x in ps if x["book"] == bk]
+            done = [x for x in xs if (x.get("result_taken") or x.get("result")) in ("win", "loss", "push")]
+            open_ = [x for x in xs if x not in done]
+            res = lambda x: x.get("result_taken") or x.get("result")
+            stake = lambda x: x.get("stake_taken") or x.get("stake_usd") or 0
+            ct = [x["clv_taken"] for x in done if x.get("clv_taken") is not None]
+            lines.append(f"**{BOOK_NAMES.get(bk, bk)}:** {len(xs)} bets · settled {sum(res(x) == 'win' for x in done)}-"
+                         f"{sum(res(x) == 'loss' for x in done)} · {sum(x.get('pl_taken_usd') or 0 for x in done):+,.2f} "
+                         f"on ${sum(stake(x) for x in done):,.0f} staked · open {len(open_)} (${sum(stake(x) for x in open_):,.0f} riding)"
+                         + (f" · beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})" if ct else ""))
+        discord_send("\n".join(lines), buttons=False)
+        return print(f"posted to Discord ({len(ps)} bets)")
     if a.mode == "pxprobe":
         return px_probe()
     if a.mode == "altprobe":   # which books return alternate spreads / totals (counts only), ~2 credits per sport
