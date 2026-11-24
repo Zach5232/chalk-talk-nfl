@@ -1196,7 +1196,8 @@ def px_get(path, params=None):
     return (r.json() or {}).get("data")
 
 
-PX_LEAGUE = {"nba": "NBA", "ncaab": "College Basketball", "nhl": "NHL", "nfl": "NFL", "ncaaf": "College Football"}
+PX_LEAGUE = {"nba": "NBA", "ncaab": "College Basketball", "nhl": "NHL", "nfl": "NFL", "ncaaf": "College Football",
+             "epl": "Premier League", "ucl": "UEFA Champions League", "mls": "Major League Soccer", "ligue1": "Ligue 1"}
 PX_EVENTS = {}
 
 
@@ -1238,6 +1239,21 @@ def px_quotes(sport, games, ml_only=False):
             gid, g, cs, st = mine[eid]
             for m in ms or []:
                 sub = m.get("sub_type")
+                three = bool(SPORTS[sport].get("three_way"))
+                if three and sub == "moneyline_3_way":   # soccer 90-minute result: 'X to Win (90 Min)' / 'Draw (90 Min)', YES = that outcome
+                    nm = re.sub(r"\s*\(90 Min\)$", "", (m.get("name") or "").strip(), flags=re.I)
+                    who = re.sub(r"\s+to Win$", "", nm, flags=re.I)
+                    side = "d" if norm(who) == "draw" else "a" if norm(who) == norm(cs["home"]) else \
+                        "b" if norm(who) == norm(cs["away"]) else None
+                    for sd in (m.get("selections") or []) if side else []:
+                        sd = sd if isinstance(sd, list) else [sd]
+                        top = next((x for x in sd if x.get("price") is not None), None)
+                        if top and (top.get("name") or "").strip().upper() == "YES":
+                            out.append(ex_quote(gid, g, "h2h", side, None, "prophetx", prob(top["price"]),
+                                                float(top.get("quantity") or 0) or 0.01, st))
+                    continue
+                if three and sub == "moneyline":   # soccer '2 Way' moneyline: different rules on a draw -- not priced yet
+                    continue
                 if sub not in ("moneyline", "spread", "total") or (ml_only and sub != "moneyline"):
                     continue
                 groups = [m] if sub == "moneyline" else (m.get("market_strikes") or [])
@@ -1278,6 +1294,10 @@ def px_rows(sport, events):
         by.setdefault((x["gid"], x["kind"], x["line"]), {})[x["side"]] = x["odds"]
     rows = {}
     for (gid, kind, line), sides in by.items():
+        if "d" in sides:   # soccer 3-way
+            if "a" in sides and "b" in sides and 0.97 < sum(prob(v) for v in sides.values()) < 1.2:
+                rows.setdefault(gid, {}).setdefault(kind, []).append(dict(book="prophetx", line=line, a=sides["a"], b=sides["b"], d=sides["d"]))
+            continue
         if "a" in sides and "b" in sides and 0.97 < prob(sides["a"]) + prob(sides["b"]) < 1.15:
             rows.setdefault(gid, {}).setdefault(kind, []).append(dict(book="prophetx", line=line, a=sides["a"], b=sides["b"]))
     return rows
