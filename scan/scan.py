@@ -1291,6 +1291,21 @@ def px_probe():
     except Exception as e:  # noqa: BLE001
         return print(f"login failed: {type(e).__name__}: {str(e)[:150]}")
     print("login ok")
+    now = datetime.now(timezone.utc)
+    for sp in PX_LEAGUE:   # the live feed against the scanner's own saved games: matches and how many clear the bar
+        g_ = (fs_get(f"scan_state/fair_{sp}") or {}).get("games") or {}
+        g_ = {k: v for k, v in g_.items() if datetime.fromisoformat(v["start"]) > now}
+        try:
+            q_ = px_quotes(sp, g_)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{sp}] feed error: {type(e).__name__}: {str(e)[:100]}")
+            continue
+        n_ok = sum(1 for x in q_ if evaluate(sp, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"]))
+        print(f"[{sp}] upcoming games {len(g_)}, matched {len({x['gid'] for x in q_})}, prices {len(q_)} "
+              f"(ML {sum(x['kind'] == 'h2h' for x in q_)}, spread {sum(x['kind'] == 'spread' for x in q_)}, "
+              f"total {sum(x['kind'] == 'total' for x in q_)}), clearing the bar now {n_ok}")
+    if os.environ.get("PX_PROBE_FULL") != "1":
+        return
     ts = (px_get("/mm/get_tournaments") or {}).get("tournaments") or []
     print(f"tournaments: {len(ts)}")
     for t in ts:
