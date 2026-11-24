@@ -1227,15 +1227,33 @@ def px_probe():
     if isinstance(ms, dict):
         ms = ms.get("markets") or list(ms.values())
     print(f"  markets: {len(ms)}; types: {sorted({str(m.get('type')) for m in ms if isinstance(m, dict)})}")
-    for m in [m for m in ms if isinstance(m, dict) and m.get("type") in ("moneyline", "spread", "total")][:4]:
-        sel = m.get("selections") or []
-        print(f"   {m.get('type')} / {m.get('sub_type')} / {m.get('name')}: {len(sel)} sides; market keys {sorted(m.keys())}")
-        for side in sel[:2]:
-            side = side if isinstance(side, list) else [side]
-            print("     side:", [(x.get("name"), x.get("strike"), "price" if x.get("price") is not None else "no price",
-                                  "qty" if x.get("quantity") else "no qty") for x in side[:3]], f"({len(side)} levels)")
-            if side:
-                print("     selection keys:", sorted(side[0].keys()))
+    imp = lambda o: 100 / (o + 100) if o > 0 else -o / (-o + 100)
+    def ladder_info(side):
+        ps = [x.get("price") for x in side if x.get("price") is not None]
+        if not ps:
+            return "empty"
+        mono = "best-first" if all(imp(ps[i]) <= imp(ps[i + 1]) for i in range(len(ps) - 1)) else \
+            "worst-first" if all(imp(ps[i]) >= imp(ps[i + 1]) for i in range(len(ps) - 1)) else "unordered"
+        return f"{len(ps)} levels, {mono}"
+    for m in [m for m in ms if isinstance(m, dict) and m.get("sub_type") in ("moneyline", "spread", "total")]:
+        print(f"   {m.get('sub_type')}: keys {sorted(m.keys())}")
+        if m.get("selections"):
+            sides = [sd if isinstance(sd, list) else [sd] for sd in m["selections"]]
+            print("     sides:", [(sd[0].get("name"), ladder_info(sd)) for sd in sides if sd])
+            best = [min((imp(x["price"]) for x in sd if x.get("price") is not None), default=None) for sd in sides]
+            if all(b_ is not None for b_ in best):
+                print(f"     best prices both sides imply {sum(best):.1%} (100-105% = the price you can take)")
+            print("     display_price/value sample types:", type(sides[0][0].get("display_price")).__name__, type(sides[0][0].get("value")).__name__)
+        for ms_ in (m.get("market_strikes") or [])[:3]:
+            print("     strike keys:", sorted(ms_.keys()) if isinstance(ms_, dict) else type(ms_).__name__)
+            if isinstance(ms_, dict):
+                sel = ms_.get("selections") or []
+                sides = [sd if isinstance(sd, list) else [sd] for sd in sel]
+                print("      ", ms_.get("strike") if "strike" in ms_ else ms_.get("line"), [(sd[0].get("name"), sd[0].get("strike"), ladder_info(sd)) for sd in sides if sd])
+                best = [min((imp(x["price"]) for x in sd if x.get("price") is not None), default=None) for sd in sides]
+                if len(best) == 2 and all(b_ is not None for b_ in best):
+                    print(f"       both sides imply {sum(best):.1%}")
+        print(f"     market_strikes: {len(m.get('market_strikes') or [])}")
 
 
 def exchange_quotes(sport, games, ml_only=False):
