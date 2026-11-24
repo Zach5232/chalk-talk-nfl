@@ -2558,8 +2558,10 @@ def morning_report(now):
         w = sum(res(p) == "win" for p in ps); l_ = sum(res(p) == "loss" for p in ps)
         usd = sum(p.get("pl_taken_usd") or 0 for p in ps)
         ct = [p["clv_taken"] for p in ps if p.get("clv_taken") is not None]
-        return (f"{w}-{l_}, {usd:+,.0f}" + (f" · beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})"
-                                             if ct else ""))
+        ex = [p.get("p_fair") for p in ps if res(p) in ("win", "loss") and p.get("p_fair")]
+        exp = (f" · expected {sum(ex):.1f} wins from the fair line" if len(ex) == w + l_ and ex else "")
+        return (f"{w}-{l_}, {usd:+,.0f}" + exp + (f" · beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})"
+                                                   if ct else ""))
     lines = [f"📊 **Morning report · {datetime.fromisoformat(yday).strftime('%a %b %-d')}**", "", "**Your card**"]
     if mine_day:
         for p in mine_day[:25]:
@@ -2967,6 +2969,16 @@ def main():
                   f"{sum(res(x) == 'loss' for x in done)}, ROI {(sum(x.get('pl_taken_usd') or 0 for x in done) / st_ if st_ else 0):+.1%}, "
                   f"open {len(open_)} ({sum(stake(x) for x in open_) / max(1, st_ + sum(stake(x) for x in open_)):.0%} of money staked)"
                   + (f", beat close {sum(c > 0 for c in ct)}/{len(ct)} avg {sum(ct) / len(ct):+.1%}" if ct else ", no CLV yet"))
+        done_all = [x for x in ps if (x.get("result_taken") or x.get("result")) in ("win", "loss")]
+        def wl(xs):
+            r_ = lambda x: x.get("result_taken") or x.get("result")
+            ex_ = sum(x.get("p_fair") or 0 for x in xs)
+            return f"{sum(r_(x) == 'win' for x in xs)}-{sum(r_(x) == 'loss' for x in xs)} (fair line expected {ex_:.1f} wins)"
+        cuts = [("Moneylines", [x for x in done_all if x["kind"] == "h2h"]), ("Spreads", [x for x in done_all if x["kind"] == "spread"]),
+                ("Totals", [x for x in done_all if x["kind"] == "total"]),
+                ("Main line", [x for x in done_all if not x.get("off_main")]), ("Off the main line", [x for x in done_all if x.get("off_main")])]
+        lines.append("**Settled, by type:** " + " · ".join(f"{k} {wl(v)}" for k, v in cuts if v))
+        print("by type:", " | ".join(f"{k} {wl(v)}" for k, v in cuts if v))
         discord_send("\n".join(lines), buttons=False)
         return print(f"posted to Discord ({len(ps)} bets)")
     if a.mode == "pxprobe":
