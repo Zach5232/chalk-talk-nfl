@@ -1193,20 +1193,31 @@ def px_probe():
     ts = (px_get("/mm/get_tournaments") or {}).get("tournaments") or []
     print(f"tournaments: {len(ts)}")
     for t in ts:
-        print(f"  {t.get('id')}  {t.get('name')}  ({(t.get('sport') or {}).get('name')})")
-    want = [t for t in ts if re.search(r"\bNBA\b", t.get("name") or "")][:1]
-    if not want:
+        if (t.get("sport") or {}).get("name") in ("Basketball", "Ice Hockey", "American Football") or \
+                re.search(r"Champions|Premier|MLS", t.get("name") or ""):
+            print(f"  {t.get('id')}  {t.get('name')}  ({(t.get('sport') or {}).get('name')})")
+    for tid, lab in ((132, "NBA"),):
+        evs = (px_get("/mm/get_sport_events", {"tournament_id": tid}) or {}).get("sport_events") or []
+        print(f"{lab} events: {len(evs)}")
+        for e in evs[:8]:
+            print(f"  {e.get('event_id')} | {e.get('name')} | {e.get('type')}/{e.get('sub_type')} | {e.get('scheduled')} | "
+                  f"{e.get('status')} | {[(c.get('name'), c.get('side')) for c in e.get('competitors') or []]}")
+    allev = (px_get("/mm/get_sport_events") or {}).get("sport_events") or []
+    print(f"all events (no filter): {len(allev)}")
+    by = {}
+    for e in allev:
+        by[e.get("tournament_name")] = by.get(e.get("tournament_name"), 0) + 1
+    print("  by tournament:", sorted(by.items(), key=lambda kv: -kv[1])[:25])
+    games = [e for e in allev if e.get("competitors") and re.search(r"NBA|NCAA|NHL|NFL", e.get("tournament_name") or "")]
+    if not games:
         return
-    evs = (px_get("/mm/get_sport_events", {"tournament_id": want[0]["id"]}) or {}).get("sport_events") or []
-    print(f"NBA events: {len(evs)}; first keys: {sorted(evs[0].keys()) if evs else None}")
-    if not evs:
-        return
-    e = evs[0]
-    print("  event:", e.get("name"), "|", e.get("scheduled"), "|", [(c.get("name"), c.get("side")) for c in e.get("competitors") or []])
+    e = games[0]
+    print("  sample game:", e.get("name"), "|", e.get("tournament_name"), "|", e.get("scheduled"),
+          [(c.get("name"), c.get("side")) for c in e.get("competitors") or []])
     ms = px_get("/v4/mm/get_markets", {"event_id": e["event_id"]}) or []
     if isinstance(ms, dict):
         ms = ms.get("markets") or list(ms.values())
-    print(f"  markets: {len(ms)}; types: {sorted({m.get('type') for m in ms if isinstance(m, dict)})}")
+    print(f"  markets: {len(ms)}; types: {sorted({str(m.get('type')) for m in ms if isinstance(m, dict)})}")
     for m in [m for m in ms if isinstance(m, dict) and m.get("type") in ("moneyline", "spread", "total")][:4]:
         sel = m.get("selections") or []
         print(f"   {m.get('type')} / {m.get('sub_type')} / {m.get('name')}: {len(sel)} sides; market keys {sorted(m.keys())}")
