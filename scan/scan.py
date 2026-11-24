@@ -1560,7 +1560,24 @@ BOOK_ALIASES = {"dk": "draftkings", "draft kings": "draftkings", "fd": "fanduel"
                 "poly": "polymarket"}
 
 
+BOOK_MENU = ["novig", "prophetx", "kalshi", "polymarket", "fanduel", "betmgm", "williamhill_us", "betrivers", "ballybet",
+             "espnbet", "betonlineag", "draftkings"]   # exchanges first
+
+
+def modal_values(comps):
+    """custom_id -> submitted value, for old (action row) and new (label) modal components; a dropdown gives its pick."""
+    out = {}
+    for c in comps or []:
+        inner = c.get("component") or ((c.get("components") or [None])[0]) or {}
+        if inner.get("custom_id"):
+            v = inner.get("values")
+            out[inner["custom_id"]] = (v[0] if v else "") if isinstance(v, list) else (inner.get("value") or "")
+    return out
+
+
 def match_book(text):
+    if (text or "").strip() in BOOK_NAMES:   # a dropdown pick is already a book key
+        return text.strip()
     t = re.sub(r"[^a-z ]", "", (text or "").lower()).strip()
     if not t:
         return None
@@ -1717,6 +1734,22 @@ def _answer(it):
                                                              "placeholder": _line_str(x_)}]})
                 return reply({"type": 9, "data": {"custom_id": f"moved:{mid}", "title": "Line moved", "components": comps}})
             stake = x.get("stake_taken") or x.get("stake_usd") or ""
+            # Label components (Discord modal v2) allow a book dropdown; if Discord refuses, fall back to the text box below
+            here = x.get("book") or ""
+            r_ = reply({"type": 9, "data": {"custom_id": f"bet:{mid}", "title": "Log your bet", "components": [
+                {"type": 18, "label": "Amount ($)", "component": {
+                    "type": 4, "custom_id": "amount", "style": 1, "required": True, "max_length": 10,
+                    "value": f"{stake:g}" if stake != "" else ""}},
+                {"type": 18, "label": "Price you got", "description": "Cents for exchanges (46.5), odds for sportsbooks (-115)",
+                 "component": {"type": 4, "custom_id": "price", "style": 1, "required": True, "max_length": 10,
+                               "value": _default_price(x)}},
+                {"type": 18, "label": "Book", "component": {
+                    "type": 3, "custom_id": "book", "required": True, "min_values": 1, "max_values": 1,
+                    "options": [{"label": BOOK_NAMES.get(b, b), "value": b, **({"default": True} if b == here else {})}
+                                for b in BOOK_MENU]}}]}})
+            if getattr(r_, "ok", True):
+                return r_
+            log(f"book dropdown refused ({getattr(r_, 'status_code', '?')}): falling back to a text box")
             return reply({"type": 9, "data": {"custom_id": f"bet:{mid}", "title": "Log your bet"[:45], "components": [
                 {"type": 1, "components": [{"type": 4, "custom_id": "amount", "label": "Amount ($)", "style": 1,
                                             "value": f"{stake:g}" if stake != "" else "", "required": True, "max_length": 10}]},
@@ -1746,7 +1779,7 @@ def _answer(it):
             return note("Noted: missed, line moved" + (f" ({', '.join(bits)})" if bits else ""))
         if it["type"] == 5:   # form submitted
             mid = it["data"]["custom_id"].split(":", 1)[1]
-            vals = {c["components"][0]["custom_id"]: c["components"][0].get("value", "") for c in it["data"]["components"]}
+            vals = modal_values(it["data"]["components"])
             try:
                 stake = float(vals["amount"].replace("$", "").strip())
                 odds, pr = parse_price(vals["price"])
