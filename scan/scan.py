@@ -3196,6 +3196,12 @@ def main():
         print("  credits:", (fs_get("scan_state/credits") or {}).get("used"), "this month;",
               ((fs_get("scan_state/credits") or {}).get("days") or {}))
         print("  morning report posted for:", (fs_get("scan_state/morning") or {}).get("day"))
+        for sp in ("nba", "ncaab", "nhl", "nfl", "ncaaf"):   # how fresh each sport's fair line is
+            fz = fs_get(f"scan_state/fair_{sp}") or {}
+            if fz.get("pulled"):
+                age = (now - datetime.fromisoformat(fz["pulled"])).total_seconds() / 60
+                up = sum(1 for g in (fz.get("games") or {}).values() if datetime.fromisoformat(g["start"]) > now)
+                print(f"  fair line {sp}: last pulled {age:.0f} min ago, {up} upcoming games")
         return
     if a.mode == "timing":
         return print(timing_report(datetime.now(timezone.utc)))
