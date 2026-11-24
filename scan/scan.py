@@ -115,7 +115,7 @@ MAX_EV = 0.12              # above this it's a stale quote or a mismatched game,
 MIN_BOOKS = 3              # books left in the consensus after removing the one being checked
 MIN_SIZE_USD = 25          # exchange liquidity at the quoted price
 REPOST_CENTS = 10          # alert the same play again only if the price improved this much
-BANKROLL = float(os.environ.get("SCAN_BANKROLL", "2000"))
+BANKROLL = float(os.environ.get("SCAN_BANKROLL", "2500"))
 EXPOSURE_CAP = float(os.environ.get("SCAN_EXPOSURE", "0"))   # 0 = off. If set (e.g. 0.5): over that share pending, only 5%+ EV posts
 EXPOSURE_OVERRIDE_EV = 0.05
 KELLY = 1 / 8
