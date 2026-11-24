@@ -1916,10 +1916,13 @@ def middle_math(over, under, axis, lo, hi):
     return sum(N.pdf((k - mu) / sd) / sd for k in ks), be
 
 
-def middle_words(text, mm):
+def middle_words(text, mm, lock=None):
     hit, be = mm   # verdict only; the numbers stay out of the alert
     if be <= 0:
-        return f"🔥 **Middle -- TAKE IT** (free: the pair can't lose). {text[0].upper() + text[1:]}."
+        how = (f" Bet **${lock[0]:,.0f}-${lock[1]:,.0f}** here and the pair can't lose either way; more than that and "
+               f"you're risking a little if only the other side wins." if lock and lock[0] <= lock[1] else
+               " Size both sides so either one winning covers the other.")
+        return f"🔥 **Middle -- TAKE IT** (free at these prices). {text[0].upper() + text[1:]}.{how}"
     if hit is not None and hit >= be:
         return f"🎯 **Middle -- TAKE IT** (good middle). {text[0].upper() + text[1:]}."
     return f"🎯 **Middle -- TAKE IT** (good bet on its own; the middle is a bonus). {text[0].upper() + text[1:]}."
@@ -1966,7 +1969,11 @@ def _taken_note(kind, text, o, p):
     stake = o.get("stake_taken") or o.get("stake_usd") or 0
     ref = f"${stake:,.0f} on {o['label']} {price_str(o.get('odds_alerted') or o['odds'], o['book'], o.get('price_prob'))} @ {bk}"
     if kind == "middle":
-        return middle_words(f"you already bet {ref}; {text[0]}", text[1])
+        d_o = 1 + payout(o.get("taken_odds") or o.get("odds_alerted") or o["odds"], o["book"], o["sport"])
+        d_p = 1 + payout(p["odds"], p["book"], p["sport"])
+        # no loss when only one side wins: held side alone pays for this stake, and this side alone pays for the held one
+        lock = (stake / (d_p - 1), stake * (d_o - 1)) if stake and d_p > 1 else None
+        return middle_words(f"you already bet {ref}; {text[0]}", text[1], lock)
     d_o = 1 + payout(o.get("odds_alerted") or o["odds"], o["book"], o["sport"])
     d_p = 1 + payout(p["odds"], p["book"], p["sport"])
     hedge = stake * d_o / d_p
