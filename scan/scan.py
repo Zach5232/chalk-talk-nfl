@@ -1175,8 +1175,16 @@ def px_get(path, params=None):
     tok = px_token()
     if not tok:
         return None
-    r = requests.get(f"{PX}{path}", params=params, timeout=20,
-                     headers={"Authorization": f"Bearer {tok}", "Accept-Encoding": "gzip"})
+    for attempt in range(3):   # 1 request/second per endpoint on the default tier
+        gap = time.time() - PX_TOK.get("last", 0)
+        if gap < 1.2:
+            time.sleep(1.2 - gap)
+        PX_TOK["last"] = time.time()
+        r = requests.get(f"{PX}{path}", params=params, timeout=20,
+                         headers={"Authorization": f"Bearer {tok}", "Accept-Encoding": "gzip"})
+        if r.status_code != 429:
+            break
+        time.sleep(2 + 2 * attempt)
     r.raise_for_status()
     return (r.json() or {}).get("data")
 
@@ -1199,7 +1207,7 @@ def px_probe():
     for tid, lab in ((132, "NBA"),):
         evs = (px_get("/mm/get_sport_events", {"tournament_id": tid}) or {}).get("sport_events") or []
         print(f"{lab} events: {len(evs)}")
-        for e in evs[:8]:
+        for e in [e for e in evs if e.get("status") != "live"][:4]:
             print(f"  {e.get('event_id')} | {e.get('name')} | {e.get('type')}/{e.get('sub_type')} | {e.get('scheduled')} | "
                   f"{e.get('status')} | {[(c.get('name'), c.get('side')) for c in e.get('competitors') or []]}")
     allev = (px_get("/mm/get_sport_events") or {}).get("sport_events") or []
@@ -1208,7 +1216,8 @@ def px_probe():
     for e in allev:
         by[e.get("tournament_name")] = by.get(e.get("tournament_name"), 0) + 1
     print("  by tournament:", sorted(by.items(), key=lambda kv: -kv[1])[:25])
-    games = [e for e in allev if e.get("competitors") and re.search(r"NBA|NCAA|NHL|NFL", e.get("tournament_name") or "")]
+    games = [e for e in allev if e.get("competitors") and e.get("status") != "live"
+             and re.search(r"NBA|NCAA|NHL|NFL", e.get("tournament_name") or "")]
     if not games:
         return
     e = games[0]
