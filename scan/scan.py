@@ -1248,22 +1248,23 @@ def px_quotes(sport, games, ml_only=False):
                         if not top:
                             continue
                         p_ = prob(top["price"])
+                        qty = float(top.get("quantity") or 0)   # what's on offer at that price (USD)
                         name = (top.get("name") or "").strip()
                         if sub == "total":
                             t = re.match(r"(over|under)\s+([\d.]+)", name, re.I)
                             if t:
                                 out.append(ex_quote(gid, g, "total", "a" if t.group(1).lower() == "over" else "b",
-                                                    float(t.group(2)), "prophetx", p_, 0, st))
+                                                    float(t.group(2)), "prophetx", p_, qty or 0.01, st))
                             continue
                         team = re.sub(r"\s+[+-]?[\d.]+$", "", name) if sub == "spread" else name
                         side = "a" if norm(team) == norm(cs["home"]) else "b" if norm(team) == norm(cs["away"]) else None
                         if not side:
                             continue
                         if sub == "moneyline":
-                            out.append(ex_quote(gid, g, "h2h", side, None, "prophetx", p_, 0, st))
+                            out.append(ex_quote(gid, g, "h2h", side, None, "prophetx", p_, qty or 0.01, st))
                         elif top.get("strike") is not None:
                             h = float(top["strike"])
-                            out.append(ex_quote(gid, g, "spread", side, h if side == "a" else -h, "prophetx", p_, 0, st))
+                            out.append(ex_quote(gid, g, "spread", side, h if side == "a" else -h, "prophetx", p_, qty or 0.01, st))
     return out
 
 
@@ -1300,7 +1301,8 @@ def px_probe():
         except Exception as e:  # noqa: BLE001
             print(f"[{sp}] feed error: {type(e).__name__}: {str(e)[:100]}")
             continue
-        n_ok = sum(1 for x in q_ if evaluate(sp, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"]))
+        oks = [x for x in q_ if evaluate(sp, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"])]
+        n_ok = f"{len(oks)} ({sum(x['size'] >= MIN_SIZE_USD for x in oks)} with ${MIN_SIZE_USD}+ on offer; sizes {sorted(round(x['size']) for x in oks)})"
         print(f"[{sp}] upcoming games {len(g_)}, matched {len({x['gid'] for x in q_})}, prices {len(q_)} "
               f"(ML {sum(x['kind'] == 'h2h' for x in q_)}, spread {sum(x['kind'] == 'spread' for x in q_)}, "
               f"total {sum(x['kind'] == 'total' for x in q_)}), clearing the bar now {n_ok}")
