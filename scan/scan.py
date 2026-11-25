@@ -92,13 +92,13 @@ SHARP = "pinnacle"
 #   the rest  -- pricing only (Pinnacle): sharpens the consensus fair line but is never alerted
 # No DraftKings (unfunded), Fanatics or Bovada.
 # Kalshi and Polymarket come from their free feeds every minute, so they don't take paid slots.
-# DraftKings: log-only (unfunded) -- found, logged and graded but never posted, to see if it's worth funding.
+# DraftKings was log-only (Nov 24): dropped for Circa. The log-only switch stays for any future test book.
 LOG_ONLY_BOOKS = {"draftkings"}
-BOOKS = ["pinnacle", "novig", "draftkings", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag", "williamhill_us",
+BOOKS = ["pinnacle", "circasports", "novig", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag", "williamhill_us",
          "espnbet"]
 BET_BOOKS = {"draftkings", "novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag",
              "williamhill_us", "espnbet"}
-WEIGHTS = {"pinnacle": 3.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
+WEIGHTS = {"pinnacle": 3.0, "circasports": 3.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
 # pregame taker fees, checked on real slips (see nhl-model model_config.json exchange_fees)
 FEES = {"kalshi": ("parabolic", 0.07), "polymarket": ("parabolic", 0.07), "prophetx": ("winnings", 0.02)}
 FEES_BY_SPORT = {("nhl", "prophetx"): ("parabolic", 0.035)}
@@ -1920,7 +1920,7 @@ def open_exposure(seen, now):
     return tot
 
 
-BOOK_NAMES = {"draftkings": "DraftKings", "novig": "Novig", "prophetx": "ProphetX", "kalshi": "Kalshi", "polymarket": "Polymarket",
+BOOK_NAMES = {"circasports": "Circa", "draftkings": "DraftKings", "novig": "Novig", "prophetx": "ProphetX", "kalshi": "Kalshi", "polymarket": "Polymarket",
               "fanduel": "FanDuel", "betrivers": "BetRivers", "ballybet": "Bally Bet", "betmgm": "BetMGM",
               "betonlineag": "BetOnline", "espnbet": "theScore Bet",
               "williamhill_us": "Caesars"}
