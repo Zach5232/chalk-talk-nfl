@@ -3265,7 +3265,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy"])
+                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -3368,6 +3368,24 @@ def main():
                                 key=lambda t: (t[0], t[1] or 0))
                     if ls:
                         print(f"  {bk} {kd}: {ls}")
+        return
+    if a.mode == "futprobe":   # futures (outright) markets on the Odds API and which books price them (keys/counts only)
+        key = os.environ.get("ODDS_API_KEY")
+        sp = requests.get(f"{ODDS}", params=dict(apiKey=key, all="true"), timeout=30).json()   # free call
+        outs = [x for x in sp if x.get("has_outrights")]
+        print(f"outright markets listed: {len(outs)}")
+        for x in outs:
+            print(f"  {x['key']:45s} active={x.get('active')}  {x.get('title')}")
+        want = [x["key"] for x in outs if x.get("active") and re.search(
+            r"golf_|super_bowl|nfl_super|ncaaf_championship|ncaab_championship|nba_championship|nhl_championship|stanley", x["key"])]
+        for k_ in want[:8]:
+            r = requests.get(f"{ODDS}/{k_}/odds", timeout=60, params=dict(
+                apiKey=key, regions="us,us2,us_ex,eu", markets="outrights", oddsFormat="american"))
+            evs = r.json() if r.ok else []
+            bks = sorted({b["key"] for e in evs for b in e.get("bookmakers", [])})
+            n_out = max((len(m.get("outcomes", [])) for e in evs for b in e.get("bookmakers", []) for m in b.get("markets", [])),
+                        default=0)
+            print(f"{k_}: credits {r.headers.get('x-requests-last')}, outcomes up to {n_out}, books: {', '.join(bks)}")
         return
     if a.mode == "sharpstudy":
         for sp in (os.environ.get("SCAN_SPORTS") or "nfl,ncaaf").split(","):
