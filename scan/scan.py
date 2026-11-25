@@ -3018,15 +3018,15 @@ def circa_backtest(day, max_credits):
         if spent >= max_credits:
             print(f"credit limit {max_credits} reached -- stopping pulls")
             break
-        r = requests.get(f"{ODDS}/historical/sports/{SPORTS[p['sport']]['odds']}/odds", timeout=60, params=dict(
+        r = requests.get(f"{ODDS.rsplit('/sports', 1)[0]}/historical/sports/{SPORTS[p['sport']]['odds']}/odds", timeout=60, params=dict(
             apiKey=key, date=hr.strftime("%Y-%m-%dT%H:%M:%SZ"), bookmakers="circasports,pinnacle",
             markets="h2h,spreads,totals", oddsFormat="american"))
         c = int(r.headers.get("x-requests-last") or 0)
         spent += c
         if not snaps:
             print(f"first snapshot cost {c} credits (status {r.status_code})")
-            if c > 60:
-                print("more than expected -- stopping")
+            if c > 60 or not r.ok:
+                print("unexpected cost or error -- stopping:", r.text[:200].replace(key or "?", "***"))
                 break
         snaps[k] = {e["id"]: e for e in ((r.json() or {}).get("data") or [])} if r.ok else {}
     print(f"snapshots {len(snaps)}, credits spent {spent}")
