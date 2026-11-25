@@ -1931,7 +1931,8 @@ def alert_text(p, g, first=None):
     small = " · 🔹 small edge" if p.get("ev", 1) < BAR else ""
     txt = (f"🔎 **{SPORTS[p['sport']]['label']}** {g['away']}{at_}{g['home']} · {t} ET{small}\n"
            f"**{p['label']} · {price_str(p['odds'], p['book'], p.get('price_prob'))} @ {bk}**\n"
-           f"Fair {_pct(p['p_fair'])}% ({p['fair_odds']:+d}) · EV {p['ev']:+.1%} · bet ${p['stake_usd']} to win ${p.get('to_win') or p['stake_usd'] * payout(p['odds'], p['book'], p['sport']):,.0f}{good}{size}")
+           f"Fair {_pct(p['p_fair'])}% ({p['fair_odds']:+d}) · EV {p['ev']:+.1%} · bet ${p['stake_usd']:g} to win ${p.get('to_win') or p['stake_usd'] * payout(p['odds'], p['book'], p['sport']):,.0f}"
+           + (f" ({p['stake_why']})" if p.get("stake_why") else "") + f"{good}{size}")
     if first:
         was = price_str(first["odds"], first["book"], first.get("price_prob"))
         wbk = BOOK_NAMES.get(first["book"], first["book"])
@@ -2031,6 +2032,25 @@ def _note_for(kind, text, other, better):
                if better else "The other one is the better value -- take only one."))
 
 
+def pair_stake(kind, text, o, p):
+    """(stake, why) for a new play when you already hold the other side: the lock-in amount for an arb, and for a
+    free middle the Kelly stake nudged into the no-loss range. None = keep the play's own stake."""
+    held = o.get("stake_taken") or o.get("stake_usd") or 0
+    if not held:
+        return None
+    d_o = 1 + payout(o.get("taken_odds") or o.get("odds_alerted") or o["odds"], o["book"], o["sport"])
+    d_p = 1 + payout(p["odds"], p["book"], p["sport"])
+    if d_p <= 1:
+        return None
+    if kind == "arb":
+        return round(held * d_o / d_p), "locks in a profit with your other bet"
+    if kind == "middle" and text[1][1] <= 0:   # free middle
+        lo, hi = held / (d_p - 1), held * (d_o - 1)
+        if lo <= hi:
+            return round(min(max(p["stake_usd"], lo), hi)), "the pair can't lose at this amount"
+    return None
+
+
 def _taken_note(kind, text, o, p):
     """Note on a new play when the owner already bet the other side (o, marked ✅)."""
     bk = BOOK_NAMES.get(o["book"], o["book"])
@@ -2115,6 +2135,11 @@ def record(found, seen, now):
                 if rel and rel[0] in ("middle", "arb"):
                     notes.append(_taken_note(rel[0], rel[1], o, p))
                     rel_tags.append(rel[0] + "_with_bet")
+                    ps_ = pair_stake(rel[0], rel[1], o, p)
+                    if ps_:   # the headline stake is the one that works with the bet you hold
+                        pay_ = payout(p["odds"], p["book"], p["sport"])
+                        for d_ in (base, extra):
+                            d_.update(stake_usd=ps_[0], to_win=round(ps_[0] * pay_, 2), stake_why=ps_[1])
                 elif rel:
                     skip = True          # the other side of a bet you hold, with a both-lose gap: don't send
                     break
