@@ -379,16 +379,23 @@ def dashboards(board, st):
     """One pinned message per sport (edited daily): top of each market, fair chance, 7-day move, best price."""
     ids = dict(st.get("dash") or {})
     for sport, mkts in board.items():
-        lines = [f"**{SPORT_LABEL.get(sport, sport)} futures board** · {datetime.now(S.ET).strftime('%a %b %-d')}"]
+        lines = [f"**{SPORT_LABEL.get(sport, sport)} futures board** · {datetime.now(S.ET).strftime('%a %b %-d')}",
+                 "-# fair chance · 7-day move · best price available"]
         for sub, rows in mkts:
-            top = rows[:8] if len(rows) > 8 else rows
-            cells = []
-            for r in top:
-                mv = f" ({'+' if r['move'] >= 0 else ''}{r['move'] * 100:.1f})" if r.get("move") is not None and abs(r["move"]) >= 0.005 else ""
+            key = next((k for k, lab, *_ in MARKETS if sub.startswith(lab)), "")
+            if key in PROP_KEYS:   # make-the-playoffs style: the contested teams, not the locks
+                show = [r for r in rows if 0.10 <= r["fair"] <= 0.90][:14] or rows[:8]
+            else:
+                show = rows[:8]
+            lines.append("")
+            lines.append(f"__**{sub}**__")
+            for r in show:
+                mv = ""
+                if r.get("move") is not None and abs(r["move"]) >= 0.005:
+                    mv = f" ({'▲' if r['move'] > 0 else '▼'}{abs(r['move']) * 100:.1f})"
                 b = r.get("best")
-                bp = f" {odds_str(b[1])} {S.BOOK_NAMES.get(b[0], b[0])}" if b else ""
-                cells.append(f"{r['name']} {pct(r['fair'])}{mv}{bp}")
-            lines.append(f"__{sub}__: " + " · ".join(cells))
+                bp = f" · {odds_str(b[1])} {S.BOOK_NAMES.get(b[0], b[0])}" if b else ""
+                lines.append(f"• {r['name']} — **{pct(r['fair'])}**{mv}{bp}")
         text, chunks = "", []
         for ln in lines:
             if len(text) + len(ln) + 1 > 1900:
