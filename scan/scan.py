@@ -1913,6 +1913,12 @@ def apply_taps(seen):
             x.update(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr, taken_book=tbk)
             line = f"✅ **You bet** ${stake:g} at {price_str(odds, tbk or x['book'], pr)}" + \
                 (f" @ {BOOK_NAMES.get(tbk, tbk)}" if tbk else "")
+            if x.get("kind") == "future":   # futures: every tap is another bet on the same pick, each kept
+                bets = list(x.get("bets") or []) + [dict(stake=stake, odds=odds, price=pr, book=tbk or x["book"],
+                                                         at=datetime.now(timezone.utc).isoformat())]
+                x.update(bets=bets, stake_taken=round(sum(b["stake"] for b in bets), 2))
+                if len(bets) > 1:
+                    line += f" · {len(bets)} bets on this, ${x['stake_taken']:g} total"
         x.update(status_line=line, status_final=True, tapped_at=datetime.now(timezone.utc).isoformat())
         discord_send((x.get("msg_text") or alert_text(x, x)) + "\n" + line, edit_id=mid)
         fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
@@ -2970,6 +2976,7 @@ def health_report(now):
 def grade():
     now = datetime.now(timezone.utc)
     plays = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=3)).isoformat()) if not p.get("result")
+             and p.get("kind") != "future"
              and datetime.fromisoformat(p["start"]) < now - timedelta(hours=4)]
     cache, done = {}, 0
     for p in plays:
@@ -3276,7 +3283,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe"])
+                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -3380,6 +3387,9 @@ def main():
                     if ls:
                         print(f"  {bk} {kd}: {ls}")
         return
+    if a.mode == "futures":   # daily futures board + alerts (posts once a day; 'force' in the sports box reruns)
+        import futures
+        return futures.run(force=(os.environ.get("SCAN_SPORTS") == "force"))
     if a.mode == "pullprobe":   # why a pull came back empty: events and which books are on them (counts only)
         key = os.environ.get("ODDS_API_KEY")
         now = datetime.now(timezone.utc)
