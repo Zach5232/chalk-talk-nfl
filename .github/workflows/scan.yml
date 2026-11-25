@@ -16,13 +16,13 @@ on:
     - cron: '35 14 * * *'
   workflow_dispatch:
     inputs:
-      mode: {description: "watch, pull, grade or books (book scorecard)", required: true, default: "watch", type: choice, options: [watch, pull, grade, books, cbbbooks, taken, cfbrecord, timing, day, altprobe, fields, pxprobe, mybooks, yday, whygone]}
+      mode: {description: "watch, pull, grade or books (book scorecard)", required: true, default: "watch", type: choice, options: [watch, pull, grade, books, cbbbooks, taken, cfbrecord, timing, day, altprobe, fields, pxprobe, mybooks, yday, whygone, bookprobe]}
       minutes: {description: "watch: minutes to run (blank = until midnight ET, max 330)", required: false, default: ""}
       sports: {description: "comma-separated (blank = all)", required: false, default: ""}
       post: {description: "Post alerts to Discord", type: boolean, default: true}
 
 concurrency:
-  group: scan-${{ (inputs.mode == 'grade' || inputs.mode == 'books' || inputs.mode == 'cbbbooks' || inputs.mode == 'taken' || inputs.mode == 'cfbrecord' || inputs.mode == 'timing' || inputs.mode == 'day' || inputs.mode == 'altprobe' || inputs.mode == 'fields' || inputs.mode == 'pxprobe' || inputs.mode == 'mybooks' || inputs.mode == 'yday' || inputs.mode == 'whygone' || (github.event.schedule == '5 12 * * *' || github.event.schedule == '35 13 * * *' || github.event.schedule == '35 14 * * *')) && 'grade' || 'watch' }}
+  group: scan-${{ (inputs.mode == 'grade' || inputs.mode == 'books' || inputs.mode == 'cbbbooks' || inputs.mode == 'taken' || inputs.mode == 'cfbrecord' || inputs.mode == 'timing' || inputs.mode == 'day' || inputs.mode == 'altprobe' || inputs.mode == 'fields' || inputs.mode == 'pxprobe' || inputs.mode == 'mybooks' || inputs.mode == 'yday' || inputs.mode == 'whygone' || inputs.mode == 'bookprobe' || (github.event.schedule == '5 12 * * *' || github.event.schedule == '35 13 * * *' || github.event.schedule == '35 14 * * *')) && 'grade' || 'watch' }}
   cancel-in-progress: false
 
 permissions:

@@ -3054,7 +3054,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone"])
+                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -3157,6 +3157,20 @@ def main():
                                 key=lambda t: (t[0], t[1] or 0))
                     if ls:
                         print(f"  {bk} {kd}: {ls}")
+        return
+    if a.mode == "bookprobe":   # every bookmaker the Odds API offers on NFL games (keys only, ~5 credits, no Firestore)
+        key = os.environ.get("ODDS_API_KEY")
+        r = requests.get(f"{ODDS}/americanfootball_nfl/odds", timeout=60,
+                         params=dict(apiKey=key, regions="us,us2,us_ex,eu,uk,au", markets="h2h", oddsFormat="american"))
+        print("status", r.status_code, "credits this call", r.headers.get("x-requests-last"),
+              "account used", r.headers.get("x-requests-used"))
+        bks = {}
+        for e in r.json() if r.ok else []:
+            for b in e.get("bookmakers", []):
+                bks[b["key"]] = b.get("title")
+        for k_, t_ in sorted(bks.items()):
+            print(f"  {k_:22s} {t_}")
+        print("circa offered:", any("circa" in (k_ + str(t_)).lower() for k_, t_ in bks.items()))
         return
     if a.mode == "pxprobe":
         return px_probe()
