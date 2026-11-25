@@ -292,6 +292,33 @@ def odds_str(o):
 
 
 # ---------------- the daily run ----------------
+def delete_msg(mid):
+    if S.DRY or not S.BOT or not mid:
+        return True
+    try:
+        S.bot("DELETE", f"/channels/{futures_channel()}/messages/{mid}")
+        return True
+    except requests.HTTPError as e:
+        return e.response is not None and e.response.status_code == 404   # already gone
+
+
+def cleanup(seen=None):
+    """Delete alerts that are no longer plays -- unless you bet them (those stay, with the 🚫 note, for tracking)."""
+    now = datetime.now(timezone.utc)
+    seen = seen if seen is not None else {p["_id"]: p for p in S.fs_recent("scan_plays", "start", now.isoformat())
+                                          if p.get("kind") == "future"}
+    n = 0
+    for pid, x in seen.items():
+        if x.get("withdrawn") and not x.get("taken") and x.get("msg_id") and not x.get("deleted"):
+            if delete_msg(x["msg_id"]):
+                x["deleted"] = now.isoformat()
+                S.fs_set(f"scan_plays/{pid}", {k: v for k, v in x.items() if k != "_id"})
+                n += 1
+            time.sleep(0.3)
+    S.log(f"futures cleanup: {n} old alert(s) deleted")
+    return n
+
+
 def run(force=False):
     now = datetime.now(timezone.utc)
     today = now.astimezone(S.ET).strftime("%Y-%m-%d")
@@ -391,8 +418,11 @@ def alert_market(key, sub, sport, et, ev, rows, seen, now):
             why = f"longshot (fair {pct(r['fair'])}) -- pricing noise, not value"
         txt = ((x.get("msg_base") or x.get("msg_text") or "") + (f"\n{x['status_line']}" if x.get("status_line") else "")
                + f"\n🚫 **No longer a play** -- {why}")
-        post(txt, edit_id=x.get("msg_id"))
-        x.update(withdrawn=now.isoformat(), msg_text=txt)
+        if x.get("taken"):   # you bet it: keep the message, say it's no longer a play
+            post(txt, edit_id=x.get("msg_id"))
+            x.update(withdrawn=now.isoformat(), msg_text=txt)
+        else:                # never bet: just remove it
+            x.update(withdrawn=now.isoformat(), deleted=now.isoformat() if delete_msg(x.get("msg_id")) else None)
         S.fs_set(f"scan_plays/{pid}", {k: v for k, v in x.items() if k != "_id"})
         n += 1
     return n

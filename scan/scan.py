@@ -3444,6 +3444,8 @@ def main():
         return
     if a.mode == "futures":   # daily futures board + alerts (posts once a day; 'force' in the sports box reruns)
         import futures
+        if os.environ.get("SCAN_SPORTS") == "clean":
+            return futures.cleanup()
         return futures.run(force=(os.environ.get("SCAN_SPORTS") == "force"))
     if a.mode == "pullprobe":   # why a pull came back empty: events and which books are on them (counts only)
         key = os.environ.get("ODDS_API_KEY")
