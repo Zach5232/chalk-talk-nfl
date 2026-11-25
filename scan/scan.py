@@ -3034,7 +3034,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday"])
+                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -3117,6 +3117,27 @@ def main():
         print("by type:", " | ".join(f"{k} {wl(v)}" for k, v in cuts if v))
         discord_send("\n".join(lines), buttons=False)
         return print(f"posted to Discord ({len(ps)} bets)")
+    if a.mode == "whygone":   # an alert marked Gone: what the free feeds show for that game right now (lines only, no prices)
+        now = datetime.now(timezone.utc)
+        team = os.environ.get("SCAN_SPORTS") or a.sport or ""   # the team name rides in the sports box
+        ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(hours=8)).isoformat())
+              if x.get("alerted") and team.lower() in (x["home"] + " " + x["away"]).lower()]
+        for x in ps:
+            print(f"alert: {x['label']} @ {x['book']} kind={x['kind']} side={x['side']} line={x.get('line')} "
+                  f"status={x.get('status')} gone_at={x.get('gone_at')} sup={x.get('superseded')} start={x['start']}")
+        for sp in {x["sport"] for x in ps}:
+            games = (fs_get(f"scan_state/fair_{sp}") or {}).get("games") or {}
+            gids = {x["event_id"] for x in ps if x["sport"] == sp}
+            gs = {k: v for k, v in games.items() if k in gids}
+            print(f"[{sp}] saved games matched: {len(gs)} of {len(gids)}")
+            q = exchange_quotes(sp, gs)
+            for bk in sorted({y["book"] for y in q}):
+                for kd in ("h2h", "spread", "total"):
+                    ls = sorted({(y["side"], y["line"]) for y in q if y["book"] == bk and y["kind"] == kd},
+                                key=lambda t: (t[0], t[1] or 0))
+                    if ls:
+                        print(f"  {bk} {kd}: {ls}")
+        return
     if a.mode == "pxprobe":
         return px_probe()
     if a.mode == "altprobe":   # which books return alternate spreads / totals (counts only), ~2 credits per sport
