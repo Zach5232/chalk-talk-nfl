@@ -126,7 +126,7 @@ def bet_size(usd):
     """1/8 Kelly in dollars, to the dollar ($1 minimum) -- no other rounding or limits."""
     return max(1, round(usd))
 HOURS_AHEAD = 24
-CREDIT_CAP = int(os.environ.get("SCAN_CREDIT_CAP", "8000"))
+CREDIT_CAP = int(os.environ.get("SCAN_CREDIT_CAP", "16000"))   # of the plan's 20k (the old model pipelines are paused)
 CYCLE_S = 60               # moneylines every minute (free) ...
 FULL_EVERY = 3             # ... spreads and totals every 3rd cycle
 STALE_FAIR_MIN = 10        # an exchange play against a fair line older than this is confirmed by a pull first
@@ -556,8 +556,19 @@ def can_spend(st, now, cost=3):
     return spent_today + cost <= max(allowance, 12)
 
 
+ACCOUNT_USED = [0]   # the Odds API's own count for the month (every key use), from its response headers
+
+
+def note_used(r):
+    try:
+        ACCOUNT_USED[0] = max(ACCOUNT_USED[0], int(float(r.headers.get("x-requests-used") or 0)))
+    except (TypeError, ValueError):
+        pass
+
+
 def charge(st, now, cost):
     st["used"] += cost
+    st["used"] = max(st["used"], ACCOUNT_USED[0])   # the cap goes by the account's real total, not just ours
     today = now.astimezone(ET).strftime("%Y-%m-%d")
     st["days"] = {k: v for k, v in st["days"].items() if k >= (now - timedelta(days=10)).strftime("%Y-%m-%d")}
     st["days"][today] = st["days"].get(today, 0) + cost
@@ -728,6 +739,7 @@ def pull_alts(sport, S, now, st):
         r = requests.get(f"{ODDS}/{okey}/events/{gid}/odds", timeout=30, params=dict(
             apiKey=key, bookmakers=",".join(BOOKS), oddsFormat="american", markets="alternate_spreads,alternate_totals"))
         S["alt_at"][gid] = now.isoformat()
+        note_used(r)
         if r.status_code != 200:
             continue
         c = int(r.headers.get("x-requests-last") or 2)
@@ -778,6 +790,7 @@ def pull(sport, now, st, reason):
     events, cost = [], 0
     for ok in okeys:
         r = requests.get(f"{ODDS}/{ok}/odds", params=params, timeout=60)
+        note_used(r)
         if r.status_code in (404, 422):
             continue
         r.raise_for_status()
@@ -2812,6 +2825,7 @@ def tennis_finals(okey):
     if not key or not can_spend(st, now, 2):
         return []
     r = requests.get(f"{ODDS}/{okey}/scores", params=dict(apiKey=key, daysFrom=3), timeout=30)
+    note_used(r)
     if r.status_code in (404, 422):
         return []
     r.raise_for_status()
