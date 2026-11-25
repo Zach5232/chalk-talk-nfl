@@ -78,7 +78,7 @@ jobs:
             python3 scan/scan.py $MODE
           fi
       - name: Start the next watch loop
-        if: ${{ !cancelled() && (inputs.mode == 'watch' || (github.event_name == 'schedule' && github.event.schedule != '5 12 * * *' && github.event.schedule != '35 13 * * *' && github.event.schedule != '35 14 * * *')) && (inputs.minutes == '' || inputs.minutes == null) }}
+        if: ${{ success() && (inputs.mode == 'watch' || (github.event_name == 'schedule' && github.event.schedule != '5 12 * * *' && github.event.schedule != '35 13 * * *' && github.event.schedule != '35 14 * * *')) && (inputs.minutes == '' || inputs.minutes == null) }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run scan.yml --repo "${{ github.repository }}" --ref master -f mode=watch
