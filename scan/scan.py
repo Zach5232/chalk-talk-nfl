@@ -2690,7 +2690,6 @@ def morning_report(now):
     day_of = lambda p: datetime.fromisoformat(p["start"]).astimezone(ET).strftime("%Y-%m-%d")
     mine_all = [p for p in allp if p.get("taken")]
     mine_day = sorted((p for p in mine_all if day_of(p) == yday), key=lambda p: p["start"])
-    icon = {"win": "✅", "loss": "❌", "push": "➖"}
 
     def mine_totals(ps):
         res = lambda p: p.get("result_taken") or p["result"]
@@ -2701,43 +2700,22 @@ def morning_report(now):
         exp = (f" · expected {sum(ex):.1f} wins from the fair line" if len(ex) == w + l_ and ex else "")
         return (f"{w}-{l_}, {usd:+,.0f}" + exp + (f" · beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})"
                                                    if ct else ""))
-    lines = [f"📊 **Morning report · {datetime.fromisoformat(yday).strftime('%a %b %-d')}**", "", "**Your card**"]
-    if mine_day:
-        for p in mine_day[:25]:
-            res = p.get("result_taken") or p["result"]
-            stake = p.get("stake_taken") or p.get("stake_usd") or 0
-            ps_ = price_str(p.get("taken_odds") or p["odds"], p.get("taken_book") or p["book"], p.get("taken_price"))
-            c = p.get("clv_taken")
-            lines.append(f"{icon[res]} {SPORTS[p['sport']]['label']} {p['label']} · ${stake:g} @ {ps_} "
-                         f"{BOOK_NAMES.get(p.get('taken_book') or p['book'], p.get('taken_book') or p['book'])} · {p.get('pl_taken_usd') or 0:+.2f}"
-                         + (f" · CLV {c:+.1%}" if c is not None else ""))
-        if len(mine_day) > 25:
-            lines.append(f"…and {len(mine_day) - 25} more")
-        lines.append(f"**Day:** {mine_totals(mine_day)}")
-    else:
-        lines.append("No logged bets graded for that day (tap Bet it on the alerts you take).")
+    # totals only (your own tracker has the bet-by-bet list); the detailed breakdowns are on demand
+    lines = [f"📊 **Morning report · {datetime.fromisoformat(yday).strftime('%a %b %-d')}**"]
+    lines.append(f"**Your bets:** {mine_totals(mine_day)}" if mine_day else "**Your bets:** none graded for that day")
     if mine_all:
         lines.append(f"**Since you started logging:** {mine_totals(mine_all)} over {len(mine_all)} bets")
-    recent = [p for p in allp if p.get("found") and datetime.fromisoformat(p["start"]) > now - timedelta(days=30)]
-    posted = [p for p in recent if p.get("alerted")]
-    logged = [p for p in recent if p.get("test")]
-    try:
-        lines += [""] + health_report(now)
+    day_alerts = [p for p in allp if p.get("alerted") and day_of(p) == yday]
+    if day_alerts:
+        w = sum(p["result"] == "win" for p in day_alerts); l_ = sum(p["result"] == "loss" for p in day_alerts)
+        cl = [p["clv"] for p in day_alerts if p.get("clv") is not None]
+        lines.append(f"**All alerts:** {w}-{l_} · {sum(p.get('pl_usd') or 0 for p in day_alerts):+,.0f} at suggested stakes"
+                     + (f" · beat the close {100 * sum(c > 0 for c in cl) / len(cl):.0f}% · CLV {sum(cl) / len(cl):+.1%}" if cl else ""))
+    try:   # only problems are worth a line
+        warn = [ln for ln in health_report(now) if ln.startswith(("🚨", "⚠️"))]
+        lines += warn
     except Exception as e:  # noqa: BLE001
-        lines += ["", f"🩺 checks could not run: {type(e).__name__}"]
-    lines += ["", "**Scorecard · last 30 days** (posted = alerts · logged = tests, never posted)"]
-    lines += _band_lines(logged, [(0.01, 0.02, "1-2% logged")])
-    lines += _band_lines(posted, [(0.02, 0.04, "2-4% posted"), (0.04, 0.07, "4-7% posted"), (0.07, 0.121, "7-12% posted")])
-    lines += _band_lines(logged, [(0.121, 0.31, "12-30% logged")])
-    if posted:
-        w = sum(p["result"] == "win" for p in posted); l_ = sum(p["result"] == "loss" for p in posted)
-        cl = [p["clv"] for p in posted if p.get("clv") is not None]
-        lines.append(f"**All alerts:** {len(posted)} · {w}-{l_} · {sum(p.get('pl_usd') or 0 for p in posted):+,.0f} at suggested stakes"
-                     + (f" · beat close {100 * sum(c > 0 for c in cl) / len(cl):.0f}% · CLV {sum(cl) / len(cl):+.1%}" if cl else ""))
-    if posted:
-        lines += ["", "**By price · last 30 days** (alerts, at suggested stakes)"] + _price_lines(posted)
-    if mine_all:
-        lines += ["**By price · your bets**"] + _price_lines(mine_all, mine=True)
+        lines.append(f"🩺 checks could not run: {type(e).__name__}")
     fs_set("scan_state/morning", {"day": yday, "at": now.isoformat()})
     # Discord caps a message at 2000 characters: split on lines
     chunk = ""
