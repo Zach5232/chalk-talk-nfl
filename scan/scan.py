@@ -2803,21 +2803,24 @@ def morning_report(now):
         return (f"{w}-{l_}, {usd:+,.0f}" + exp + (f" · beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})"
                                                    if ct else ""))
     # totals only (your own tracker has the bet-by-bet list); the detailed breakdowns are on demand
-    lines = [f"📊 **Morning report · {datetime.fromisoformat(yday).strftime('%a %b %-d')}**"]
-    lines.append(f"**Your bets:** {mine_totals(mine_day)}" if mine_day else "**Your bets:** none graded for that day")
+    lines = ["\u200b", "# 📊 Morning report", f"-# {datetime.fromisoformat(yday).strftime('%A %b %-d')} · totals only", "",
+             "### Your bets"]
+    lines.append(f"**That day:** {mine_totals(mine_day)}" if mine_day else "**That day:** none graded")
     if mine_all:
         lines.append(f"**Since you started logging:** {mine_totals(mine_all)} over {len(mine_all)} bets")
     day_alerts = [p for p in allp if p.get("alerted") and day_of(p) == yday]
     if day_alerts:
         w = sum(p["result"] == "win" for p in day_alerts); l_ = sum(p["result"] == "loss" for p in day_alerts)
         cl = [p["clv"] for p in day_alerts if p.get("clv") is not None]
-        lines.append(f"**All alerts:** {w}-{l_} · {sum(p.get('pl_usd') or 0 for p in day_alerts):+,.0f} at suggested stakes"
+        lines += ["", "### All alerts"]
+        lines.append(f"**That day:** {w}-{l_} · {sum(p.get('pl_usd') or 0 for p in day_alerts):+,.0f} at suggested stakes"
                      + (f" · beat the close {100 * sum(c > 0 for c in cl) / len(cl):.0f}% · CLV {sum(cl) / len(cl):+.1%}" if cl else ""))
     try:   # only problems are worth a line
         warn = [ln for ln in health_report(now) if ln.startswith(("🚨", "⚠️"))]
-        lines += warn
+        lines += (["", "### ⚠️ Checks"] + warn) if warn else []
     except Exception as e:  # noqa: BLE001
         lines.append(f"🩺 checks could not run: {type(e).__name__}")
+    lines += ["", "━━━━━━━━━━━━━━━━━━━━", "\u200b"]
     fs_set("scan_state/morning", {"day": yday, "at": now.isoformat()})
     # Discord caps a message at 2000 characters: split on lines
     chunk = ""
@@ -2841,30 +2844,31 @@ def day_summary(now):
     by_sport = {}
     for x in ps:
         by_sport[SPORTS[x["sport"]]["label"]] = by_sport.get(SPORTS[x["sport"]]["label"], 0) + 1
-    lines = [f"📋 **Wrap-up {datetime.fromisoformat(day).strftime('%a %b %-d')}**",
-             f"Alerts: {len(ps)} (" + ", ".join(f"{k} {v}" for k, v in sorted(by_sport.items())) + ")"]
+    lines = ["\u200b", "# 📋 Nightly wrap-up", f"-# {datetime.fromisoformat(day).strftime('%A %b %-d')}", "",
+             "### Today", f"**Alerts:** {len(ps)} (" + ", ".join(f"{k} {v}" for k, v in sorted(by_sport.items())) + ")"]
     if any(x.get("taken") is not None for x in ps):
         tk = [x for x in ps if x.get("taken")]
         mv = sum(x.get("taken") is False and x.get("pass_reason") == "line moved" for x in ps)
         nf = sum(x.get("taken") is False and x.get("pass_reason") == "no funds" for x in ps)
-        lines.append(f"You took {len(tk)} (${sum(x.get('stake_taken') or x.get('stake_usd') or 0 for x in tk):,.0f}), "
+        lines.append(f"**You took** {len(tk)} (${sum(x.get('stake_taken') or x.get('stake_usd') or 0 for x in tk):,.0f}), "
                      f"passed {sum(x.get('taken') is False for x in ps) - mv - nf}, missed (line moved) {mv}, "
                      + (f"no funds {nf}, " if nf else "") +
                      f"no answer {sum(x.get('taken') is None for x in ps)}")
     pend = [x for x in ps if not x.get("result") and x.get("taken") is not False]
     if pend:
-        lines.append(f"Still open: {len(pend)} bets, ${sum(x.get('stake_taken') or x.get('stake_usd') or 0 for x in pend):,.0f}")
+        lines.append(f"**Still open:** {len(pend)} bets, ${sum(x.get('stake_taken') or x.get('stake_usd') or 0 for x in pend):,.0f}")
     gr = [x for x in ps if x.get("result") in ("win", "loss", "push")]
     if gr:
         w = sum(x["result"] == "win" for x in gr); l_ = sum(x["result"] == "loss" for x in gr)
         usd = sum(x.get("pl_usd") or 0 for x in gr)
         cl = [x["clv"] for x in gr if x.get("clv") is not None]
-        lines.append(f"Graded so far: {w}-{l_}, {usd:+,.0f} at the suggested stakes"
+        lines += ["", "### Results so far"]
+        lines.append(f"**All alerts:** {w}-{l_}, {usd:+,.0f} at the suggested stakes"
                      + (f", beat the close {sum(c > 0 for c in cl)}/{len(cl)} (avg {sum(cl) / len(cl):+.1%})" if cl else ""))
         mine = [x for x in gr if x.get("taken")]
         if mine:
             ct = [x["clv_taken"] for x in mine if x.get("clv_taken") is not None]
-            lines.append(f"Your bets: {sum(x['result'] == 'win' for x in mine)}-{sum(x['result'] == 'loss' for x in mine)}, "
+            lines.append(f"**Your bets:** {sum(x['result'] == 'win' for x in mine)}-{sum(x['result'] == 'loss' for x in mine)}, "
                          f"{sum(x.get('pl_taken_usd') or 0 for x in mine):+,.0f} at your prices and stakes"
                          + (f", beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})" if ct else ""))
     life = {}
@@ -2873,8 +2877,10 @@ def day_summary(now):
             mins = (datetime.fromisoformat(x["gone_at"]) - datetime.fromisoformat(x["alerted_at"])).total_seconds() / 60
             life.setdefault(BOOK_NAMES.get(x["book"], x["book"]), []).append(mins)
     if life:
-        lines.append("How long alerts lasted (median): " + ", ".join(
+        lines += ["", "### How long alerts lasted (median)"]
+        lines.append(", ".join(
             f"{b} {sorted(v)[len(v) // 2]:.0f} min" for b, v in sorted(life.items(), key=lambda kv: -len(kv[1]))))
+    lines += ["", "━━━━━━━━━━━━━━━━━━━━", "\u200b"]
     return "\n".join(lines)
 
 
@@ -3391,7 +3397,8 @@ def main():
         now = datetime.now(timezone.utc)
         ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(days=30)).isoformat())
               if x.get("taken") and not x.get("superseded")]
-        lines = ["📒 **Your bets by book** (everything you tapped Bet it on)"]
+        lines = ["\u200b", "# 📒 Your bets by book", f"-# {datetime.now(ET).strftime('%A %b %-d')} · last 30 days · everything you tapped Bet it on", "",
+                 "### By book"]
         tb = lambda x: x.get("taken_book") or x["book"]   # where you actually placed it
         for bk in sorted({tb(x) for x in ps}, key=lambda b: -sum(1 for x in ps if tb(x) == b)):
             xs = [x for x in ps if tb(x) == bk]
@@ -3400,7 +3407,7 @@ def main():
             res = lambda x: x.get("result_taken") or x.get("result")
             stake = lambda x: x.get("stake_taken") or x.get("stake_usd") or 0
             ct = [x["clv_taken"] for x in done if x.get("clv_taken") is not None]
-            lines.append(f"**{BOOK_NAMES.get(bk, bk)}:** {len(xs)} bets · settled {sum(res(x) == 'win' for x in done)}-"
+            lines.append(f"• **{BOOK_NAMES.get(bk, bk)}:** {len(xs)} bets · settled {sum(res(x) == 'win' for x in done)}-"
                          f"{sum(res(x) == 'loss' for x in done)} · {sum(x.get('pl_taken_usd') or 0 for x in done):+,.2f} "
                          f"on ${sum(stake(x) for x in done):,.0f} staked · open {len(open_)} (${sum(stake(x) for x in open_):,.0f} riding)"
                          + (f" · beat the sharp close {sum(c > 0 for c in ct)}/{len(ct)} (avg {sum(ct) / len(ct):+.1%})" if ct else ""))
@@ -3417,7 +3424,9 @@ def main():
         cuts = [("Moneylines", [x for x in done_all if x["kind"] == "h2h"]), ("Spreads", [x for x in done_all if x["kind"] == "spread"]),
                 ("Totals", [x for x in done_all if x["kind"] == "total"]),
                 ("Main line", [x for x in done_all if not x.get("off_main")]), ("Off the main line", [x for x in done_all if x.get("off_main")])]
-        lines.append("**Settled, by type:** " + " · ".join(f"{k} {wl(v)}" for k, v in cuts if v))
+        lines += ["", "### Settled, by type"]
+        lines += [f"• **{k}:** {wl(v)}" for k, v in cuts if v]
+        lines += ["", "━━━━━━━━━━━━━━━━━━━━", "\u200b"]
         print("by type:", " | ".join(f"{k} {wl(v)}" for k, v in cuts if v))
         report_send("\n".join(lines))
         return print(f"posted to Discord ({len(ps)} bets)")
