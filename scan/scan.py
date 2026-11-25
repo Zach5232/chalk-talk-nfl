@@ -1486,7 +1486,7 @@ BOT_MSGS = set()          # alert messages the bot posted (it edits those; the w
 BOT_CAN_POST = [True]
 
 
-def discord_send(text, edit_id=None, buttons=True):
+def discord_send(text, edit_id=None, buttons=True, ch=None):
     """Post one alert (returns its message id), or edit an earlier one in place (no new notification).
     With the bot: posted by the bot with Bet it / Pass buttons. Without it (or no Send Messages permission): webhook."""
     if DRY:
@@ -1498,7 +1498,7 @@ def discord_send(text, edit_id=None, buttons=True):
     try:
         if bot_on() and (edit_id in BOT_MSGS if edit_id else BOT_CAN_POST[0]):
             if edit_id:
-                bot("PATCH", f"/channels/{channel_id()}/messages/{edit_id}", json={"content": text})
+                bot("PATCH", f"/channels/{ch or channel_id()}/messages/{edit_id}", json={"content": text})
                 time.sleep(0.3)
                 return edit_id
             try:
@@ -1540,6 +1540,26 @@ def channel_id():
         except Exception:  # noqa: BLE001
             _CHANNEL[0] = ""
     return _CHANNEL[0]
+
+
+_FUTCH = [None]
+
+
+def msg_channel(x):
+    """Which channel an alert lives in: futures alerts are in #futures, everything else in #value-plays."""
+    if x.get("kind") != "future":
+        return None
+    if x.get("ch"):
+        return x["ch"]
+    if _FUTCH[0] is None:
+        _FUTCH[0] = ""
+        try:
+            gid = bot("GET", f"/channels/{channel_id()}")["guild_id"]
+            chans = bot("GET", f"/guilds/{gid}/channels") or []
+            _FUTCH[0] = next((c["id"] for c in chans if "future" in (c.get("name") or "").lower() and c.get("type") == 0), "")
+        except Exception:  # noqa: BLE001
+            pass
+    return _FUTCH[0] or None
 
 
 _TROPHY = [None]
@@ -1947,7 +1967,7 @@ def apply_taps(seen):
                 if len(bets) > 1:
                     line += f" · {len(bets)} bets on this, ${x['stake_taken']:g} total"
         x.update(status_line=line, status_final=True, tapped_at=datetime.now(timezone.utc).isoformat())
-        discord_send((x.get("msg_text") or alert_text(x, x)) + "\n" + line, edit_id=mid)
+        discord_send((x.get("msg_text") or alert_text(x, x)) + "\n" + line, edit_id=mid, ch=msg_channel(x))
         fs_set(f"scan_plays/{x.get('_id') or play_id(x, x['event_id'])}", {k: v for k, v in x.items() if k != "_id"})
         n += 1
     for it_ in later:
@@ -2575,6 +2595,14 @@ def watch(minutes, sports):
     BOT_MSGS.update(x["msg_id"] for x in seen.values() if x.get("via") == "bot" and x.get("msg_id"))
     refresh_msg_doc(seen, datetime.now(timezone.utc))
     if bot_on():
+        for x in list(seen.values()):   # futures taps logged before their edits could reach #futures
+            if x.get("kind") == "future" and x.get("status_line") and x.get("msg_id") and not x.get("status_shown"):
+                try:
+                    discord_send((x.get("msg_text") or "") + "\n" + x["status_line"], edit_id=x["msg_id"], ch=msg_channel(x))
+                    x["status_shown"] = True
+                    fs_set(f"scan_plays/{x['_id']}", {k: v for k, v in x.items() if k != "_id"})
+                except Exception:  # noqa: BLE001
+                    pass
         threading.Thread(target=gateway, daemon=True).start()
         for mid, x in list(MSG_DOC.items()):   # give alerts you haven't answered the current buttons
             if mid in BOT_MSGS and x.get("taken") is None:

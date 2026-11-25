@@ -368,13 +368,14 @@ def alert_market(key, sub, sport, et, ev, rows, seen, now):
                 f"**{r['name']} · {price} @ {bkn}**\n"
                 f"Fair {pct(r['fair'])} ({odds_str(S.american(r['fair']))}) · EV {e:+.1%} · bet ${stake} (1/16 Kelly) · "
                 f"money locked until {(ev.get('close') or '')[:10] or 'the season ends'}")
-        mid = post(text, edit_id=(old or {}).get("msg_id"), buttons=True)
+        shown = text + (f"\n{old['status_line']}" if (old or {}).get("status_line") else "")   # keep your bets on it
+        mid = post(shown, edit_id=(old or {}).get("msg_id"), buttons=True)
         close = ev.get("close") or (now + timedelta(days=180)).isoformat()
         doc = dict(old or {}, kind="future", sport=sport, fut=key, event_id=et, label=f"{r['name']} -- {sub}", side="a",
                    line=None, book=bk, odds=odds, odds_alerted=odds, price_prob=pr, ev=round(e, 4),
                    p_fair=round(r["fair"], 5), fair_odds=S.american(r["fair"]), stake_usd=stake, bar=bar,
                    start=close.replace("Z", "+00:00"), home=r["name"], away="", alerted=True, msg_id=mid,
-                   msg_text=text, msg_base=text, via="bot", alerted_at=now.isoformat(),
+                   msg_text=text, msg_base=text, via="bot", alerted_at=now.isoformat(), ch=futures_channel() if not S.DRY else None,
                    first_price=(old or {}).get("first_price") or price, first_book=(old or {}).get("first_book") or bkn)
         S.fs_set(f"scan_plays/{pid}", doc)
         seen[pid] = dict(doc, _id=pid)
@@ -388,7 +389,8 @@ def alert_market(key, sub, sport, et, ev, rows, seen, now):
         why = (f"fair now {pct(r['fair'])}, best EV {r['best'][3]:+.1%}" if r and r.get("best") else "no longer priced")
         if r and r["fair"] < MIN_FAIR:
             why = f"longshot (fair {pct(r['fair'])}) -- pricing noise, not value"
-        txt = (x.get("msg_base") or x.get("msg_text") or "") + f"\n🚫 **No longer a play** -- {why}"
+        txt = ((x.get("msg_base") or x.get("msg_text") or "") + (f"\n{x['status_line']}" if x.get("status_line") else "")
+               + f"\n🚫 **No longer a play** -- {why}")
         post(txt, edit_id=x.get("msg_id"))
         x.update(withdrawn=now.isoformat(), msg_text=txt)
         S.fs_set(f"scan_plays/{pid}", {k: v for k, v in x.items() if k != "_id"})
