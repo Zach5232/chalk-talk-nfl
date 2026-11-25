@@ -76,6 +76,9 @@ SHARP_BOOKS = {"pinnacle", "betfair_ex_eu"}
 KALSHI_ANCHOR = {"cfb", "mm"}
 PROP_KEYS = {"nflpo", "nfl1", "nbapo", "nhlpo", "cfp", "cfpqf", "cfpsf", "mmround"}   # many teams can hit: no 100% total           # no sharp book prices these on the Odds API: Kalshi anchors the fair line
 BAR, BAR_LONG, LONG_P = 0.05, 0.08, 0.03
+MIN_FAIR = 0.03            # no alerts on picks under a 3% fair chance -- longshot prices are where the noise lives
+MAX_EV = 0.25              # an 'edge' above this on a future is a pricing mistake, not value
+KALSHI_MIN_MID = 0.04      # below this Kalshi's price is mostly its 1c tick + lottery demand
 KELLY_DIV = 16
 BETTER_EV = 0.02
 FUT_BOOKS = (S.BET_BOOKS - {"draftkings"}) | {"kalshi"}   # places you can bet
@@ -168,6 +171,8 @@ def price_market(key, sport, sels, books):
         if winner and ksum > 0:
             m = m / ksum   # a winner field must add to 100%
         wk = 2.0 if (sels[n].get("spread") or 1) <= 0.06 else 1.0
+        if books and sels[n]["mid"] < KALSHI_MIN_MID:
+            continue   # Kalshi longshots trade at 1-2c no matter what (1c tick, lottery buyers): books price those
         acc.setdefault(n, []).append((wk if key not in KALSHI_ANCHOR else 3.0, m, "kalshi"))
     rows = []
     for n, xs in acc.items():
@@ -317,6 +322,7 @@ def round_label(event_ticker):
 
 def alert_market(key, sub, sport, et, ev, rows, seen, now):
     n = 0
+    live = set()
     fee_sport = sport if sport != "golf" else "nfl"
     for r in rows:
         b = r["best"]
@@ -324,11 +330,12 @@ def alert_market(key, sub, sport, et, ev, rows, seen, now):
             continue
         bk, odds, pr, e = b
         bar = BAR_LONG if r["fair"] < LONG_P else BAR
-        if e < bar or e > 0.60 or (len(r["srcs"]) < 2 and key not in KALSHI_ANCHOR):
+        if r["fair"] < MIN_FAIR or e < bar or e > MAX_EV or (len(r["srcs"]) < 2 and key not in KALSHI_ANCHOR):
             continue
         if bk == "kalshi" and key in KALSHI_ANCHOR:
             continue   # Kalshi is the fair line here: can't be value against itself
         pid = re.sub(r"[^A-Za-z0-9_.+-]", "_", f"fut_{key}_{et}_{r['name']}")
+        live.add(pid)
         old = seen.get(pid)
         if old and e < (old.get("ev") or 0) + BETTER_EV:
             continue
@@ -350,6 +357,20 @@ def alert_market(key, sub, sport, et, ev, rows, seen, now):
                    first_price=(old or {}).get("first_price") or price, first_book=(old or {}).get("first_book") or bkn)
         S.fs_set(f"scan_plays/{pid}", doc)
         seen[pid] = dict(doc, _id=pid)
+        n += 1
+    # earlier alerts in this market that no longer clear the bar: say so on the message (bets you logged stay)
+    fair = {r["name"]: r for r in rows}
+    for pid, x in list(seen.items()):
+        if x.get("fut") != key or x.get("event_id") != et or pid in live or x.get("withdrawn"):
+            continue
+        r = fair.get(x.get("home"))
+        why = (f"fair now {pct(r['fair'])}, best EV {r['best'][3]:+.1%}" if r and r.get("best") else "no longer priced")
+        if r and r["fair"] < MIN_FAIR:
+            why = f"longshot (fair {pct(r['fair'])}) -- pricing noise, not value"
+        txt = (x.get("msg_base") or x.get("msg_text") or "") + f"\n🚫 **No longer a play** -- {why}"
+        post(txt, edit_id=x.get("msg_id"))
+        x.update(withdrawn=now.isoformat(), msg_text=txt)
+        S.fs_set(f"scan_plays/{pid}", {k: v for k, v in x.items() if k != "_id"})
         n += 1
     return n
 
