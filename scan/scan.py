@@ -98,7 +98,10 @@ BOOKS = ["pinnacle", "circasports", "novig", "fanduel", "betrivers", "ballybet",
          "espnbet"]
 BET_BOOKS = {"draftkings", "novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag",
              "williamhill_us", "espnbet"}
-WEIGHTS = {"pinnacle": 3.0, "circasports": 3.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
+# Circa: as sharp as Pinnacle in football and first to move (Nov 17-23 study) -> 3x; in basketball it adds nothing the
+# blend doesn't already have (Nov 23-24 backtests) -> 1x. Other sports: 1x until the live test says otherwise.
+CIRCA_W = {"nfl": 3.0, "ncaaf": 3.0}
+WEIGHTS = {"pinnacle": 3.0, "circasports": 1.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
 # pregame taker fees, checked on real slips (see nhl-model model_config.json exchange_fees)
 FEES = {"kalshi": ("parabolic", 0.07), "polymarket": ("parabolic", 0.07), "prophetx": ("winnings", 0.02)}
 FEES_BY_SPORT = {("nhl", "prophetx"): ("parabolic", 0.035)}
@@ -261,7 +264,8 @@ def fair_views(sport, kind, rows):
             q = [round(x, 5) for x in devig_n([prob(r["a"]), prob(r["b"]), prob(r["d"])])]
         else:
             q = round(devig(prob(r["a"]), prob(r["b"])), 5)
-        out.append([r["book"], WEIGHTS.get(r["book"], 1.0), r["line"], q])
+        w = CIRCA_W.get(sport, 1.0) if r["book"] == "circasports" else WEIGHTS.get(r["book"], 1.0)
+        out.append([r["book"], w, r["line"], q])
     return out
 
 
@@ -353,6 +357,7 @@ def fair_variants(sport, g, kind, side, line, book, now):
                # the Circa test: same blend with Circa left out, and Circa alone
                nocirca=_fair_w(sport, kind, views, line, side, book, lambda bk, w: 0.0 if bk == "circasports" else w),
                circa1x=_fair_w(sport, kind, views, line, side, book, lambda bk, w: 1.0 if bk == "circasports" else w),
+               circa3x=_fair_w(sport, kind, views, line, side, book, lambda bk, w: 3.0 if bk == "circasports" else w),
                circa=fair_side(sport, kind, views, line, side, only="circasports"))
     mid = (g.get("exmid") or {}).get(f"{kind}|{line}")
     if mid and out["live"] is not None and (now - datetime.fromisoformat(mid[1])).total_seconds() < 600 and side in ("a", "b"):
@@ -3167,7 +3172,7 @@ def circa_report(ps):
     for sp in sorted({p["sport"] for p in xs}):
         ys = [p for p in xs if p["sport"] == sp]
         bits = []
-        for v, lab in (("live", "3x"), ("circa1x", "1x"), ("nocirca", "none")):
+        for v, lab in (("circa3x", "3x"), ("circa1x", "1x"), ("nocirca", "none")):
             pk = [p for p in ys if v in p["fv"] and p["fv"][v] * (1 + payout(p["odds"], p["book"], p["sport"])) - 1 >= 0.02]
             cp = [p["p_close_pin"] * (1 + payout(p["odds"], p["book"], p["sport"])) - 1 for p in pk]
             cc = [p["p_close"] * (1 + payout(p["odds"], p["book"], p["sport"])) - 1 for p in pk if p.get("p_close") is not None]
@@ -3184,7 +3189,7 @@ def fair_report(ps):
         return [f"  fair-line test: {len(xs)} plays with variants + Pinnacle close so far"]
     out = ["  fair-line test (truth = Pinnacle no-vig close): method / plays / avg miss / 2%+ picks / beat close / CLV"
            " / CLV vs consensus close"]
-    for v in ("live", "circa1x", "nocirca", "circa", "pin", "equal", "fresh", "exblend"):
+    for v in ("live", "circa3x", "circa1x", "nocirca", "circa", "pin", "equal", "fresh", "exblend"):
         ys = [p for p in xs if v in p["fv"]]
         if not ys:
             continue
@@ -3458,7 +3463,7 @@ def main():
         for f in ("fv", "off_main", "test", "overcap", "early", "shadow", "rel", "msg_id", "taken", "tapped_at", "clv_taken",
                   "p_close", "result"):
             print(f"  {f:10s} {sum(1 for x in ps if x.get(f) not in (None, False, ''))}")
-        print("  fv methods:", {k: sum(1 for x in ps if k in (x.get('fv') or {})) for k in ("live", "circa1x", "nocirca", "circa", "pin", "equal", "fresh", "exblend")})
+        print("  fv methods:", {k: sum(1 for x in ps if k in (x.get('fv') or {})) for k in ("live", "circa3x", "circa1x", "nocirca", "circa", "pin", "equal", "fresh", "exblend")})
         print("  DraftKings (log-only):", sum(1 for x in ps if x.get("book") == "draftkings"), "plays;",
               sum(1 for x in ps if x.get("book") == "draftkings" and not x.get("test")), "at the bar")
         print("  by sport:", {SPORTS[s_]['label']: sum(1 for x in ps if x['sport'] == s_) for s_ in SPORTS if any(x['sport'] == s_ for x in ps)})
