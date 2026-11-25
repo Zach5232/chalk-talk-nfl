@@ -233,11 +233,32 @@ def futures_channel():
     return _FCH[0]
 
 
-def post(text, edit_id=None, buttons=False):
+_BTH = [None]
+
+
+def board_thread(st):
+    """The 'board' thread (in or near #futures) the owner made for the daily board; #futures itself if none."""
+    if _BTH[0] is None:
+        _BTH[0] = st.get("board_thread") or ""
+        try:
+            gid = S.bot("GET", f"/channels/{S.channel_id()}")["guild_id"]
+            ths = (S.bot("GET", f"/guilds/{gid}/threads/active") or {}).get("threads", [])
+            fc = futures_channel()
+            if fc:   # an archived thread still counts (posting to it reopens it)
+                ths += (S.bot("GET", f"/channels/{fc}/threads/archived/public") or {}).get("threads", [])
+            hit = next((t["id"] for t in ths if "board" in (t.get("name") or "").lower()), None)
+            if hit:
+                _BTH[0] = hit
+        except Exception as e:  # noqa: BLE001
+            S.log(f"board thread lookup failed: {type(e).__name__}")
+    return _BTH[0] or futures_channel()
+
+
+def post(text, edit_id=None, buttons=False, ch=None):
     if S.DRY or not S.BOT:
         print("   [futures]" + (" [edit]" if edit_id else ""), text.replace("\n", " | ")[:400])
         return edit_id or f"dry-{abs(hash(text)) % 10**8}"
-    ch = futures_channel()
+    ch = ch or futures_channel()
     if not ch:
         return None
     body = {"content": text[:1990], **({"components": S.BUTTONS} if buttons else {})}
@@ -253,11 +274,11 @@ def post(text, edit_id=None, buttons=False):
     return m["id"]
 
 
-def pin(mid):
+def pin(mid, ch=None):
     if S.DRY or not S.BOT or not mid:
         return
     try:
-        S.bot("PUT", f"/channels/{futures_channel()}/pins/{mid}")
+        S.bot("PUT", f"/channels/{ch or futures_channel()}/pins/{mid}")
     except Exception:  # noqa: BLE001 -- needs Manage Messages; the board still works unpinned
         pass
 
@@ -377,7 +398,16 @@ def alert_market(key, sub, sport, et, ev, rows, seen, now):
 
 def dashboards(board, st):
     """One pinned message per sport (edited daily): top of each market, fair chance, 7-day move, best price."""
+    bch = board_thread(st) if not S.DRY else None
     ids = dict(st.get("dash") or {})
+    if not S.DRY and st.get("dash_ch", futures_channel()) != bch:   # board moved: clear the old messages
+        for old_ids in ids.values():
+            for mid in old_ids:
+                try:
+                    S.bot("DELETE", f"/channels/{st.get('dash_ch') or futures_channel()}/messages/{mid}")
+                except Exception:  # noqa: BLE001
+                    pass
+        ids = {}
     for sport, mkts in board.items():
         lines = [f"**{SPORT_LABEL.get(sport, sport)} futures board** · {datetime.now(S.ET).strftime('%a %b %-d')}",
                  "-# fair chance · 7-day move · best price available"]
@@ -406,11 +436,14 @@ def dashboards(board, st):
         old = ids.get(sport) or []
         new = []
         for i, ch in enumerate(chunks):
-            mid = post(ch, edit_id=old[i] if i < len(old) else None)
+            mid = post(ch, edit_id=old[i] if i < len(old) else None, ch=bch)
             if mid and (i >= len(old) or mid != old[i]):
-                pin(mid)
+                pin(mid, bch)
             new.append(mid)
         for extra in old[len(chunks):]:   # board got shorter: blank the leftover message
-            post("​", edit_id=extra)
+            post("​", edit_id=extra, ch=bch)
         ids[sport] = new
     st["dash"] = ids
+    st["dash_ch"] = bch
+    if _BTH[0]:
+        st["board_thread"] = _BTH[0]
