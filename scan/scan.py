@@ -152,7 +152,15 @@ def american(p):
     return round(-100 * p / (1 - p)) if p >= 0.5 else round(100 * (1 - p) / p)
 
 
+# Novig's pre-game taker fee from Dec 1 2026: 0.03 x P x (1 - P) per contract (makers pay nothing)
+NOVIG_FEE_FROM = datetime(2026, 12, 1, 5, 0, tzinfo=timezone.utc)   # midnight ET
+FEE_CLOCK = [None]   # when grading, the time the bet was placed (so a Nov 30 bet graded Dec 1 has no fee)
+
+
 def fee_for(sport, book):
+    if book == "novig":
+        t = FEE_CLOCK[0] or datetime.now(timezone.utc)
+        return ("parabolic", 0.03) if t >= NOVIG_FEE_FROM else None
     return FEES_BY_SPORT.get((sport, book)) or FEES.get(book)
 
 
@@ -2871,7 +2879,12 @@ def selftest():
     check("payout +100 = 1.0", abs(payout(100, "fanduel", "nba") - 1.0) < 1e-9)
     check("payout -110 = 0.909", abs(payout(-110, "fanduel", "nba") - 100 / 110) < 1e-9)
     check("Kalshi fee lowers payout", payout(100, "kalshi", "nba") < 1.0 and payout(100, "kalshi", "nba") > 0.93)
-    check("Novig has no pregame fee", abs(payout(100, "novig", "nba") - 1.0) < 1e-9)
+    _fc = FEE_CLOCK[0]
+    FEE_CLOCK[0] = NOVIG_FEE_FROM - timedelta(minutes=1)
+    check("Novig has no pregame fee before Dec 1", abs(payout(100, "novig", "nba") - 1.0) < 1e-9)
+    FEE_CLOCK[0] = NOVIG_FEE_FROM
+    check("Novig taker fee from Dec 1 (0.03 P(1-P))", abs(payout(100, "novig", "nba") - (1 / (0.5 + 0.03 * 0.25) - 1)) < 1e-9)
+    FEE_CLOCK[0] = _fc
     check("american(0.5) = -100/+100", abs(american(0.5)) == 100)
     check("price_str exchange cents", price_str(115, "novig", 0.465).startswith("46.5"))
     g = dict(views={"spread": [[b, w, -4.0, 0.5] for b, w in (("pinnacle", 3), ("fanduel", 1), ("betmgm", 1), ("betrivers", 1))]})
@@ -2959,6 +2972,10 @@ def grade():
                                              "result": "void: posted after the start", "graded_at": now.isoformat()})
             continue
         res = grade_result(p, f["hs"], f["as_"])
+        try:   # fees as of when the play was found / bet
+            FEE_CLOCK[0] = datetime.fromisoformat(p.get("tapped_at") or p.get("alerted_at") or p.get("found"))
+        except (TypeError, ValueError):
+            FEE_CLOCK[0] = None
         pay = payout(p["odds"], p["book"], p["sport"])
         pl = {"win": pay, "loss": -1.0, "push": 0.0}[res]
         doc = {k: v for k, v in p.items() if k != "_id"}
@@ -2975,6 +2992,7 @@ def grade():
         fs_set(f"scan_plays/{p['_id']}", doc)
         done += 1
     # (reports are on demand now -- 'timing', 'books', 'yday' modes -- so grading reads only what it grades)
+    FEE_CLOCK[0] = None
     log(f"graded {done}")
 
 
