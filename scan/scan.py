@@ -2978,6 +2978,82 @@ def grade():
     log(f"graded {done}")
 
 
+def circa_backtest(day, max_credits):
+    """Hourly historical snapshots (Circa + Pinnacle only) for one ET day's NBA / CBB plays. For each play: Circa's
+    line just before the play was found -> fair chance with Circa alone, Pinnacle alone, the live blend without Circa,
+    and the blend with Circa at 3x. Scored against Pinnacle's and the consensus close. Prints counts and CLV only."""
+    key = os.environ.get("ODDS_API_KEY")
+    d0 = datetime.fromisoformat(day + "T00:00:00").replace(tzinfo=ET)
+    ps = [p for p in fs_recent("scan_plays", "start", (d0 - timedelta(hours=6)).astimezone(timezone.utc).isoformat())
+          if p.get("sport") in ("nba", "ncaab") and p.get("found") and p.get("fv", {}).get("live") is not None
+          and p.get("p_close") is not None and not p.get("superseded")
+          and datetime.fromisoformat(p["found"]).astimezone(ET).strftime("%Y-%m-%d") == day
+          and p["found"] < p["start"]]
+    print(f"plays found on {day} (NBA/CBB) with a fair line and a close: {len(ps)}")
+    snaps, spent = {}, 0
+    for p in sorted(ps, key=lambda p: p["found"]):
+        f = datetime.fromisoformat(p["found"]).astimezone(timezone.utc)
+        hr = f.replace(minute=0, second=0, microsecond=0)   # the hourly snapshot at or before the find: no look-ahead
+        k = (p["sport"], hr)
+        if k in snaps:
+            continue
+        if spent >= max_credits:
+            print(f"credit limit {max_credits} reached -- stopping pulls")
+            break
+        r = requests.get(f"{ODDS}/historical/sports/{SPORTS[p['sport']]['odds']}/odds", timeout=60, params=dict(
+            apiKey=key, date=hr.strftime("%Y-%m-%dT%H:%M:%SZ"), bookmakers="circasports,pinnacle",
+            markets="h2h,spreads,totals", oddsFormat="american"))
+        c = int(r.headers.get("x-requests-last") or 0)
+        spent += c
+        if not snaps:
+            print(f"first snapshot cost {c} credits (status {r.status_code})")
+            if c > 60:
+                print("more than expected -- stopping")
+                break
+        snaps[k] = {e["id"]: e for e in ((r.json() or {}).get("data") or [])} if r.ok else {}
+    print(f"snapshots {len(snaps)}, credits spent {spent}")
+    W_REST = 12.0   # approx. total weight of the other books in the live blend (Pinnacle 3 + exchanges + sportsbooks)
+    rows = []
+    for p in ps:
+        hr = datetime.fromisoformat(p["found"]).astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        ev = (snaps.get((p["sport"], hr)) or {}).get(p["event_id"])
+        if not ev:
+            continue
+        q = quotes(ev).get(p["kind"]) or []
+        vc = [r_ for r_ in fair_views(p["sport"], p["kind"], [x for x in q if x["book"] == "circasports"])]
+        vp = [r_ for r_ in fair_views(p["sport"], p["kind"], [x for x in q if x["book"] == "pinnacle"])]
+        pc = fair_side(p["sport"], p["kind"], vc, p["line"], p["side"], only="circasports") if vc else None
+        if pc is None:
+            continue
+        pp = fair_side(p["sport"], p["kind"], vp, p["line"], p["side"], only="pinnacle") if vp else None
+        live = p["fv"]["live"]
+        rows.append(dict(p=p, circa=pc, pin_then=pp, nocirca=live, withcirca=(W_REST * live + 3 * pc) / (W_REST + 3)))
+    print(f"plays with a Circa line at the time: {len(rows)}")
+    if not rows:
+        return
+    pay = lambda p: payout(p["odds"], p["book"], p["sport"])
+    print("method / avg miss vs Pinnacle close / 2%+ picks / beat Pinnacle close / CLV vs Pinnacle close / CLV vs consensus close")
+    for m in ("withcirca", "nocirca", "circa", "pin_then"):
+        ys = [x for x in rows if x[m] is not None and x["p"].get("p_close_pin") is not None]
+        if not ys:
+            continue
+        miss = sum(abs(x[m] - x["p"]["p_close_pin"]) for x in ys) / len(ys)
+        picks = [x for x in ys if x[m] * (1 + pay(x["p"])) - 1 >= 0.02]
+        cp = [x["p"]["p_close_pin"] * (1 + pay(x["p"])) - 1 for x in picks]
+        cc = [x["p"]["p_close"] * (1 + pay(x["p"])) - 1 for x in picks]
+        print(f"  {m:10s} {len(ys):4d} plays  miss {miss * 100:4.2f} pts  picks {len(picks):4d}"
+              + (f"  beat {sum(c > 0 for c in cp) / len(cp):4.0%}  CLV {sum(cp) / len(cp):+.2%}  vs consensus {sum(cc) / len(cc):+.2%}" if cp else ""))
+    both = [x for x in rows if x["p"].get("p_close_pin") is not None]
+    closer = sum(abs(x["withcirca"] - x["p"]["p_close_pin"]) < abs(x["nocirca"] - x["p"]["p_close_pin"]) for x in both)
+    print(f"with Circa closer to the Pinnacle close on {closer}/{len(both)} plays")
+    for sp in ("nba", "ncaab"):
+        ys = [x for x in both if x["p"]["sport"] == sp]
+        if ys:
+            mw = sum(abs(x["withcirca"] - x["p"]["p_close_pin"]) for x in ys) / len(ys)
+            mn = sum(abs(x["nocirca"] - x["p"]["p_close_pin"]) for x in ys) / len(ys)
+            print(f"  {SPORTS[sp]['label']}: {len(ys)} plays, miss with Circa {mw * 100:.2f} pts vs without {mn * 100:.2f} pts")
+
+
 def fair_report(ps):
     """Which fair-line method best predicts Pinnacle's no-vig close, and whose 2%+ picks beat it most."""
     xs = [p for p in ps if p.get("fv") and p.get("p_close_pin") is not None]
@@ -3060,7 +3136,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe"])
+                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -3164,6 +3240,8 @@ def main():
                     if ls:
                         print(f"  {bk} {kd}: {ls}")
         return
+    if a.mode == "circatest":   # one-day backtest: would Circa in the fair line have found better plays? (counts only)
+        return circa_backtest(os.environ.get("SCAN_SPORTS") or "2026-11-23", int(os.environ.get("CIRCA_MAX_CREDITS", "1000")))
     if a.mode == "bookprobe":   # every bookmaker the Odds API offers on NFL games (keys only, ~5 credits, no Firestore)
         key = os.environ.get("ODDS_API_KEY")
         r = requests.get(f"{ODDS}/americanfootball_nfl/odds", timeout=60,
