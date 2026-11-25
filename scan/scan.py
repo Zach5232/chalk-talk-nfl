@@ -519,7 +519,11 @@ def fs_recent(collection, field, since_iso):
                              "where": {"fieldFilter": {"field": {"fieldPath": field}, "op": "GREATER_THAN_OR_EQUAL",
                                                        "value": {"stringValue": since_iso}}}}}
     url = f"https://firestore.googleapis.com/v1/projects/{PROJECT}/databases/(default)/documents:runQuery"
-    r = requests.post(url, headers={"Authorization": f"Bearer {token()}"}, json=q, timeout=60)
+    for wait in (5, 20, 60, None):   # Firestore pushing back: wait and retry instead of crashing
+        r = requests.post(url, headers={"Authorization": f"Bearer {token()}"}, json=q, timeout=60)
+        if wait is None or r.status_code not in (429, 500, 503):
+            break
+        time.sleep(wait)
     r.raise_for_status()
     return [{"_id": x["document"]["name"].rsplit("/", 1)[-1],
              **{k: _unval(v) for k, v in x["document"].get("fields", {}).items()}}
@@ -2472,7 +2476,7 @@ def listen(minutes):
         return time.sleep(minutes * 60)
     t_end = time.time() + minutes * 60
     now = datetime.now(timezone.utc)
-    seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (now - timedelta(days=2)).isoformat())}
+    seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (now - timedelta(hours=8)).isoformat())}
     BOT_MSGS.update(x["msg_id"] for x in seen.values() if x.get("via") == "bot" and x.get("msg_id"))
     refresh_msg_doc(seen, now)
     threading.Thread(target=gateway, daemon=True).start()
@@ -2495,7 +2499,7 @@ def watch(minutes, sports):
                      buttons=False)
         POST = False
     t_end = time.time() + minutes * 60
-    seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (datetime.now(timezone.utc) - timedelta(days=2)).isoformat())}
+    seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (datetime.now(timezone.utc) - timedelta(hours=8)).isoformat())}
     BOT_MSGS.update(x["msg_id"] for x in seen.values() if x.get("via") == "bot" and x.get("msg_id"))
     refresh_msg_doc(seen, datetime.now(timezone.utc))
     if bot_on():
@@ -2681,7 +2685,7 @@ def morning_report(now):
     if not 6 <= h_et < 12:   # mornings only: late-night grades miss West Coast finals; after noon is noise
         log(f"morning report for {yday} not posted (outside 6 AM - noon ET)")
         return
-    allp = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=60)).isoformat())
+    allp = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=30)).isoformat())
             if not p.get("superseded") and p.get("result") in ("win", "loss", "push")]
     day_of = lambda p: datetime.fromisoformat(p["start"]).astimezone(ET).strftime("%Y-%m-%d")
     mine_all = [p for p in allp if p.get("taken")]
@@ -2925,7 +2929,7 @@ def health_report(now):
     exd = (fs_get("scan_state/health") or {}).get("exchange_disagree") or {}
     if sum(exd.values()) > 0:
         out.append("ℹ️ exchange prices disagreeing by 15+ points (same side): " + ", ".join(f"{k} {v}" for k, v in exd.items() if v))
-    recent = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=21)).isoformat())
+    recent = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=14)).isoformat())
               if p.get("alerted") and not p.get("superseded") and p.get("clv") is not None]
     for sport in SPORTS:
         xs = sorted((p for p in recent if p["sport"] == sport), key=lambda p: p["start"])[-50:]
@@ -2940,7 +2944,7 @@ def health_report(now):
 
 def grade():
     now = datetime.now(timezone.utc)
-    plays = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=6)).isoformat()) if not p.get("result")
+    plays = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=3)).isoformat()) if not p.get("result")
              and datetime.fromisoformat(p["start"]) < now - timedelta(hours=4)]
     cache, done = {}, 0
     for p in plays:
@@ -2975,20 +2979,8 @@ def grade():
                    graded_at=now.isoformat(), final_hs=f["hs"], final_as=f["as_"])
         fs_set(f"scan_plays/{p['_id']}", doc)
         done += 1
-    allp = [p for p in fs_list("scan_plays") if p.get("result") in ("win", "loss", "push") and p.get("alerted")
-            and not p.get("superseded")]
-    if allp:
-        cl = [p["clv"] for p in allp if p.get("clv") is not None]
-        w = sum(p["result"] == "win" for p in allp); l = sum(p["result"] == "loss" for p in allp)
-        log(f"graded {done}; alerted plays to date: {w}-{l}, {sum(p.get('pl_usd') or 0 for p in allp):+.0f} USD, "
-            f"avg CLV {sum(cl) / len(cl):+.2%} over {len(cl)}, beat close {sum(c > 0 for c in cl) / max(len(cl), 1):.0%}"
-            if cl else f"graded {done}; {w}-{l}")
-    else:
-        log(f"graded {done}")
-    rep_ = book_report(now)
-    if rep_:
-        print("book scorecard this month:\n" + rep_)
-    print(timing_report(now))
+    # (reports are on demand now -- 'timing', 'books', 'yday' modes -- so grading reads only what it grades)
+    log(f"graded {done}")
 
 
 def fair_report(ps):
