@@ -3265,7 +3265,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe"])
+                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -3368,6 +3368,25 @@ def main():
                                 key=lambda t: (t[0], t[1] or 0))
                     if ls:
                         print(f"  {bk} {kd}: {ls}")
+        return
+    if a.mode == "pullprobe":   # why a pull came back empty: events and which books are on them (counts only)
+        key = os.environ.get("ODDS_API_KEY")
+        now = datetime.now(timezone.utc)
+        sp_ = (os.environ.get("SCAN_SPORTS") or "ncaab").split(",")[0]
+        for label, bks in (("current books", ",".join(BOOKS)), ("pinnacle only", "pinnacle")):
+            r = requests.get(f"{ODDS}/{SPORTS[sp_]['odds']}/odds", timeout=60, params=dict(
+                apiKey=key, bookmakers=bks, markets="h2h", oddsFormat="american",
+                commenceTimeFrom=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                commenceTimeTo=(now + timedelta(hours=HOURS_AHEAD)).strftime("%Y-%m-%dT%H:%M:%SZ")))
+            evs = r.json() if r.ok else []
+            cnt = {}
+            for e in evs if isinstance(evs, list) else []:
+                for b in e.get("bookmakers", []):
+                    cnt[b["key"]] = cnt.get(b["key"], 0) + 1
+            print(f"{label}: status {r.status_code}, credits {r.headers.get('x-requests-last')}, events "
+                  f"{len(evs) if isinstance(evs, list) else evs}, games per book {cnt}")
+            if not r.ok:
+                print("  body:", r.text[:200].replace(key, "***"))
         return
     if a.mode == "futprobe":   # futures (outright) markets on the Odds API and which books price them (keys/counts only)
         key = os.environ.get("ODDS_API_KEY")
