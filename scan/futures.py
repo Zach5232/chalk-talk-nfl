@@ -442,7 +442,7 @@ def dashboards(board, st):
         ids = {}
     for sport, mkts in board.items():
         lines = [f"**{SPORT_LABEL.get(sport, sport)} futures board** · {datetime.now(S.ET).strftime('%a %b %-d')}",
-                 "-# fair chance · 7-day move · best price available"]
+                 "-# fair chance · 7-day move · fair odds · best price available (✅ = better than fair)"]
         for sub, rows in mkts:
             key = next((k for k, lab, *_ in MARKETS if sub.startswith(lab)), "")
             if key in PROP_KEYS:   # make-the-playoffs style: the contested teams, not the locks
@@ -456,8 +456,9 @@ def dashboards(board, st):
                 if r.get("move") is not None and abs(r["move"]) >= 0.005:
                     mv = f" ({'▲' if r['move'] > 0 else '▼'}{abs(r['move']) * 100:.1f})"
                 b = r.get("best")
-                bp = f" · {odds_str(b[1])} {S.BOOK_NAMES.get(b[0], b[0])}" if b else ""
-                lines.append(f"• {r['name']} — **{pct(r['fair'])}**{mv}{bp}")
+                good = " ✅" if b and b[3] > 0 else ""   # best price beats the fair line
+                bp = f" · best {odds_str(b[1])} {S.BOOK_NAMES.get(b[0], b[0])}{good}" if b else ""
+                lines.append(f"• {r['name']} — **{pct(r['fair'])}**{mv} · fair **{odds_str(S.american(r['fair']))}**{bp}")
         text, chunks = "", []
         for ln in lines:
             if len(text) + len(ln) + 1 > 1900:
