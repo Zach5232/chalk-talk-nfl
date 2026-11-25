@@ -2090,6 +2090,8 @@ def pair_stake(kind, text, o, p):
         lo, hi = held / (d_p - 1), held * (d_o - 1)
         if lo <= hi:
             return round(min(max(p["stake_usd"], lo), hi)), "the pair can't lose at this amount"
+    if kind == "middle":   # owner's rule: always match -- same payout as the bet you hold, so the pair is about even
+        return round(held * d_o / d_p), "matches your other bet: about even either way, both win on the middle"
     return None
 
 
