@@ -3073,6 +3073,93 @@ def circa_backtest(day, max_credits):
             print(f"  {SPORTS[sp]['label']}: {len(ys)} plays, miss with Circa {mw * 100:.2f} pts vs without {mn * 100:.2f} pts")
 
 
+SHARP_STUDY = {   # snapshot times (ET) for the Circa vs Pinnacle study -- last week's slates
+    "nfl": ["2026-11-17 12:00", "2026-11-18 12:00", "2026-11-19 12:00", "2026-11-19 19:30", "2026-11-20 12:00",
+            "2026-11-21 12:00", "2026-11-22 09:00", "2026-11-22 11:00", "2026-11-22 12:30", "2026-11-22 12:55",
+            "2026-11-22 14:30", "2026-11-22 16:00", "2026-11-22 16:20", "2026-11-22 18:30", "2026-11-22 20:10",
+            "2026-11-23 12:00", "2026-11-23 18:00", "2026-11-23 20:10"],
+    "ncaaf": ["2026-11-17 12:00", "2026-11-18 12:00", "2026-11-19 12:00", "2026-11-20 12:00", "2026-11-21 08:00",
+              "2026-11-21 10:00", "2026-11-21 11:55", "2026-11-21 13:30", "2026-11-21 15:25", "2026-11-21 17:00",
+              "2026-11-21 19:25", "2026-11-21 21:00", "2026-11-21 22:25"],
+}
+
+
+def sharp_study(sport, max_credits):
+    """Circa vs Pinnacle on one slate (no plays needed): at each snapshot, each book's no-vig chance for every game
+    and market, priced at the game's closing line; scored against the close (last snapshot before kickoff) of
+    the two books averaged. Plus who moved first when a spread or total changed. Counts and errors only."""
+    key = os.environ.get("ODDS_API_KEY")
+    base = ODDS.rsplit("/sports", 1)[0]
+    snaps, spent = [], 0
+    for t_et in SHARP_STUDY[sport]:
+        t = datetime.fromisoformat(t_et).replace(tzinfo=ET).astimezone(timezone.utc)
+        if spent >= max_credits:
+            print("credit limit reached"); break
+        r = requests.get(f"{base}/historical/sports/{SPORTS[sport]['odds']}/odds", timeout=60, params=dict(
+            apiKey=key, date=t.strftime("%Y-%m-%dT%H:%M:%SZ"), bookmakers="circasports,pinnacle",
+            markets="spreads,totals", oddsFormat="american"))
+        c = int(r.headers.get("x-requests-last") or 0)
+        spent += c
+        if not snaps:
+            print(f"first snapshot cost {c} credits (status {r.status_code})")
+            if c > 40 or not r.ok:
+                print("unexpected -- stopping"); return
+        snaps.append((t, {e["id"]: e for e in ((r.json() or {}).get("data") or [])} if r.ok else {}))
+    print(f"{SPORTS[sport]['label']}: {len(snaps)} snapshots, {spent} credits")
+    # per game: timeline of (time, kind, book) -> [book, w, line, q] views
+    games = {}
+    for t, evs in snaps:
+        for gid, ev in evs.items():
+            start = datetime.fromisoformat(ev["commence_time"].replace("Z", "+00:00"))
+            if t >= start:
+                continue
+            q = quotes(ev)
+            for kind in ("spread", "total"):
+                for bk in ("circasports", "pinnacle"):
+                    v = fair_views(sport, kind, [x for x in q.get(kind, []) if x["book"] == bk])
+                    if v:
+                        games.setdefault(gid, {"start": start, "tl": []})["tl"].append((t, kind, bk, v))
+    def at_line(v, line):   # a book's no-vig chance for side A, moved to `line` with the sport's normal spread
+        bk_, w_, l0, q0 = min(v, key=lambda x: abs(x[2] - line))
+        return mover(sport, kind, l0, q0)(line)
+    rows, first = [], {"circasports": 0, "pinnacle": 0, "together": 0}
+    for gid, g in games.items():
+        for kind in ("spread", "total"):
+            tl = sorted([x for x in g["tl"] if x[1] == kind], key=lambda x: x[0])
+            last = {}
+            for t, _, bk, v in tl:
+                last[bk] = (t, v)
+            if len(last) < 2 or any((g["start"] - last[b][0]).total_seconds() > 3 * 3600 for b in last):
+                continue   # need both books' close within 3h of kickoff
+            cl = last["pinnacle"][1][0][2]   # Pinnacle's closing line: the point everything is priced at
+            close = sum(at_line(last[b][1], cl) for b in last) / 2
+            for t, _, bk, v in tl:
+                hrs = (g["start"] - t).total_seconds() / 3600
+                if hrs < 0.5:
+                    continue
+                rows.append((bk, hrs, abs(at_line(v, cl) - close)))
+            # who moved first: the first snapshot where each book's main line differs from its first line
+            moved = {}
+            for bk in ("circasports", "pinnacle"):
+                seq = [(t, v[0][2]) for t, _, b, v in tl if b == bk]
+                if seq:
+                    t0 = next((t for t, l in seq if abs(l - seq[0][1]) >= 0.5), None)
+                    if t0:
+                        moved[bk] = t0
+            if len(moved) == 2:
+                d = (moved["circasports"] - moved["pinnacle"]).total_seconds()
+                first["together" if d == 0 else "circasports" if d < 0 else "pinnacle"] += 1
+    print("how far each book's line was from the close (avg of both closes), by hours before kickoff -- lower is sharper:")
+    for lo, hi in ((24, 999), (6, 24), (1, 6), (0.5, 1)):
+        cells = []
+        for bk in ("circasports", "pinnacle"):
+            ys = [e for b, h, e in rows if b == bk and lo <= h < hi]
+            cells.append(f"{BOOK_NAMES.get(bk, 'Pinnacle')} {sum(ys) / len(ys) * 100:.2f} pts (n={len(ys)})" if ys else f"{bk} -")
+        print(f"  {lo:>4}-{hi if hi < 999 else '+'}h: " + " | ".join(cells))
+    print(f"line moves (0.5+ pts): Circa first {first['circasports']}, Pinnacle first {first['pinnacle']}, "
+          f"same snapshot {first['together']}")
+
+
 def circa_report(ps):
     """The Circa weight test per sport: live (Circa 3x) vs Circa 1x vs no Circa -- CLV of each one's 2%+ picks."""
     xs = [p for p in ps if (p.get("fv") or {}).get("nocirca") is not None and p.get("p_close_pin") is not None]
@@ -3173,7 +3260,7 @@ def timing_report(now, days=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
-                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest"])
+                                     "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
     ap.add_argument("--sports", default=os.environ.get("SCAN_SPORTS") or ",".join(SPORTS))
@@ -3277,8 +3364,14 @@ def main():
                     if ls:
                         print(f"  {bk} {kd}: {ls}")
         return
+    if a.mode == "sharpstudy":
+        for sp in (os.environ.get("SCAN_SPORTS") or "nfl,ncaaf").split(","):
+            sharp_study(sp, int(os.environ.get("CIRCA_MAX_CREDITS", "800")))
+        return
     if a.mode == "circatest":   # one-day backtest: would Circa in the fair line have found better plays? (counts only)
-        return circa_backtest(os.environ.get("SCAN_SPORTS") or "2026-11-23", int(os.environ.get("CIRCA_MAX_CREDITS", "1000")))
+        for d_ in (os.environ.get("SCAN_SPORTS") or "2026-11-23").split(","):
+            circa_backtest(d_.strip(), int(os.environ.get("CIRCA_MAX_CREDITS", "1000")))
+        return
     if a.mode == "bookprobe":   # every bookmaker the Odds API offers on NFL games (keys only, ~5 credits, no Firestore)
         key = os.environ.get("ODDS_API_KEY")
         r = requests.get(f"{ODDS}/americanfootball_nfl/odds", timeout=60,
