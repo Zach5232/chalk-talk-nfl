@@ -1542,6 +1542,33 @@ def channel_id():
     return _CHANNEL[0]
 
 
+_TROPHY = [None]
+
+
+def report_send(text):
+    """Reports (morning report, nightly wrap-up, bets by book) go to the 'trophy room' thread under #value-plays, so
+    they don't get lost between alerts; the channel itself if the thread can't be found."""
+    if DRY or not bot_on():
+        return discord_send(text, buttons=False)
+    if _TROPHY[0] is None:
+        _TROPHY[0] = ""
+        try:
+            ch = channel_id()
+            gid = bot("GET", f"/channels/{ch}")["guild_id"]
+            ths = (bot("GET", f"/guilds/{gid}/threads/active") or {}).get("threads", [])
+            ths += (bot("GET", f"/channels/{ch}/threads/archived/public") or {}).get("threads", [])
+            _TROPHY[0] = next((t["id"] for t in ths if "trophy" in (t.get("name") or "").lower()), "")
+        except Exception as e:  # noqa: BLE001
+            log(f"trophy room lookup failed: {type(e).__name__}")
+    if not _TROPHY[0]:
+        return discord_send(text, buttons=False)
+    try:
+        return bot("POST", f"/channels/{_TROPHY[0]}/messages", json={"content": text[:1990]})["id"]
+    except Exception as e:  # noqa: BLE001
+        log(f"trophy room post failed ({type(e).__name__}) -- posting in the channel")
+        return discord_send(text, buttons=False)
+
+
 def bot_on():
     return bool(BOT) and POST and not DRY and bool(channel_id())
 
@@ -2680,7 +2707,7 @@ def watch(minutes, sports):
             wday = (end - timedelta(hours=5)).astimezone(ET).strftime("%Y-%m-%d")
             txt = day_summary(end) if (fs_get("scan_state/wrapup") or {}).get("day") != wday else None
             if txt:
-                discord_send(txt, buttons=False)
+                report_send(txt)
                 fs_set("scan_state/wrapup", {"day": wday, "at": end.isoformat()})
         except Exception as e:  # noqa: BLE001
             log(f"summary failed: {type(e).__name__}")
@@ -2769,7 +2796,7 @@ def morning_report(now):
     for ln in lines + [None]:
         if ln is None or len(chunk) + len(ln) + 1 > 1900:
             if chunk.strip():
-                discord_send(chunk, buttons=False)
+                report_send(chunk)
             chunk = ""
         if ln is not None:
             chunk += ln + "\n"
@@ -3364,7 +3391,7 @@ def main():
                 ("Main line", [x for x in done_all if not x.get("off_main")]), ("Off the main line", [x for x in done_all if x.get("off_main")])]
         lines.append("**Settled, by type:** " + " · ".join(f"{k} {wl(v)}" for k, v in cuts if v))
         print("by type:", " | ".join(f"{k} {wl(v)}" for k, v in cuts if v))
-        discord_send("\n".join(lines), buttons=False)
+        report_send("\n".join(lines))
         return print(f"posted to Discord ({len(ps)} bets)")
     if a.mode == "whygone":   # an alert marked Gone: what the free feeds show for that game right now (lines only, no prices)
         now = datetime.now(timezone.utc)
