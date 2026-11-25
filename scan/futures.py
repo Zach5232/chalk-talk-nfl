@@ -384,6 +384,7 @@ def alert_market(key, sub, sport, et, ev, rows, seen, now):
             continue   # Kalshi is the fair line here: can't be value against itself
         pid = re.sub(r"[^A-Za-z0-9_.+-]", "_", f"fut_{key}_{et}_{r['name']}")
         live.add(pid)
+        r["alerted"] = True
         old = seen.get(pid)
         if old and e < (old.get("ev") or 0) + BETTER_EV:
             continue
@@ -442,7 +443,7 @@ def dashboards(board, st):
         ids = {}
     for sport, mkts in board.items():
         lines = [f"**{SPORT_LABEL.get(sport, sport)} futures board** · {datetime.now(S.ET).strftime('%a %b %-d')}",
-                 "-# fair chance · 7-day move · fair odds · best price available (✅ = better than fair)"]
+                 "-# fair chance · 7-day move · fair odds · best price (✅ = better than fair but under the 5% bar · 🎯 = posted as a play)"]
         for sub, rows in mkts:
             key = next((k for k, lab, *_ in MARKETS if sub.startswith(lab)), "")
             if key in PROP_KEYS:   # make-the-playoffs style: the contested teams, not the locks
@@ -456,7 +457,9 @@ def dashboards(board, st):
                 if r.get("move") is not None and abs(r["move"]) >= 0.005:
                     mv = f" ({'▲' if r['move'] > 0 else '▼'}{abs(r['move']) * 100:.1f})"
                 b = r.get("best")
-                good = " ✅" if b and b[3] > 0 else ""   # best price beats the fair line
+                good = ""
+                if b and b[3] > 0:   # best price beats the fair line: how much, and whether it's an alert
+                    good = f" 🎯 +{b[3]:.1%} play" if r.get("alerted") else f" ✅ +{b[3]:.1%}"
                 bp = f" · best {odds_str(b[1])} {S.BOOK_NAMES.get(b[0], b[0])}{good}" if b else ""
                 lines.append(f"• {r['name']} — **{pct(r['fair'])}**{mv} · fair **{odds_str(S.american(r['fair']))}**{bp}")
         text, chunks = "", []
