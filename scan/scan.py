@@ -135,6 +135,7 @@ FULL_EVERY = 3             # ... spreads and totals every 3rd cycle
 STALE_FAIR_MIN = 10        # an exchange play against a fair line older than this is confirmed by a pull first
 MOVE_TRIGGER = 0.025
 BASE_GAP_MIN = 180
+EMPTY_RETRY_MIN = 90       # a sport with no known upcoming games re-pulls this often (an empty pull can be a glitch)
 MIN_PULL_GAP_MIN = 15
 CLOSE_WINDOW_MIN = 20
 START_BUFFER_MIN = 3       # no plays this close to (or after) the start: prices turn live and the fair line is pregame
@@ -2560,6 +2561,8 @@ def watch(minutes, sports):
             reasons = []
             if (age_min >= BASE_GAP_MIN and upcoming) or age_min >= 12 * 60:
                 reasons.append("baseline")
+            elif not upcoming and age_min >= EMPTY_RETRY_MIN:   # an empty pull (or a new day): look again soon
+                reasons.append("no games known -- checking again")
             open_plays = [p for p in seen.values() if p.get("sport") == s and (p.get("alerted") or p.get("shadow"))
                           and not p.get("superseded")
                           and p.get("p_close") is None
