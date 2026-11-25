@@ -2263,6 +2263,7 @@ def live_status(sport, games, quotes_, seen, now, full):
             free[k] = (x["odds"], x.get("prob"))
     edits = 0
     feed_books = {k[4] for k in free}   # exchanges that answered this cycle (a feed that returned nothing proves nothing)
+    feed_gk = {(k[0], k[1], k[4]) for k in free}   # (game, market, exchange) the feed actually listed this cycle
     for x in list(seen.values()):
         if (x.get("sport") != sport or not x.get("alerted") or x.get("superseded") or not x.get("msg_id")
                 or x.get("status_final") or x.get("taken") is not None):   # bet or passed: leave it alone
@@ -2291,8 +2292,9 @@ def live_status(sport, games, quotes_, seen, now, full):
             state, line_ = "started", f"⏱️ **Game started** -- {'last seen ' + price_str(odds, x['book'], pp) if odds is not None else 'off the board'} @ {bk}"
         elif odds is None:
             # one missing read is often an API hiccup: only call it gone after MISS_CHECKS reads in a row miss it
-            if x["book"] in FREE_FEED and x["book"] not in feed_books:
-                continue
+            if x["book"] in FREE_FEED and (x["book"] not in feed_books
+                                           or (x["event_id"], x["kind"], x["book"]) not in feed_gk):
+                continue   # the feed listed nothing for this game/market this time: a feed gap, not the line coming down
             MISSES[x["msg_id"]] = MISSES.get(x["msg_id"], 0) + 1
             need = MISS_CHECKS if x["book"] in FREE_FEED else 2   # sportsbooks are only re-pulled every ~15 min
             if MISSES[x["msg_id"]] < need:
