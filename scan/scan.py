@@ -2527,12 +2527,17 @@ def parlay_pick(sport, book, boost, min_legs, min_dec, max_legs=4):
     params = dict(apiKey=key, bookmakers=",".join(BOOKS), markets="h2h,spreads,totals", oddsFormat="american",
                   commenceTimeFrom=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                   commenceTimeTo=(now + timedelta(hours=14)).strftime("%Y-%m-%dT%H:%M:%SZ"))
-    r = requests.get(f"{ODDS}/{SPORTS[sport]['odds']}/odds", params=params, timeout=60)
-    note_used(r)
-    r.raise_for_status()
-    charge(st, now, int(r.headers.get("x-requests-last") or 0))
+    sports_ = sport if isinstance(sport, list) else [sport]
+    evs = []
+    for sp_ in sports_:
+        r = requests.get(f"{ODDS}/{SPORTS[sp_]['odds']}/odds", params=params, timeout=60)
+        note_used(r)
+        r.raise_for_status()
+        charge(st, now, int(r.headers.get("x-requests-last") or 0))
+        evs += [dict(e, _sp=sp_) for e in r.json()]
     legs = []
-    for ev in r.json():
+    for ev in evs:
+        sport = ev["_sp"]
         home, away = ev["home_team"], ev["away_team"]
         t0 = datetime.fromisoformat(ev["commence_time"].replace("Z", "+00:00"))
         for kind, rows in quotes(ev).items():
@@ -2550,7 +2555,7 @@ def parlay_pick(sport, book, boost, min_legs, min_dec, max_legs=4):
                     else:
                         name = f"{'Over' if side == 'a' else 'Under'} {row['line']:g}"
                     legs.append(dict(name=name, game=f"{away} @ {home}", t0=t0, odds=int(row[side]), p=p, d=d, r=p * d))
-    log(f"[{sport}] parlay pick: {len(legs)} {book} prices checked")
+    log(f"[{','.join(sports_)}] parlay pick: {len(legs)} {book} prices checked")
     legs.sort(key=lambda x: -x["r"])
     pool, seen = [], set()
     for x in legs:   # best leg per game
@@ -2577,7 +2582,7 @@ def parlay_pick(sport, book, boost, min_legs, min_dec, max_legs=4):
         report_send(f"### 🔗 {nb} {round(boost * 100)}% parlay boost -- not enough games to build one")
         return
     ev_, combo, dd = best
-    out = [f"# 🔗 {nb} {round(boost * 100)}% {SPORTS[sport]['label']} parlay boost -- best parlay",
+    out = [f"# 🔗 {nb} {round(boost * 100)}% {'/'.join(SPORTS[x]['label'] for x in sports_)} parlay boost -- best parlay",
            f"-# Every {nb} line priced against the sharp books' fair line; legs from different games, the "
            f"combination with the most EV after the boost. Pulled {now.astimezone(ET).strftime('%-I:%M %p ET')}.", ""]
     for x in sorted(combo, key=lambda x: x["t0"]):
@@ -3610,7 +3615,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -3845,6 +3850,10 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "boostparlay":   # sports box = "book,boost,min_odds,legs_min,sport[+sport]" e.g. "betrivers,0.25,400,2,nfl+ncaab"
+        bk, bo, mo, lm, sps = (os.environ.get("SCAN_SPORTS") or "").split(",")
+        parlay_pick(sps.split("+"), bk, float(bo), int(lm), 1 + float(mo) / 100)
         return
     if a.mode == "scoreparlay":   # theScore Bet 20% CBB parlay boost (3+ legs, +300 or longer)
         parlay_pick("ncaab", "espnbet", 0.20, 3, 4.0)
