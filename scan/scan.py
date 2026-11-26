@@ -3539,7 +3539,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -3774,6 +3774,44 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "parlaycheck":   # sports box = "ncaab:Michigan State,USC,UCLA@+260" -- ML parlay vs the fair line
+        spec = os.environ.get("SCAN_SPORTS") or ""
+        sp, rest = spec.split(":", 1)
+        teams, offered = rest.rsplit("@", 1)
+        games, _ = load_fair(sp)
+        now = datetime.now(timezone.utc)
+
+        def words(t):
+            return [w for w in re.split(r"[^a-z0-9]+", t.lower().replace("state", "st")) if w]
+
+        p_all, found, lines_ = 1.0, 0, []
+        for tm in [t.strip() for t in teams.split(",") if t.strip()]:
+            hit = None
+            for gid, g in games.items():
+                if datetime.fromisoformat(g["start"]) < now - timedelta(hours=3):
+                    continue
+                for side, full in (("a", g["home"]), ("b", g["away"])):
+                    fw = words(full)
+                    if all(w in fw for w in words(tm)) and (hit is None or len(fw) < len(words(hit[2]))):
+                        hit = (g, side, full)
+            if not hit or not (hit[0].get("views") or {}).get("h2h"):
+                lines_.append(f"• {tm} — not found in the {sp} fair lines")
+                continue
+            q = fair_side(sp, "h2h", hit[0]["views"]["h2h"], None, hit[1])
+            if q is None:
+                lines_.append(f"• {tm} — too few books to price")
+                continue
+            found += 1
+            p_all *= q
+            lines_.append(f"• {hit[2]} ML — fair **{american(q):+d}** ({q * 100:.0f}%)")
+        o = float(offered)
+        ev_ = p_all / prob(o) - 1
+        ok = found == len([t for t in teams.split(",") if t.strip()])
+        report_send("\n".join([f"### 🔍 Parlay check: {teams} @ {offered}"] + lines_ + (
+            [f"Fair parlay **{american(p_all):+d}** vs offered **{o:+.0f}** → **{ev_ * 100:+.0f}% EV** "
+             + ("✅ bet it" if ev_ > 0.02 else "❌ skip")] if ok else ["Couldn't price every leg."])))
+        log(f"parlaycheck: {found} legs priced, EV {ev_ * 100:+.0f}%" if ok else f"parlaycheck: {found} legs priced")
         return
     if a.mode == "mgmboost":   # BetMGM: 10% odds boost token on one straight bet + 15% parlay boost token
         boost_pick(a.sport or "nfl", "betmgm", 0.10, -10000, parlay_boost=0.15)
