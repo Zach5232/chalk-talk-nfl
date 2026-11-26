@@ -18,3 +18,4 @@ odds_pull/
 tdcard/data/
 tdcard/card_*.csv
 tdcard/discord_*.txt
+__pycache__/
