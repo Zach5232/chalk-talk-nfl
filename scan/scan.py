@@ -2517,6 +2517,74 @@ def injury_news(prev, cur, upcoming):
     return teams
 
 
+def promo_board(sport):
+    """Posts (to the trophy room) each upcoming game's main lines with the fair odds, and the worst price worth taking
+    with a 30 / 50 / 100% profit boost, ranked by how much a boost is worth at that side. Uses the fair views the
+    watch loop already saved -- no Odds API credits. Prints counts only (public repo)."""
+    games, pulled = load_fair(sport)
+    now = datetime.now(timezone.utc)
+    rows, out = [], [f"# 🦃 Boost builder -- {SPORTS[sport]['label']}",
+                     "-# fair = no-vig price from the sharp books. **Take it at** = the worst price that's still +EV "
+                     "with that boost (30% / 50% / 100%). Any price at or better than it is a good use of the boost."]
+
+    def dec_need(p, b):
+        return 1 + (1 / p - 1) / (1 + b)
+
+    def am(d):
+        return f"+{round((d - 1) * 100)}" if d >= 2 else f"{round(-100 / (d - 1))}"
+
+    for gid, g in sorted(games.items(), key=lambda kv: kv[1]["start"]):
+        st_ = datetime.fromisoformat(g["start"])
+        if not (now < st_ < now + timedelta(hours=14)):
+            continue
+        v = g.get("views") or {}
+        sides = []
+        if v.get("h2h"):
+            pa = fair_side(sport, "h2h", v["h2h"], None, "a")
+            if pa:
+                sides += [(f"{g['home']} ML", pa), (f"{g['away']} ML", 1 - pa)]
+        for kind in ("spread", "total"):
+            vs = v.get(kind) or []
+            ls = [l0 for bk, w, l0, q in vs if bk == SHARP] or sorted(l0 for bk, w, l0, q in vs)[len(vs) // 2:len(vs) // 2 + 1]
+            if not ls:
+                continue
+            line = ls[0]
+            pa = fair_side(sport, kind, vs, line, "a")
+            if pa is None:
+                continue
+            if kind == "spread":
+                sides += [(f"{g['home']} {line:+g}", pa), (f"{g['away']} {-line:+g}", 1 - pa)]
+            else:
+                sides += [(f"Over {line:g}", pa), (f"Under {line:g}", 1 - pa)]
+        if not sides:
+            continue
+        out += ["", f"### {g['away']} @ {g['home']} · {st_.astimezone(ET).strftime('%-I:%M %p')} ET"]
+        for name, p in sides:
+            need = " / ".join(am(dec_need(p, b)) for b in (0.3, 0.5, 1.0))
+            out.append(f"• {name} — fair **{american(p):+d}** · take it at **{need}**")
+            rows.append((0.5 * (1 - p), name, p, g))
+    if not rows:
+        log(f"[{sport}] promo: no upcoming games with fair lines")
+        return
+    rows.sort(key=lambda r: -r[0])
+    out += ["", "### 💡 Where a boost is worth the most",
+            "-# A profit boost is worth more on longer odds (more profit to boost). Value shown is per $10 at the fair "
+            "price with a 50% boost -- a typical book price is a bit worse than fair."]
+    for val, name, p, g in rows[:5]:
+        out.append(f"• {name} ({g['away']} @ {g['home']}) — fair {american(p):+d} · ~**+${val * 10:.2f}** per $10")
+    out += ["", "-# Bet resets / no-sweat: use them on a longshot (+300 or longer) -- the refund is only worth something "
+                "if you lose. Skip parlay boosts unless 100%: the parlay margin eats the boost.",
+            "-# Fair lines saved " + (datetime.fromisoformat(pulled).astimezone(ET).strftime("%-I:%M %p ET") if pulled else "?")]
+    msg = ""
+    for ln in out:   # Discord caps a message at 2000 characters: split between lines
+        if len(msg) + len(ln) > 1900:
+            report_send(msg)
+            msg = ""
+        msg += ("\n" if msg else "") + ln
+    report_send(msg)
+    log(f"[{sport}] promo board posted: {len(rows)} sides")
+
+
 # ---------------- watch loop ----------------
 def load_fair(sport):
     d = fs_get(f"scan_state/fair_{sport}") or {}
@@ -3359,7 +3427,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -3594,6 +3662,9 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "promo":   # boost builder: fair odds + the worst price worth taking with a profit boost (no credits)
+        promo_board(a.sport or "nfl")
         return
     if a.mode == "fields":   # health check: are the tracking fields being saved on today's plays? (counts only)
         now = datetime.now(timezone.utc)
