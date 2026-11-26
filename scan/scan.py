@@ -787,6 +787,21 @@ def pull_alts(sport, S, now, st):
     return plays
 
 
+def link_probe(sport, events):
+    """Counts (never the links) of bet-slip links per book, to see which books can open a bet straight from an alert."""
+    seen = {}
+    for e in events:
+        for b in e.get("bookmakers", []):
+            n = seen.setdefault(b["key"], [0, 0, 0])
+            n[0] += bool(b.get("link"))
+            for m in b.get("markets", []):
+                for o in m.get("outcomes", []):
+                    n[1] += 1
+                    n[2] += bool(o.get("link"))
+    if seen:
+        log(f"[{sport}] links: " + ", ".join(f"{k} event {v[0]} slip {v[2]}/{v[1]}" for k, v in sorted(seen.items())))
+
+
 # ---------------- paid pull ----------------
 def pull(sport, now, st, reason):
     """One Odds API pull for a sport: saves fair views for every game in the next HOURS_AHEAD, returns
@@ -799,7 +814,7 @@ def pull(sport, now, st, reason):
         log(f"[{sport}] credit budget reached (month {st['used']}/{CREDIT_CAP}) -- no pull ({reason})")
         return None, []
     params = dict(apiKey=key, bookmakers=",".join(BOOKS), markets=SPORTS[sport].get("markets", "h2h,spreads,totals"),
-                  oddsFormat="american",
+                  oddsFormat="american", includeLinks="true",
                   commenceTimeFrom=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                   commenceTimeTo=(now + timedelta(hours=HOURS_AHEAD)).strftime("%Y-%m-%dT%H:%M:%SZ"))
     okeys = odds_keys(sport, key)
@@ -819,6 +834,7 @@ def pull(sport, now, st, reason):
             e["_okey"] = ok
         events += evs
     charge(st, now, cost)
+    link_probe(sport, events)
     games, plays, for_tally = {}, [], []
     try:
         pxr = px_rows(sport, events) if "prophetx" not in BOOKS else {}
