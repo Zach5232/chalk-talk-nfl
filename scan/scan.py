@@ -2517,7 +2517,7 @@ def injury_news(prev, cur, upcoming):
     return teams
 
 
-def parlay_pick(sport, book, boost, min_legs, min_dec, max_legs=4):
+def parlay_pick(sport, book, boost, min_legs, min_dec, max_legs=4, count=1):
     """One whole-sport pull (~3 credits): every main line at `book` priced against the consensus fair line, then the
     best parlay (min_legs..max_legs legs, different games, total odds >= min_dec) with the parlay profit boost."""
     from itertools import combinations
@@ -2557,39 +2557,51 @@ def parlay_pick(sport, book, boost, min_legs, min_dec, max_legs=4):
                     legs.append(dict(name=name, game=f"{away} @ {home}", t0=t0, odds=int(row[side]), p=p, d=d, r=p * d))
     log(f"[{','.join(sports_)}] parlay pick: {len(legs)} {book} prices checked")
     legs.sort(key=lambda x: -x["r"])
-    pool, seen = [], set()
-    for x in legs:   # best leg per game
-        if x["game"] not in seen:
-            seen.add(x["game"])
-            pool.append(x)
-        if len(pool) >= 14:
-            break
-    best = None
-    for n in range(min_legs, max_legs + 1):
-        for combo in combinations(pool, n):
-            dd = math.prod(x["d"] for x in combo)
-            if dd < min_dec:
-                continue
-            ev_ = math.prod(x["p"] for x in combo) * (1 + (dd - 1) * (1 + boost)) - 1
-            if best is None or ev_ > best[0]:
-                best = (ev_, combo, dd)
-
     def am(dd):
         return f"+{round((dd - 1) * 100)}" if dd >= 2 else f"{round(-100 / (dd - 1))}"
 
     nb = BOOK_NAMES.get(book, book)
-    if not best:
-        report_send(f"### 🔗 {nb} {round(boost * 100)}% parlay boost -- not enough games to build one")
-        return
-    ev_, combo, dd = best
-    out = [f"# 🔗 {nb} {round(boost * 100)}% {'/'.join(SPORTS[x]['label'] for x in sports_)} parlay boost -- best parlay",
+    out = [f"# 🔗 {nb} {round(boost * 100)}% {'/'.join(SPORTS[x]['label'] for x in sports_)} parlay boost -- "
+           + ("best parlay" if count == 1 else f"{count} best parlays (no game in two of them)"),
            f"-# Every {nb} line priced against the sharp books' fair line; legs from different games, the "
-           f"combination with the most EV after the boost. Pulled {now.astimezone(ET).strftime('%-I:%M %p ET')}.", ""]
-    for x in sorted(combo, key=lambda x: x["t0"]):
-        out.append(f"• **{x['name']}** · {x['game']} ({x['t0'].astimezone(ET).strftime('%-I:%M %p')}) — {nb} "
-                   f"{x['odds']:+d} · fair {american(x['p']):+d}")
-    out += ["", f"Parlay **{am(dd)}** → boosted **{am(1 + (dd - 1) * (1 + boost))}** · **{ev_ * 100:+.0f}% EV**"
-            + (" ✅" if ev_ > 0 else " -- ❌ not worth it, skip")]
+           f"combination with the most EV after the boost. Pulled {now.astimezone(ET).strftime('%-I:%M %p ET')}."]
+    used_games = set()
+    for k in range(count):
+        pool, seen = [], set(used_games)
+        for x in legs:   # best leg per game
+            if x["game"] not in seen:
+                seen.add(x["game"])
+                pool.append(x)
+            if len(pool) >= 14:
+                break
+        best = None
+        for n in range(min_legs, max_legs + 1):
+            for combo in combinations(pool, n):
+                dd = math.prod(x["d"] for x in combo)
+                if dd < min_dec:
+                    continue
+                ev_ = math.prod(x["p"] for x in combo) * (1 + (dd - 1) * (1 + boost)) - 1
+                if best is None or ev_ > best[0]:
+                    best = (ev_, combo, dd)
+        if not best:
+            out += ["", "-# Not enough games left for another parlay."]
+            break
+        ev_, combo, dd = best
+        used_games |= {x["game"] for x in combo}
+        out += ["", f"### Parlay {k + 1}" if count > 1 else "### Parlay"]
+        for x in sorted(combo, key=lambda x: x["t0"]):
+            out.append(f"• **{x['name']}** · {x['game']} ({x['t0'].astimezone(ET).strftime('%-I:%M %p')}) — {nb} "
+                       f"{x['odds']:+d} · fair {american(x['p']):+d}")
+        out.append(f"Parlay **{am(dd)}** → boosted **{am(1 + (dd - 1) * (1 + boost))}** · **{ev_ * 100:+.0f}% EV**"
+                   + (" ✅" if ev_ > 0 else " -- ❌ not worth it, skip"))
+    msg = ""
+    for ln in out:
+        if len(msg) + len(ln) > 1900:
+            report_send(msg)
+            msg = ""
+        msg += ("\n" if msg else "") + ln
+    report_send(msg)
+    return
     report_send("\n".join(out))
 
 
@@ -3852,8 +3864,8 @@ def main():
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
         return
     if a.mode == "boostparlay":   # sports box = "book,boost,min_odds,legs_min,sport[+sport]" e.g. "betrivers,0.25,400,2,nfl+ncaab"
-        bk, bo, mo, lm, sps = (os.environ.get("SCAN_SPORTS") or "").split(",")
-        parlay_pick(sps.split("+"), bk, float(bo), int(lm), 1 + float(mo) / 100)
+        bk, bo, mo, lm, sps, *cnt = (os.environ.get("SCAN_SPORTS") or "").split(",")
+        parlay_pick(sps.split("+"), bk, float(bo), int(lm), 1 + float(mo) / 100, count=int(cnt[0]) if cnt else 1)
         return
     if a.mode == "scoreparlay":   # theScore Bet 20% CBB parlay boost (3+ legs, +300 or longer)
         parlay_pick("ncaab", "espnbet", 0.20, 3, 4.0)
