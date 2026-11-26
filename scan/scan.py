@@ -2517,6 +2517,97 @@ def injury_news(prev, cur, upcoming):
     return teams
 
 
+def boost_pick(sport, book, boost, min_odds):
+    """Fresh pull of every game line + alternate at `book` (and the sharp books for the fair line), each price ranked
+    by EV with a profit boost. Posted to the trophy room; the log prints counts only."""
+    key = os.environ.get("ODDS_API_KEY")
+    okey = SPORTS[sport]["odds"]
+    now = datetime.now(timezone.utc)
+    st = credits_state(now)
+    evs = requests.get(f"{ODDS}/{okey}/events", params=dict(apiKey=key), timeout=30).json()
+    cands, used = [], 0
+    for e in evs:
+        t0 = datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00"))
+        if not (now < t0 < now + timedelta(hours=14)):
+            continue
+        r = requests.get(f"{ODDS}/{okey}/events/{e['id']}/odds", timeout=30, params=dict(
+            apiKey=key, bookmakers=",".join(BOOKS), oddsFormat="american",
+            markets="h2h,spreads,totals,alternate_spreads,alternate_totals"))
+        note_used(r)
+        if r.status_code != 200:
+            continue
+        c = int(r.headers.get("x-requests-last") or 0)
+        used += c
+        charge(st, now, c)
+        ev = r.json()
+        home, away = ev["home_team"], ev["away_team"]
+        main, alts = quotes(ev), alt_rows(ev)
+        for kind in ("h2h", "spread", "total"):
+            for alt, rows in ((False, main.get(kind) or []), (True, alts.get(kind) or [])):
+                others = [x for x in rows if x["book"] != book]
+                views = fair_views(sport, kind, others)
+                for row in [x for x in rows if x["book"] == book]:
+                    for side in ("a", "b"):
+                        o = float(row[side])
+                        if o < min_odds:
+                            continue
+                        p = fair_side(sport, kind, views, row["line"], side)
+                        src = "consensus"
+                        if p is None:
+                            p = fair_side(sport, kind, views, row["line"], side, only=SHARP)
+                            src = "Pinnacle"
+                        if p is None:
+                            continue
+                        d = 1 / prob(o)
+                        bd = 1 + (d - 1) * (1 + boost)
+                        if kind == "h2h":
+                            name = f"{home if side == 'a' else away} ML"
+                        elif kind == "spread":
+                            name = f"{home if side == 'a' else away} {(row['line'] if side == 'a' else -row['line']):+g}"
+                        else:
+                            name = f"{'Over' if side == 'a' else 'Under'} {row['line']:g}"
+                        cands.append(dict(name=name, game=f"{away} @ {home}", t0=t0, odds=int(o), boosted=bd, p=p,
+                                          ev=p * bd - 1, alt=alt, src=src))
+    log(f"[{sport}] boost pick: {len(cands)} {book} prices checked, {used} credits")
+    if not cands:
+        report_send(f"### ⚡ {BOOK_NAMES.get(book, book)} {round(boost * 100)}% boost -- no games left to check")
+        return
+    cands.sort(key=lambda x: -x["ev"])
+
+    def am(dd):
+        return f"+{round((dd - 1) * 100)}" if dd >= 2 else f"{round(-100 / (dd - 1))}"
+
+    nb = BOOK_NAMES.get(book, book)
+    out = [f"# ⚡ {nb} {round(boost * 100)}% profit boost -- best bets",
+           f"-# Every {nb} line and alternate (odds {min_odds:+.0f} or longer) priced against the sharp books' fair "
+           f"line, with the boost applied. Pulled {now.astimezone(ET).strftime('%-I:%M %p ET')} -- check the price "
+           f"in the app still matches.", ""]
+    b0 = cands[0]
+    out += ["### 🏆 Pick",
+            f"**{b0['name']}**{' (alternate line)' if b0['alt'] else ''} ({b0['game']}, {b0['t0'].astimezone(ET).strftime('%-I:%M %p')})",
+            f"{nb} **{b0['odds']:+d}** → boosted **{am(b0['boosted'])}** · fair {american(b0['p']):+d} · "
+            f"**+{b0['ev'] * 100:.0f}% EV** (~+${b0['ev'] * 10:.2f} on $10)", "", "### Next best"]
+    seen = {b0["name"] + b0["game"]}
+    for x in cands[1:]:
+        if len(out) > 14 or x["name"] + x["game"] in seen:
+            continue
+        seen.add(x["name"] + x["game"])
+        out.append(f"• {x['name']}{' (alt)' if x['alt'] else ''} · {x['game']} — {x['odds']:+d} → {am(x['boosted'])} · "
+                   f"fair {american(x['p']):+d} · **+{x['ev'] * 100:.0f}%**")
+    mains = [x for x in cands if not x["alt"]]
+    if mains and mains[0] is not b0:
+        m = mains[0]
+        out += ["", f"-# Best main line (if you'd rather skip alternates): {m['name']} · {m['game']} {m['odds']:+d} → "
+                    f"{am(m['boosted'])} · +{m['ev'] * 100:.0f}%"]
+    msg = ""
+    for ln in out:
+        if len(msg) + len(ln) > 1900:
+            report_send(msg)
+            msg = ""
+        msg += ("\n" if msg else "") + ln
+    report_send(msg)
+
+
 def promo_board(sport):
     """Posts (to the trophy room) each upcoming game's main lines with the fair odds, and the worst price worth taking
     with a 30 / 50 / 100% profit boost, ranked by how much a boost is worth at that side. Uses the fair views the
@@ -3427,7 +3518,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -3662,6 +3753,10 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "fdboost":   # every FanDuel line ranked for a 50% profit boost (fresh pull, ~5 credits a game)
+        boost_pick(a.sport or "nfl", os.environ.get("BOOST_BOOK", "fanduel"), float(os.environ.get("BOOST", "0.5")),
+                   float(os.environ.get("BOOST_MIN_ODDS", "-200")))
         return
     if a.mode == "promo":   # boost builder: fair odds + the worst price worth taking with a profit boost (no credits)
         promo_board(a.sport or "nfl")
