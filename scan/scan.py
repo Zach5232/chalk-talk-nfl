@@ -2517,7 +2517,7 @@ def injury_news(prev, cur, upcoming):
     return teams
 
 
-def boost_pick(sport, book, boost, min_odds):
+def boost_pick(sport, book, boost, min_odds, parlay_boost=None):
     """Fresh pull of every game line + alternate at `book` (and the sharp books for the fair line), each price ranked
     by EV with a profit boost. Posted to the trophy room; the log prints counts only."""
     key = os.environ.get("ODDS_API_KEY")
@@ -2566,7 +2566,7 @@ def boost_pick(sport, book, boost, min_odds):
                             name = f"{home if side == 'a' else away} {(row['line'] if side == 'a' else -row['line']):+g}"
                         else:
                             name = f"{'Over' if side == 'a' else 'Under'} {row['line']:g}"
-                        cands.append(dict(name=name, game=f"{away} @ {home}", t0=t0, odds=int(o), boosted=bd, p=p,
+                        cands.append(dict(name=name, game=f"{away} @ {home}", t0=t0, odds=int(o), boosted=bd, p=p, d=d,
                                           ev=p * bd - 1, alt=alt, src=src))
     log(f"[{sport}] boost pick: {len(cands)} {book} prices checked, {used} credits")
     if not cands:
@@ -2586,19 +2586,40 @@ def boost_pick(sport, book, boost, min_odds):
     out += ["### 🏆 Pick",
             f"**{b0['name']}**{' (alternate line)' if b0['alt'] else ''} ({b0['game']}, {b0['t0'].astimezone(ET).strftime('%-I:%M %p')})",
             f"{nb} **{b0['odds']:+d}** → boosted **{am(b0['boosted'])}** · fair {american(b0['p']):+d} · "
-            f"**+{b0['ev'] * 100:.0f}% EV** (~+${b0['ev'] * 10:.2f} on $10)", "", "### Next best"]
+            f"**{b0['ev'] * 100:+.0f}% EV** (~+${b0['ev'] * 10:.2f} on $10)", "", "### Next best"]
     seen = {b0["name"] + b0["game"]}
     for x in cands[1:]:
         if len(out) > 14 or x["name"] + x["game"] in seen:
             continue
         seen.add(x["name"] + x["game"])
         out.append(f"• {x['name']}{' (alt)' if x['alt'] else ''} · {x['game']} — {x['odds']:+d} → {am(x['boosted'])} · "
-                   f"fair {american(x['p']):+d} · **+{x['ev'] * 100:.0f}%**")
+                   f"fair {american(x['p']):+d} · **{x['ev'] * 100:+.0f}%**")
     mains = [x for x in cands if not x["alt"]]
     if mains and mains[0] is not b0:
         m = mains[0]
         out += ["", f"-# Best main line (if you'd rather skip alternates): {m['name']} · {m['game']} {m['odds']:+d} → "
-                    f"{am(m['boosted'])} · +{m['ev'] * 100:.0f}%"]
+                    f"{am(m['boosted'])} · {m['ev'] * 100:+.0f}%"]
+    if parlay_boost:   # best 2-leg parlay (different games) with the parlay boost token
+        pool = sorted(cands, key=lambda x: -(x["p"] * x["d"]))[:40]
+        best = None
+        for i, x in enumerate(pool):
+            for y in pool[i + 1:]:
+                if x["game"] == y["game"]:
+                    continue
+                dd = x["d"] * y["d"]
+                ev_ = x["p"] * y["p"] * (1 + (dd - 1) * (1 + parlay_boost)) - 1
+                if best is None or ev_ > best[0]:
+                    best = (ev_, x, y, dd)
+        if best:
+            ev_, x, y, dd = best
+            out += ["", f"### 🔗 {round(parlay_boost * 100)}% parlay boost -- best 2-leg parlay"]
+            for z in (x, y):
+                out.append(f"• {z['name']}{' (alt)' if z['alt'] else ''} · {z['game']} — {z['odds']:+d} · fair "
+                           f"{american(z['p']):+d}")
+            out.append(f"Parlay **{am(dd)}** → boosted **{am(1 + (dd - 1) * (1 + parlay_boost))}** · "
+                       f"**{ev_ * 100:+.0f}% EV**" + ("" if ev_ > 0 else " -- not worth it, skip the parlay token"))
+        else:
+            out += ["", "-# Parlay boost: needs games from two different matchups -- none left"]
     msg = ""
     for ln in out:
         if len(msg) + len(ln) > 1900:
@@ -3518,7 +3539,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -3753,6 +3774,9 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "mgmboost":   # BetMGM: 10% odds boost token on one straight bet + 15% parlay boost token
+        boost_pick(a.sport or "nfl", "betmgm", 0.10, -10000, parlay_boost=0.15)
         return
     if a.mode == "fdboost":   # every FanDuel line ranked for a 50% profit boost (fresh pull, ~5 credits a game)
         boost_pick(a.sport or "nfl", os.environ.get("BOOST_BOOK", "fanduel"), float(os.environ.get("BOOST", "0.5")),
