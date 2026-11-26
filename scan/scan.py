@@ -2525,7 +2525,7 @@ def promo_board(sport):
     now = datetime.now(timezone.utc)
     rows, out = [], [f"# 🦃 Boost builder -- {SPORTS[sport]['label']}",
                      "-# fair = no-vig price from the sharp books. **Take it at** = the worst price that's still +EV "
-                     "with that boost (30% / 50% / 100%). Any price at or better than it is a good use of the boost."]
+                     "with a 10% / 25% / 50% boost. Any price at or better than it is a good use of the boost."]
 
     def dec_need(p, b):
         return 1 + (1 / p - 1) / (1 + b)
@@ -2560,7 +2560,7 @@ def promo_board(sport):
             continue
         out += ["", f"### {g['away']} @ {g['home']} · {st_.astimezone(ET).strftime('%-I:%M %p')} ET"]
         for name, p in sides:
-            need = " / ".join(am(dec_need(p, b)) for b in (0.3, 0.5, 1.0))
+            need = " / ".join(am(dec_need(p, b)) for b in (0.1, 0.25, 0.5))
             out.append(f"• {name} — fair **{american(p):+d}** · take it at **{need}**")
             rows.append((0.5 * (1 - p), name, p, g))
     if not rows:
