@@ -273,7 +273,7 @@ def fair_views(sport, kind, rows):
 SIDE_IX = {"a": 0, "b": 1, "d": 2}
 
 
-def fair_side(sport, kind, views, line, side, without=None, only=None):
+def fair_side(sport, kind, views, line, side, without=None, only=None, mm=None):
     """Consensus chance that `side` wins at `line` (2-way or 3-way), or None if too few books."""
     if views and isinstance(views[0][3], list):
         use = [(w, q[SIDE_IX[side]]) for bk, w, l0, q in views if bk != without and (only is None or bk == only)]
@@ -282,13 +282,14 @@ def fair_side(sport, kind, views, line, side, without=None, only=None):
         return sum(w * q for w, q in use) / sum(w for w, _ in use)
     if side == "d":
         return None
-    pa = fair_at(sport, kind, views, line, without=without, only=only)
+    pa = fair_at(sport, kind, views, line, without=without, only=only, mm=mm)
     return None if pa is None else (pa if side == "a" else 1 - pa)
 
 
-def fair_at(sport, kind, views, line, without=None, only=None):
-    """Consensus P(side A) at `line` from saved views, or None if too few books."""
-    mm = SPORTS[sport]["max_move"]
+def fair_at(sport, kind, views, line, without=None, only=None, mm=None):
+    """Consensus P(side A) at `line` from saved views, or None if too few books. `mm` widens how far a book's line
+    may be moved to this number (estimates only)."""
+    mm = SPORTS[sport]["max_move"] if mm is None else mm
     best = {}   # each book once: its view at (or nearest to) the line being priced
     for bk, w, l0, q in views:
         if bk == without or (only is not None and bk != only):
@@ -2433,6 +2434,17 @@ def _ev_now(sport, g, kind, side, line, book, odds, pin_only=False):
     return pw * (1 + payout(odds, book, sport)) - 1
 
 
+EST_MOVE = 7.0   # status checks only: how far (points) a sharp line may be moved to estimate a number it no longer prices
+
+
+def _ev_est(sport, g, kind, side, line, book, odds):
+    """Estimated EV at a number the sharp books have moved off: their current lines shifted to it with the
+    score-distribution model. Rougher than an exact read (key numbers), so it's only shown, never alerted on."""
+    views = (g.get("views") or {}).get(kind)
+    pw = fair_side(sport, kind, views, line, side, without=book, mm=EST_MOVE) if views else None
+    return None if pw is None else (pw * (1 + payout(odds, book, sport)) - 1, pw)
+
+
 BACKUP_SKIP = {"novig"} | LOG_ONLY_BOOKS   # backups come from any other book you use
 MISSES = {}        # alert message id -> price checks in a row that couldn't find its price
 MISS_CHECKS = 3
@@ -2502,10 +2514,20 @@ def live_status(sport, games, quotes_, seen, now, full):
                 else:
                     state, line_ = "down", (f"🟡 **Value down** {when} -- still {ps} @ {bk}, but the fair line moved: "
                                             f"edge now {ev:+.1%} (bar {bar_:.0%}). Your call.")
-            elif ev is None:   # price still there, but no fair line at this exact number right now -- not 'gone'
-                state, line_ = "unpriced", (f"⚪ **Can't re-check** {when} -- still {ps} @ {bk}, but the sharp books "
-                                            f"have moved off this number, so there's no fair price for it right now. "
-                                            f"It may still be good; it just can't be confirmed. Your call.")
+            elif ev is None:   # price still there, sharp books moved off this number: estimate it from their new line
+                est = _ev_est(sport, g, x["kind"], x["side"], x["line"], x["book"], odds)
+                bar_ = x.get("bar") or SPORT_BAR.get(sport, 0.02)
+                if est is None:
+                    state, line_ = "unpriced", (f"⚪ **Can't re-check** {when} -- still {ps} @ {bk}, but the sharp books "
+                                                f"moved too far from this number to estimate it. Skip unless already bet.")
+                else:
+                    ev_e, pw_e = est
+                    verdict = ("likely still good" if ev_e >= bar_ else "edge probably under the bar" if ev_e > 0
+                               else "probably no value now")
+                    state = "est_good" if ev_e >= bar_ else "est_down" if ev_e > 0 else "est_gone"
+                    line_ = (f"⚪ **Estimated** {when} -- still {ps} @ {bk}; the sharp books moved off this number, so "
+                             f"fair is estimated from their new line: ~{american(pw_e):+d}, value **~{ev_e:+.1%}** "
+                             f"({verdict}). Rougher than a direct read.")
             else:
                 state, line_ = "gone", f"🔴 **Gone** {when} -- no value left: now {ps} @ {bk}, value now {ev:+.1%}"
         # Only what changes a decision is shown: 'Gone' when the price dies (removed if it comes back) and
