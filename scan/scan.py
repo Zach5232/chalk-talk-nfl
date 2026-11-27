@@ -818,6 +818,9 @@ def record_links(events):
 def play_link(gid, p):
     """(label, url) for the book's bet slip (or game page) for this play, if the feed gave one."""
     bk = p.get("book")
+    if bk == "kalshi":
+        u = KALSHI_LINKS.get((gid, p.get("kind"), p.get("side"), p.get("line")))
+        return (f"Open at Kalshi", u) if u else None
     u = LINKS.get((gid, p.get("kind"), p.get("side"), p.get("line"), bk)) or EVENT_LINKS.get((gid, bk))
     if not u or not str(u).startswith("https://"):
         return None
@@ -1090,8 +1093,30 @@ def _rules_teams(m):
     return (t.group(1), " ".join(b)) if b else None
 
 
+KALSHI_LINKS, _KSLUG = {}, {}   # (gid, kind, side, line) -> kalshi.com market page; series -> url slug
+
+
+def kalshi_link(series, event_ticker):
+    """kalshi.com/markets/<series>/<series title slug>/<event> -- the game's page with its markets."""
+    if series not in _KSLUG:
+        try:
+            t = ((_get(f"{KALSHI}/series/{series}") or {}).get("series") or {}).get("title") or ""
+        except Exception:  # noqa: BLE001
+            t = ""
+        _KSLUG[series] = re.sub(r"[^a-z0-9]+", "-", t.lower().replace("'", "")).strip("-") or "game"
+    return f"https://kalshi.com/markets/{series.lower()}/{_KSLUG[series]}/{event_ticker.lower()}"
+
+
 def kalshi_quotes(sport, games, ml_only=False):
     out = []
+
+    def tag(m_, n0_, series_):
+        if m_ is None or len(out) <= n0_ or not m_.get("event_ticker"):
+            return
+        u = kalshi_link(series_, m_["event_ticker"])
+        for q in out[n0_:]:
+            KALSHI_LINKS[(q["gid"], q["kind"], q["side"], q["line"])] = u
+
     for kind, series in SPORTS[sport]["kalshi"].items():
         if ml_only and kind != "h2h":
             continue
@@ -1102,7 +1127,10 @@ def kalshi_quotes(sport, games, ml_only=False):
         except Exception as e:  # noqa: BLE001
             log(f"[{sport}] kalshi {series}: {e}")
             continue
+        prev_m, n0 = None, len(out)
         for m in ms:
+            tag(prev_m, n0, series)
+            prev_m, n0 = m, len(out)
             teams = _rules_teams(m)
             if not teams:
                 continue
@@ -1146,6 +1174,7 @@ def kalshi_quotes(sport, games, ml_only=False):
                 for s, ask, size in (("a", ya, ys), ("b", na, ns)):
                     if 0 < ask < 1:
                         out.append(ex_quote(gid, g, "total", s, float(n), "kalshi", ask, size))
+        tag(prev_m, n0, series)
     return out
 
 
