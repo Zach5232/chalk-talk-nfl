@@ -2489,6 +2489,23 @@ def _ev_est(sport, g, kind, side, line, book, odds):
     return None if pw is None else (pw * (1 + payout(odds, book, sport)) - 1, pw)
 
 
+def best_elsewhere(sport, g, x, free, now):
+    """When an alert's own book moves, the best price on the same side that still clears the bar at any other book
+    you use (exchanges as of this check; sportsbooks as of their last pull), any line. -> (play, when) or None."""
+    best = None
+    srcs = [(k, v[0], v[1], "now") for k, v in free.items()]
+    at = BOOK_Q_AT.get(sport)
+    srcs += [(k, o, None, at.astimezone(ET).strftime("%-I:%M %p") if at else "") for k, o in BOOK_Q.get(sport, {}).items()]
+    for (gid, kind, side, line, book), odds, pp, when in srcs:
+        if (gid != x["event_id"] or kind != x["kind"] or side != x["side"] or book == x["book"]
+                or book not in BET_BOOKS or book in LOG_ONLY_BOOKS):
+            continue
+        p = evaluate(sport, g, kind, side, line, book, odds, now, pp)
+        if p and (best is None or p["ev"] > best[0]["ev"]):
+            best = (dict(p, price_prob=pp), when)
+    return best
+
+
 BACKUP_SKIP = {"novig"} | LOG_ONLY_BOOKS   # backups come from any other book you use
 MISSES = {}        # alert message id -> price checks in a row that couldn't find its price
 MISS_CHECKS = 3
@@ -2574,11 +2591,22 @@ def live_status(sport, games, quotes_, seen, now, full):
                              f"({verdict}). Rougher than a direct read.")
             else:
                 state, line_ = "gone", f"🔴 **Gone** {when} -- no value left: now {ps} @ {bk}, value now {ev:+.1%}"
+        alt_key = None
+        if state not in ("good", "started"):   # dead / weaker at this book: is the same bet still good elsewhere?
+            alt = best_elsewhere(sport, g, x, free, now)
+            if alt:
+                ap, aw = alt
+                alt_key = f"{ap['book']}|{ap['line']}|{ap['odds']}"
+                abk = BOOK_NAMES.get(ap["book"], ap["book"])
+                line_ += (f"\n↪️ **Still good at {abk}:** {label(g, ap['kind'], ap['side'], ap['line'])} "
+                          f"{price_str(ap['odds'], ap['book'], ap.get('price_prob'))} (EV {ap['ev']:+.1%}"
+                          + (f", as of {aw}" if aw and aw != "now" else "") + ")")
         # Only what changes a decision is shown: 'Gone' when the price dies (removed if it comes back) and
         # 'Game started'. A still-good alert is left alone -- no edits every few minutes.
         prev_state = x.get("status") or "good"
-        if state == prev_state:
+        if state == prev_state and alt_key == x.get("alt_key"):
             continue
+        x["alt_key"] = alt_key
         body = x.get("msg_text") or alert_text(x, x)
         if state == "good":
             line_ = ""
