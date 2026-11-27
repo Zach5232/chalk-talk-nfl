@@ -787,6 +787,42 @@ def pull_alts(sport, S, now, st):
     return plays
 
 
+LINKS, EVENT_LINKS = {}, {}   # (gid, kind, side, line, book) -> bet-slip link; (gid, book) -> game page link
+
+
+def record_links(events):
+    """Bet-slip / game-page links from a pull (includeLinks), for the 'Open at' button on alerts."""
+    for e in events:
+        home, gid = e.get("home_team"), e.get("id")
+        for b in e.get("bookmakers", []):
+            if b.get("link"):
+                EVENT_LINKS[(gid, b["key"])] = b["link"]
+            for m in b.get("markets", []):
+                kind = {"h2h": "h2h", "spreads": "spread", "totals": "total"}.get(m["key"])
+                if not kind:
+                    continue
+                for o in m.get("outcomes", []):
+                    if not o.get("link"):
+                        continue
+                    if kind == "total":
+                        side = "a" if o.get("name") == "Over" else "b" if o.get("name") == "Under" else None
+                    else:
+                        side = "a" if o.get("name") == home else "d" if o.get("name") == "Draw" else "b"
+                    if side is None:
+                        continue
+                    line = None if kind == "h2h" else (o.get("point") if side == "a" or kind == "total" else -o.get("point", 0))
+                    LINKS[(gid, kind, side, line, b["key"])] = o["link"]
+
+
+def play_link(gid, p):
+    """(label, url) for the book's bet slip (or game page) for this play, if the feed gave one."""
+    bk = p.get("book")
+    u = LINKS.get((gid, p.get("kind"), p.get("side"), p.get("line"), bk)) or EVENT_LINKS.get((gid, bk))
+    if not u or not str(u).startswith("https://"):
+        return None
+    return (f"Open at {BOOK_NAMES.get(bk, bk)}", u)
+
+
 def link_probe(sport, events):
     """Counts (never the links) of bet-slip links per book, to see which books can open a bet straight from an alert."""
     seen = {}
@@ -835,6 +871,7 @@ def pull(sport, now, st, reason):
         events += evs
     charge(st, now, cost)
     link_probe(sport, events)
+    record_links(events)
     games, plays, for_tally = {}, [], []
     try:
         pxr = px_rows(sport, events) if "prophetx" not in BOOKS else {}
@@ -1502,7 +1539,7 @@ BOT_MSGS = set()          # alert messages the bot posted (it edits those; the w
 BOT_CAN_POST = [True]
 
 
-def discord_send(text, edit_id=None, buttons=True, ch=None):
+def discord_send(text, edit_id=None, buttons=True, ch=None, link=None):
     """Post one alert (returns its message id), or edit an earlier one in place (no new notification).
     With the bot: posted by the bot with Bet it / Pass buttons. Without it (or no Send Messages permission): webhook."""
     if DRY:
@@ -1518,8 +1555,10 @@ def discord_send(text, edit_id=None, buttons=True, ch=None):
                 time.sleep(0.3)
                 return edit_id
             try:
+                comps = BUTTONS + ([{"type": 1, "components": [{"type": 2, "style": 5, "label": link[0][:80],
+                                                                  "url": link[1]}]}] if link else [])
                 m = bot("POST", f"/channels/{channel_id()}/messages",
-                        json={"content": text, **({"components": BUTTONS} if buttons else {})})
+                        json={"content": text, **({"components": comps} if buttons else {})})
                 if buttons:
                     BOT_MSGS.add(m["id"])
                 time.sleep(0.3)
@@ -2326,7 +2365,7 @@ def record(found, seen, now):
         if not sib:
             tell_others()
             text = alert_text({**p, **extra}, g) + note
-            mid = discord_send(text)
+            mid = discord_send(text, link=play_link(gid, p))
             add_buttons(mid)
             doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
                        alerted_at=now.isoformat(), msg_id=mid, first_id=pid, msg_text=text, msg_base=text,
