@@ -2502,9 +2502,12 @@ def live_status(sport, games, quotes_, seen, now, full):
                 else:
                     state, line_ = "down", (f"🟡 **Value down** {when} -- still {ps} @ {bk}, but the fair line moved: "
                                             f"edge now {ev:+.1%} (bar {bar_:.0%}). Your call.")
+            elif ev is None:   # price still there, but no fair line at this exact number right now -- not 'gone'
+                state, line_ = "unpriced", (f"⚪ **Can't re-check** {when} -- still {ps} @ {bk}, but the sharp books "
+                                            f"have moved off this number, so there's no fair price for it right now. "
+                                            f"It may still be good; it just can't be confirmed. Your call.")
             else:
-                state, line_ = "gone", (f"🔴 **Gone** {when} -- no value left: now {ps} @ {bk}, "
-                                        + (f"value now {ev:+.1%}" if ev is not None else "value can't be priced right now"))
+                state, line_ = "gone", f"🔴 **Gone** {when} -- no value left: now {ps} @ {bk}, value now {ev:+.1%}"
         # Only what changes a decision is shown: 'Gone' when the price dies (removed if it comes back) and
         # 'Game started'. A still-good alert is left alone -- no edits every few minutes.
         prev_state = x.get("status") or "good"
