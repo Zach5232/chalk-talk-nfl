@@ -2227,6 +2227,19 @@ def _note_for(kind, text, other, better):
                if better else "The other one is the better value -- take only one."))
 
 
+LOCK_MIN = float(os.environ.get("LOCK_MIN", "2"))   # lock-in alerts only when the guaranteed profit is at least this
+
+
+def lock_profit(o, p):
+    """Guaranteed profit if you add p (matched payout) to the bet you hold on the other side, o."""
+    held = o.get("stake_taken") or o.get("stake_usd") or 0
+    d_o = 1 + payout(_odds_held(o), _book_held(o), o["sport"])
+    d_p = 1 + payout(p["odds"], p["book"], p["sport"])
+    if not held or d_p <= 1:
+        return 0.0
+    return held * d_o - held - held * d_o / d_p
+
+
 def pair_stake(kind, text, o, p):
     """(stake, why) for a new play when you already hold the other side: the lock-in amount for an arb, and for a
     free middle the Kelly stake nudged into the no-loss range. None = keep the play's own stake."""
@@ -2337,6 +2350,9 @@ def record(found, seen, now):
                     skip = True          # same team another way: that's doubling up
                     break
                 rel = relation(p, o, g)
+                if rel and rel[0] == "arb" and lock_profit(o, p) < LOCK_MIN:
+                    skip = True          # owner's rule: a lock-in worth under $2 isn't worth the fiddly second bet
+                    break
                 if rel and rel[0] in ("middle", "arb"):
                     notes.append(_taken_note(rel[0], rel[1], o, p))
                     rel_tags.append(rel[0] + "_with_bet")
