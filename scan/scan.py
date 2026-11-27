@@ -2295,7 +2295,7 @@ def record(found, seen, now):
         pid = play_id(p, gid)
         prev = seen.get(pid)
         fam = f"{p['sport']}_{gid}_{p['kind']}_{p['side']}"
-        sib = sorted((x for x in seen.values() if x.get("alerted") and not x.get("superseded")
+        sib = sorted((x for x in seen.values() if x.get("alerted") and not x.get("superseded") and x.get("msg_id")
                       and f"{x['sport']}_{x['event_id']}_{x['kind']}_{x['side']}" == fam),
                      key=lambda x: x.get("alerted_at") or "")
         extra = {"size_usd": round(size)} if size else {}
@@ -2412,7 +2412,7 @@ def record(found, seen, now):
             text = alert_text({**p, **extra}, g) + note
             mid = discord_send(text, link=play_link(gid, p))
             add_buttons(mid)
-            doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=True, odds_alerted=p["odds"],
+            doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=bool(mid), odds_alerted=p["odds"],
                        alerted_at=now.isoformat(), msg_id=mid, first_id=pid, msg_text=text, msg_base=text,
                        via="bot" if mid in BOT_MSGS else "webhook", **({"rel": sorted(set(rel_tags))} if rel_tags else {}))
             fs_set(f"scan_plays/{pid}", doc)
