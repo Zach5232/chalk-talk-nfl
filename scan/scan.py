@@ -2435,11 +2435,13 @@ def record(found, seen, now):
         if not sib:
             tell_others()
             text = alert_text({**p, **extra}, g) + note
-            mid = discord_send(text, link=play_link(gid, p))
+            lk = play_link(gid, p)
+            mid = discord_send(text, link=lk)
             add_buttons(mid)
             doc = dict(base, found=prev["found"] if prev else now.isoformat(), alerted=bool(mid), odds_alerted=p["odds"],
                        alerted_at=now.isoformat(), msg_id=mid, first_id=pid, msg_text=text, msg_base=text,
-                       via="bot" if mid in BOT_MSGS else "webhook", **({"rel": sorted(set(rel_tags))} if rel_tags else {}))
+                       via="bot" if mid in BOT_MSGS else "webhook", **({"rel": sorted(set(rel_tags))} if rel_tags else {}),
+                       **({"link": list(lk)} if lk else {}))
             fs_set(f"scan_plays/{pid}", doc)
             seen[pid] = doc
             if mid:
@@ -3052,7 +3054,10 @@ def watch(minutes, sports):
         for mid, x in list(MSG_DOC.items()):   # give alerts you haven't answered the current buttons
             if mid in BOT_MSGS and x.get("taken") is None:
                 try:
-                    bot("PATCH", f"/channels/{channel_id()}/messages/{mid}", json={"components": BUTTONS})
+                    lk = x.get("link")
+                    comps = BUTTONS + ([{"type": 1, "components": [{"type": 2, "style": 5, "label": lk[0][:80],
+                                                                     "url": lk[1]}]}] if lk else [])
+                    bot("PATCH", f"/channels/{channel_id()}/messages/{mid}", json={"components": comps})
                     time.sleep(0.3)
                 except Exception:  # noqa: BLE001
                     pass
