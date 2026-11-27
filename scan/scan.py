@@ -3163,6 +3163,18 @@ def watch(minutes, sports):
             log(f"reactions: {type(e).__name__}")
         refresh_msg_doc(seen, now)
         apply_taps(seen)
+        et_ = now.astimezone(ET)
+        slot = max([h for h in SWEAT_SLOTS if et_.hour >= h], default=None)
+        if slot is not None and (et_.strftime("%Y-%m-%d"), slot) not in SWEAT_DONE:
+            SWEAT_DONE.add((et_.strftime("%Y-%m-%d"), slot))
+            try:
+                sw = fs_get("scan_state/sweat") or {}
+                if sw.get("key") != f"{et_.strftime('%Y-%m-%d')}_{slot}":
+                    if post_sweat(list(seen.values()), now):
+                        log("sweat guide posted")
+                    fs_set("scan_state/sweat", {"key": f"{et_.strftime('%Y-%m-%d')}_{slot}", "at": now.isoformat()})
+            except Exception as e:  # noqa: BLE001
+                log(f"sweat guide failed: {type(e).__name__}")
         log(f"cycle {cycle}: {n_quotes} exchange prices checked, {n_alerts} alert(s), {n_edits} status update(s); "
             f"credits {st['used']}/{CREDIT_CAP}")
         time.sleep(max(0, min(CYCLE_S, t_end - time.time())))
@@ -3184,6 +3196,146 @@ def watch(minutes, sports):
                 fs_set("scan_state/wrapup", {"day": wday, "at": end.isoformat()})
         except Exception as e:  # noqa: BLE001
             log(f"summary failed: {type(e).__name__}")
+
+
+SWEAT_SLOTS = (12, 18)   # ET hours: the sweat guide posts once after each (afternoon slate, evening slate)
+SWEAT_DONE = set()
+
+
+def _bet_pl(x, m, t):
+    """Profit of one taken bet if the home team wins by m and the total is t (push = 0)."""
+    stake = x.get("stake_taken") or 0
+    win = stake * payout(_odds_held(x), _book_held(x), x["sport"])
+    k, sd, L = x["kind"], x["side"], x.get("line")
+    if k == "h2h":
+        res = (m > 0) if sd == "a" else (m < 0) if sd == "b" else (m == 0)
+        return win if res else -stake
+    if k == "spread":
+        v = m + L if sd == "a" else -(m + L)
+    else:
+        v = t - L if sd == "a" else L - t
+    return win if v > 0 else -stake if v < 0 else 0.0
+
+
+def _ranges(vals, best):
+    """Contiguous runs of integers in vals whose value is (about) best -> [(lo, hi)], hi None = and up, lo None = and down."""
+    ks = sorted(vals)
+    hit = [k for k in ks if abs(vals[k] - best) < 0.01]
+    out, start = [], None
+    for i, k in enumerate(hit):
+        if start is None:
+            start = k
+        if i == len(hit) - 1 or hit[i + 1] != k + 1:
+            out.append((None if start == ks[0] else start, None if k == ks[-1] else k))
+            start = None
+    return out
+
+
+def _margin_words(lo, hi, home, away):
+    def side(a, b):   # home margin range a..b, all one sign
+        if a is not None and a > 0:
+            who, x, y = home, a, b
+        else:
+            who, x, y = away, (None if b is None else -b), (None if a is None else -a)
+        if x == y and x is not None:
+            return f"{who} by exactly {x}"
+        if y is None:
+            return f"{who} wins" if x == 1 else f"{who} by {x}+"
+        return f"{who} by {x}-{y}" if x and x > 1 else f"{who} by {y} or less"
+    if lo is not None and lo > 0 or hi is not None and hi < 0:
+        return side(lo, hi)
+    parts = []
+    if lo is None or lo < 0:
+        parts.append(f"{away} wins" if lo is None else side(lo, -1))
+    if hi is None or hi > 0:
+        parts.append(f"{home} by {hi} or less" if hi is not None else f"{home} wins")
+    return " or ".join(parts)
+
+
+def _total_words(lo, hi, u="points"):
+    if lo is None and hi is None:
+        return "any total"
+    if lo is None:
+        return f"{hi} or fewer {u}"
+    if hi is None:
+        return f"{lo}+ {u}"
+    return f"exactly {lo} {u}" if lo == hi else f"{lo}-{hi} {u}"
+
+
+def sweat_guide(plays, now, hours=6):
+    """'What to watch': games with your logged bets starting in the next few hours (or under way), most money first,
+    each with what to root for and the best / worst case. -> text or None."""
+    games = {}
+    for x in plays:
+        if (not x.get("taken") or x.get("kind") not in ("h2h", "spread", "total") or x.get("result")
+                or not x.get("stake_taken")):
+            continue
+        st_ = datetime.fromisoformat(x["start"])
+        if not (now - timedelta(hours=2.5) < st_ < now + timedelta(hours=hours)):
+            continue
+        games.setdefault((x["sport"], x["event_id"]), []).append(x)
+    if not games:
+        return None
+    rows = []
+    for (sp, gid), xs in games.items():
+        home, away = xs[0]["home"], xs[0]["away"]
+        side_bets = [x for x in xs if x["kind"] != "total"]
+        tot_bets = [x for x in xs if x["kind"] == "total"]
+        lines = []
+        best = worst = 0.0
+        if side_bets:
+            ms = range(-60, 61)
+            f = {m: sum(_bet_pl(x, m, 0) for x in side_bets) for m in ms
+                 if m != 0 or SPORTS.get(sp, {}).get("three_way")}
+            hi_, lo_ = max(f.values()), min(f.values())
+            best += hi_; worst += lo_
+            if abs(hi_ - lo_) < 0.01:
+                lines.append(f"Side: locked **{hi_:+.2f}**".replace("+", "+$").replace("-", "-$"))
+            else:
+                bw = " or ".join(_margin_words(a, b, home, away) for a, b in _ranges(f, hi_))
+                ww = " or ".join(_margin_words(a, b, home, away) for a, b in _ranges(f, lo_))
+                lines.append(f"Side: root for **{bw}** (+${hi_:,.2f}) · worst {ww} ({'-' if lo_ < 0 else '+'}${abs(lo_):,.2f})")
+        if tot_bets:
+            ls = [x["line"] for x in tot_bets]
+            ts = range(int(min(ls)) - 40, int(max(ls)) + 41)
+            gt = {t: sum(_bet_pl(x, 0, t) for x in tot_bets) for t in ts}
+            hi_, lo_ = max(gt.values()), min(gt.values())
+            best += hi_; worst += lo_
+            if abs(hi_ - lo_) < 0.01:
+                lines.append(f"Total: locked **{'+' if hi_ >= 0 else '-'}${abs(hi_):,.2f}**")
+            else:
+                u = "goals" if sp == "nhl" or SPORTS.get(sp, {}).get("three_way") else "points"
+                bw = " or ".join(_total_words(a, b, u) for a, b in _ranges(gt, hi_))
+                ww = " or ".join(_total_words(a, b, u) for a, b in _ranges(gt, lo_))
+                lines.append(f"Total: root for **{bw}** (+${hi_:,.2f}) · worst {ww} ({'-' if lo_ < 0 else '+'}${abs(lo_):,.2f})")
+        money = sum(x["stake_taken"] for x in xs)
+        st_ = min(datetime.fromisoformat(x["start"]) for x in xs)
+        rows.append((money, sp, home, away, st_, len(xs), best, worst, lines))
+    rows.sort(key=lambda r: -r[0])
+    out = ["# 👀 What to watch", "-# Games with your logged bets (Bet it), most money first: what to root for, best and "
+           "worst case. Parlays and bets you didn't log aren't included."]
+    for money, sp, home, away, st_, n, best, worst, lines in rows[:8]:
+        when = "🔴 live" if st_ <= now else st_.astimezone(ET).strftime("%-I:%M %p")
+        out += ["", f"### {SPORTS.get(sp, {}).get('label', sp)} · {away} @ {home} · {when}",
+                f"${money:,.0f} on it · {n} bet{'s' if n > 1 else ''} · best **+${best:,.2f}** · worst "
+                f"**{'-' if worst < 0 else '+'}${abs(worst):,.2f}**"] + [f"• {ln}" for ln in lines]
+    if len(rows) > 8:
+        out += ["", f"-# +{len(rows) - 8} more games with smaller bets."]
+    return "\n".join(out)
+
+
+def post_sweat(plays, now):
+    txt = sweat_guide(plays, now)
+    if not txt:
+        return False
+    msg = ""
+    for ln in txt.split("\n"):
+        if len(msg) + len(ln) > 1900:
+            report_send(msg)
+            msg = ""
+        msg += ("\n" if msg else "") + ln
+    report_send(msg)
+    return True
 
 
 def _band_lines(xs, bands):
@@ -3788,7 +3940,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -4023,6 +4175,11 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "sweat":   # 'what to watch' now (trophy room)
+        now = datetime.now(timezone.utc)
+        ps = fs_recent("scan_plays", "start", (now - timedelta(hours=8)).isoformat())
+        log("sweat guide posted" if post_sweat(ps, now) else "sweat guide: no logged bets in the window")
         return
     if a.mode == "boostparlay":   # sports box = "book,boost,min_odds,legs_min,sport[+sport]" e.g. "betrivers,0.25,400,2,nfl+ncaab"
         bk, bo, mo, lm, sps, *cnt = (os.environ.get("SCAN_SPORTS") or "").split(",")
