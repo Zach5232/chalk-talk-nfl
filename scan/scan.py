@@ -2279,10 +2279,12 @@ def _taken_note(kind, text, o, p):
         d_p = 1 + payout(p["odds"], p["book"], p["sport"])
         # no loss when only one side wins: held side alone pays for this stake, and this side alone pays for the held one
         lock = (stake / (d_p - 1), stake * (d_o - 1)) if stake and d_p > 1 else None
-        return middle_words(f"you already bet {ref}; {text[0]}", text[1], lock)
+        evs = f" (EV {o['ev']:+.1%} when alerted; this side {p['ev']:+.1%})" if o.get("ev") is not None else ""
+        return middle_words(f"you already bet {ref}{evs}; {text[0]}", text[1], lock)
     d_o = 1 + payout(_odds_held(o), hb, o["sport"])
     d_p = 1 + payout(p["odds"], p["book"], p["sport"])
     hedge = stake * d_o / d_p
+    ref += f" (EV {o['ev']:+.1%} when alerted; this side {p['ev']:+.1%})" if o.get("ev") is not None else ""
     return (f"💰 **Lock it in:** you already bet {ref}. Bet ${hedge:,.0f} here and you get "
             f"${stake * d_o:,.2f} back either way ({'+' if stake * d_o - stake - hedge >= 0 else '-'}${abs(stake * d_o - stake - hedge):,.2f} locked).")
 
