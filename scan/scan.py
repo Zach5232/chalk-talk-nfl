@@ -788,6 +788,7 @@ def pull_alts(sport, S, now, st):
     return plays
 
 
+BET_STATE = os.environ.get("BET_STATE", "md")   # the owner's state, for books whose links name it
 LINKS, EVENT_LINKS = {}, {}   # (gid, kind, side, line, book) -> bet-slip link; (gid, book) -> game page link
 
 
@@ -822,7 +823,13 @@ def play_link(gid, p):
         u = KALSHI_LINKS.get((gid, p.get("kind"), p.get("side"), p.get("line")))
         return (f"Open at Kalshi", u) if u else None
     u = LINKS.get((gid, p.get("kind"), p.get("side"), p.get("line"), bk)) or EVENT_LINKS.get((gid, bk))
-    if not u or not str(u).startswith("https://"):
+    if u and "{" in u:   # state-based books: the feed leaves a {state} placeholder in the address
+        u = u.replace("{state}", BET_STATE)
+        if "{" in u:
+            u = None
+    if (not u or not str(u).startswith("https://") or len(u) > 512) and bk != "kalshi":
+        u = EVENT_LINKS.get((gid, bk))   # Discord link buttons take at most 512 characters: fall back to the game page
+    if not u or not str(u).startswith("https://") or len(u) > 512:
         return None
     return (f"Open at {BOOK_NAMES.get(bk, bk)}", u)
 
@@ -1587,8 +1594,16 @@ def discord_send(text, edit_id=None, buttons=True, ch=None, link=None):
             try:
                 comps = BUTTONS + ([{"type": 1, "components": [{"type": 2, "style": 5, "label": link[0][:80],
                                                                   "url": link[1]}]}] if link else [])
-                m = bot("POST", f"/channels/{channel_id()}/messages",
-                        json={"content": text, **({"components": comps} if buttons else {})})
+                try:
+                    m = bot("POST", f"/channels/{channel_id()}/messages",
+                            json={"content": text, **({"components": comps} if buttons else {})})
+                except requests.HTTPError as e:
+                    if not (link and buttons and e.response.status_code == 400):
+                        raise
+                    why = re.sub(r"https?://\S+", "<url>", (e.response.text or ""))[:200]
+                    log(f"link button rejected ({BOOK_NAMES.get(link[0][8:], link[0][8:])}, {len(link[1])} chars): "
+                        f"{why} -- posted without it")
+                    m = bot("POST", f"/channels/{channel_id()}/messages", json={"content": text, "components": BUTTONS})
                 if buttons:
                     BOT_MSGS.add(m["id"])
                 time.sleep(0.3)
