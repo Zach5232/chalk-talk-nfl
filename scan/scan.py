@@ -2351,8 +2351,15 @@ def record(found, seen, now):
                     break
                 rel = relation(p, o, g)
                 if rel and rel[0] == "arb" and lock_profit(o, p) < LOCK_MIN:
-                    skip = True          # owner's rule: a lock-in worth under $2 isn't worth the fiddly second bet
-                    break
+                    if p["ev"] <= o["ev"]:
+                        skip = True      # owner's rule: a lock-in worth under $2 isn't worth the fiddly second bet
+                        break
+                    # ...unless this side is now the better value: post it as its own bet at its own stake (no matching)
+                    notes.append(f"↔️ **Other side of your bet** on {o['label']} -- this side is now the better value "
+                                 f"(EV {p['ev']:+.1%} vs {o['ev']:+.1%} when you bet it). Treat it as its own bet at the "
+                                 f"amount shown; no need to match amounts.")
+                    rel_tags.append("better_other_side")
+                    continue
                 if rel and rel[0] in ("middle", "arb"):
                     notes.append(_taken_note(rel[0], rel[1], o, p))
                     rel_tags.append(rel[0] + "_with_bet")
