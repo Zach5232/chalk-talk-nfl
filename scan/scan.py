@@ -3203,6 +3203,7 @@ def watch(minutes, sports):
             log(f"summary failed: {type(e).__name__}")
 
 
+SWEAT_MIN_SWING = 5.0    # a game only makes the guide if best and worst case differ by at least this
 SWEAT_SLOTS = (12, 18)   # ET hours: the sweat guide posts once after each (afternoon slate, evening slate)
 SWEAT_DONE = set()
 
@@ -3316,6 +3317,10 @@ def sweat_guide(plays, now, hours=6):
         money = sum(x["stake_taken"] for x in xs)
         st_ = min(datetime.fromisoformat(x["start"]) for x in xs)
         rows.append((money, sp, home, away, st_, len(xs), best, worst, lines))
+    calm = [r for r in rows if r[6] - r[7] < SWEAT_MIN_SWING]   # outcome barely matters: nothing to root for
+    rows = [r for r in rows if r[6] - r[7] >= SWEAT_MIN_SWING]
+    if not rows:
+        return None
     rows.sort(key=lambda r: -r[0])
     out = ["# 👀 What to watch", "-# Games with your logged bets (Bet it), most money first: what to root for, best and "
            "worst case. Parlays and bets you didn't log aren't included."]
@@ -3326,6 +3331,10 @@ def sweat_guide(plays, now, hours=6):
                 f"**{'-' if worst < 0 else '+'}${abs(worst):,.2f}**"] + [f"• {ln}" for ln in lines]
     if len(rows) > 8:
         out += ["", f"-# +{len(rows) - 8} more games with smaller bets."]
+    if calm:
+        out += ["", "-# Nothing riding on: " + ", ".join(
+            f"{r[3]} @ {r[2]} ({'+' if r[7] >= 0 else '-'}${abs(r[7]):,.2f} to {'+' if r[6] >= 0 else '-'}${abs(r[6]):,.2f})"
+            for r in calm)]
     return "\n".join(out)
 
 
