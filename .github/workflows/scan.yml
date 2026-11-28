@@ -83,3 +83,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run scan.yml --repo "${{ github.repository }}" --ref master -f mode=watch
+      - name: Retry after a failed start (e.g. database limit) -- wait 30 min, then start again
+        if: ${{ failure() && (inputs.mode == 'watch' || github.event_name == 'schedule') && (inputs.minutes == '' || inputs.minutes == null) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 1800
+          gh workflow run scan.yml --repo "${{ github.repository }}" --ref master -f mode=watch
