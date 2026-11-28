@@ -2144,6 +2144,14 @@ def alert_text(p, g, first=None):
            f"**{p['label']} · {price_str(p['odds'], p['book'], p.get('price_prob'))} @ {bk}**\n"
            f"Fair {_pct(p['p_fair'])}% ({p['fair_odds']:+d}) · EV {p['ev']:+.1%} · bet ${p['stake_usd']:g} to win ${p.get('to_win') or p['stake_usd'] * payout(p['odds'], p['book'], p['sport']):,.0f}"
            + (f" ({p['stake_why']})" if p.get("stake_why") else "") + f"{good}{size}")
+    if p["book"] not in EXCHANGES:   # sportsbook prices come from the last pull: say how old
+        u = ((g.get("upd") or {}).get(p["kind"]) or {}).get(p["book"]) or g.get("at")
+        try:
+            ut = datetime.fromisoformat(str(u).replace("Z", "+00:00"))
+            mins = int((datetime.now(timezone.utc) - ut).total_seconds() // 60)
+            txt += f"\n-# {bk} price as of {ut.astimezone(ET).strftime('%-I:%M %p')}" + (f" ({mins} min ago)" if mins >= 2 else "")
+        except (TypeError, ValueError):
+            pass
     if first:
         was = price_str(first["odds"], first["book"], first.get("price_prob"))
         wbk = BOOK_NAMES.get(first["book"], first["book"])
