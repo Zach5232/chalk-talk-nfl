@@ -24,7 +24,7 @@ A better number later edits that same message ("Better number at ...", showing t
 Storage: Firestore scan_state/* and scan_plays/*. This repo is public: no odds are written to it and the log prints
 counts only (prices go to Firestore and Discord). SCAN_DRY=1 keeps state in local files and prints alerts instead.
 """
-import argparse, csv, json, math, os, queue, re, threading, time
+import argparse, csv, io, json, math, os, queue, re, threading, time
 from datetime import datetime, timedelta, timezone
 from statistics import NormalDist
 from zoneinfo import ZoneInfo
@@ -3291,6 +3291,110 @@ def _total_words(lo, hi, u="points"):
     return f"exactly {lo} {u}" if lo == hi else f"{lo}-{hi} {u}"
 
 
+JR_BOOKS = {"NoVig": "novig", "ProphetX": "prophetx", "BallyBet": "ballybet", "Caesars": "williamhill_us", "FanDuel": "fanduel",
+            "BetOnline": "betonlineag", "Kalshi": "kalshi", "TheScoreBet": "espnbet", "BetRivers": "betrivers",
+            "BetMGM": "betmgm", "Polymarket App": "polymarket"}
+JR_KIND = {"Spread": "spread", "GameOu": "total", "Moneyline": "h2h"}
+JR_LEAGUE = {"CBB": "ncaab", "NBA": "nba", "NHL": "nhl", "NFL": "nfl", "NCAA Football": "ncaaf"}
+
+
+def _jr_dt(s_):
+    s_ = s_.strip().replace(" ", "T")
+    return datetime.fromisoformat(s_ + ":00" if re.search(r"[+-]\d\d$", s_) else s_)
+
+
+def _toks(s_):
+    return {w for w in re.split(r"[^a-z0-9]+", (s_ or "").lower()) if w and w not in ("state", "st", "the", "of")}
+
+
+def jr_import():
+    """Reads the newest juiceReelBets*.csv attached in the trophy room (private), matches each straight bet to the alert
+    it came from and updates your record: unlogged bets added, wrong prices / stakes corrected. Bets that came from no
+    alert are left out; exchange positions netted into one line (both sides of a market) are skipped. Log: counts only."""
+    report_send("### 📥 Reading your Juice Reel export...")
+    tid = _TROPHY[0]
+    if not tid:
+        log("jrimport: trophy room not found")
+        return
+    msgs = bot("GET", f"/channels/{tid}/messages", params={"limit": 50}) or []
+    att = next((at_ for m in msgs for at_ in m.get("attachments", [])
+                if at_.get("filename", "").lower().startswith("juicereelbets") and at_["filename"].endswith(".csv")), None)
+    if not att:
+        report_send("-# No Juice Reel CSV found in the last 50 messages here -- attach the export file and run it again.")
+        log("jrimport: no file")
+        return
+    rows = list(csv.DictReader(io.StringIO(requests.get(att["url"], timeout=60).text)))
+    jr = [r for r in rows if r.get("number_of_legs") == "1" and r.get("leg_type") in JR_KIND and r.get("event_start_date")
+          and r.get("bet_result") in ("Won", "Lost", "Push", "Pending", "Open", "")]
+    if not jr:
+        report_send("-# That file had no straight game bets I could read.")
+        return
+    first = min(_jr_dt(r["event_start_date"]) for r in jr)
+    plays = [x for x in fs_recent("scan_plays", "start", (first - timedelta(days=1)).isoformat())
+             if x.get("alerted") and not x.get("superseded") and x.get("kind") in ("h2h", "spread", "total")]
+    used, added, fixed, same, merged, nomatch, nomatch_usd = set(), 0, 0, 0, 0, 0, 0.0
+    for r in jr:
+        kind, sp = JR_KIND[r["leg_type"]], JR_LEAGUE.get(r["leg_league"])
+        bk, st_ = JR_BOOKS.get(r["sportsbook"]), _jr_dt(r["event_start_date"])
+        jo, risk = float(r["odds_american"]), float(r["risk_amount"])
+        num = float(r["bet_on_spread_total_number"] or 0)
+        cands = []
+        for x in plays:
+            if x["_id"] in used or x.get("sport") != sp or x["kind"] != kind:
+                continue
+            if abs((datetime.fromisoformat(x["start"]) - st_).total_seconds()) > 3 * 3600:
+                continue
+            if kind == "total":
+                if ("a" if r["bet_on"].lower().startswith("over") else "b") != x["side"] or abs(num - x["line"]) > 0.01:
+                    continue
+            else:
+                team = x["home"] if x["side"] == "a" else x["away"]
+                if not (_toks(team) & _toks(r["bet_on"])):
+                    continue
+                if kind == "spread" and abs(num - (x["line"] if x["side"] == "a" else -x["line"])) > 0.01:
+                    continue
+            held = x.get("taken_odds") or x.get("odds_alerted") or x["odds"]
+            d = abs(prob(held) - prob(jo))
+            cands.append((0 if _book_held(x) == bk else 1, d, x))
+        if not cands:
+            nomatch += 1
+            nomatch_usd += risk
+            continue
+        _, d, x = min(cands, key=lambda c: (c[0], c[1]))
+        if d > 0.05:
+            merged += 1          # 5+ cents off the alert / your logged price: e.g. both sides of a Novig market netted into one line
+            continue
+        used.add(x["_id"])
+        price_ok = x.get("taken") and abs(prob(x.get("taken_odds") or x["odds"]) - prob(jo)) <= 0.004
+        stake_ok = x.get("taken") and x.get("stake_taken") and abs(x["stake_taken"] - risk) <= 0.6
+        if price_ok and stake_ok and _book_held(x) == bk:
+            same += 1
+            continue
+        was = bool(x.get("taken"))
+        x.update(taken=True, taken_odds=int(round(jo)), stake_taken=round(risk, 2), taken_book=bk or x["book"],
+                 taken_price=round(prob(jo), 4) if bk in EXCHANGES else None, jr_import=datetime.now(timezone.utc).isoformat())
+        x.pop("pass_reason", None)
+        if x.get("result") in ("win", "loss", "push"):   # already graded: redo your-price numbers
+            pay_t = payout(x["taken_odds"], x["taken_book"], x["sport"])
+            x["pl_taken_usd"] = round({"win": pay_t, "loss": -1.0, "push": 0.0}[x["result"]] * risk, 2)
+            if x.get("p_close") is not None:
+                x["clv_taken"] = round(x["p_close"] * (1 + pay_t) - 1, 4)
+        fs_set(f"scan_plays/{x['_id']}", {k: v for k, v in x.items() if k != "_id"})
+        if was:
+            fixed += 1
+        else:
+            added += 1
+    report_send("\n".join([
+        "### 📥 Juice Reel import done",
+        f"• **{added}** bets you hadn't logged -- added from your export",
+        f"• **{fixed}** logged bets corrected to your real price / stake / book",
+        f"• **{same}** already matched exactly",
+        f"• **{merged}** skipped: both sides of an exchange market shown as one line",
+        f"• **{nomatch}** bets (${nomatch_usd:,.0f}) didn't come from an alert -- left out of the scanner's record",
+        "-# Reports from here on use these numbers."]))
+    log(f"jrimport: {len(jr)} rows, {added} added, {fixed} fixed, {same} same, {merged} merged, {nomatch} no alert")
+
+
 def sweat_guide(plays, now, hours=6):
     """'What to watch': games with your logged bets starting in the next few hours (or under way), most money first,
     each with what to root for and the best / worst case. -> text or None."""
@@ -4006,7 +4110,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -4241,6 +4345,9 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "jrimport":   # the newest Juice Reel CSV posted in the trophy room -> fix / add your bets
+        jr_import()
         return
     if a.mode == "betfile":   # your logged bets (last 14 days) as a CSV file in the trophy room -- never in the log
         now = datetime.now(timezone.utc)
