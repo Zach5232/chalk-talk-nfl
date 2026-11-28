@@ -2401,7 +2401,16 @@ def pair_stake(kind, text, o, p):
     return None
 
 
-def _taken_note(kind, text, o, p):
+def _middle_ints(p, o):
+    """How many whole scores fall strictly inside the window where both bets win (margin or total)."""
+    r1, r2 = region(p), region(o)
+    if not r1 or not r2:
+        return 99
+    lo, hi = sorted((r1[2], r2[2]))
+    return max(0, math.ceil(hi) - math.floor(lo) - 1)
+
+
+def _taken_note(kind, text, o, p, g=None):
     """Note on a new play when the owner already bet the other side (o, marked ✅)."""
     hb = _book_held(o)
     bk = BOOK_NAMES.get(hb, hb)
@@ -2414,6 +2423,23 @@ def _taken_note(kind, text, o, p):
         # no loss when only one side wins: held side alone pays for this stake, and this side alone pays for the held one
         lock = (stake / (d_p - 1), stake * (d_o - 1)) if stake and d_p > 1 else None
         evs = f" (EV {o['ev']:+.1%} when alerted; this side {p['ev']:+.1%})" if o.get("ev") is not None else ""
+        held_now = None
+        if g is not None:
+            try:
+                held_now = _ev_now(o["sport"], g, o["kind"], o["side"], o["line"], hb, _odds_held(o))
+            except Exception:  # noqa: BLE001
+                held_now = None
+        if _middle_ints(p, o) <= 1 and stake and d_p > 1:
+            # a one-score window: the point is protecting the bet you hold, not the middle
+            x = round(stake * d_o / d_p)
+            a_only, b_only = stake * (d_o - 1) - x, x * (d_p - 1) - stake
+            worst = min(a_only, b_only)
+            hn = f" -- it's now about **{held_now:+.1%}** (the line moved)" if held_now is not None and held_now < 0 else ""
+            return (f"🛡️ **Protect your bet:** you have {ref}{hn}. Taking this side cuts your worst case from "
+                    f"**-${stake:,.0f}** to about **{'-' if worst < 0 else '+'}${abs(worst):,.2f}**, and it's "
+                    f"{p['ev']:+.1%} on its own. Small bonus: {text[0]}.")
+        if held_now is not None:
+            evs += f" (your bet is worth {held_now:+.1%} now)"
         return middle_words(f"you already bet {ref}{evs}; {text[0]}", text[1], lock)
     d_o = 1 + payout(_odds_held(o), hb, o["sport"])
     d_p = 1 + payout(p["odds"], p["book"], p["sport"])
@@ -2502,7 +2528,7 @@ def record(found, seen, now):
                     rel_tags.append("better_other_side")
                     continue
                 if rel and rel[0] in ("middle", "arb"):
-                    notes.append(_taken_note(rel[0], rel[1], o, p))
+                    notes.append(_taken_note(rel[0], rel[1], o, p, g))
                     rel_tags.append(rel[0] + "_with_bet")
                     ps_ = pair_stake(rel[0], rel[1], o, p)
                     if ps_:   # the headline stake is the one that works with the bet you hold
