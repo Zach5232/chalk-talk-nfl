@@ -839,8 +839,13 @@ def record_links(events):
                     LINKS[(gid, kind, side, line, b["key"])] = o["link"]
 
 
+SHOW_LINKS = False   # owner: the 'Open at' buttons cost more time than they saved -- off
+
+
 def play_link(gid, p):
     """(label, url) for the book's bet slip (or game page) for this play, if the feed gave one."""
+    if not SHOW_LINKS:
+        return None
     bk = p.get("book")
     if bk == "kalshi":
         u = KALSHI_LINKS.get((gid, p.get("kind"), p.get("side"), p.get("line")))
@@ -3099,7 +3104,7 @@ def watch(minutes, sports):
         for mid, x in list(MSG_DOC.items()):   # give alerts you haven't answered the current buttons
             if mid in BOT_MSGS and x.get("taken") is None:
                 try:
-                    lk = x.get("link")
+                    lk = x.get("link") if SHOW_LINKS else None
                     comps = BUTTONS + ([{"type": 1, "components": [{"type": 2, "style": 5, "label": lk[0][:80],
                                                                      "url": lk[1]}]}] if lk else [])
                     bot("PATCH", f"/channels/{channel_id()}/messages/{mid}", json={"components": comps})
