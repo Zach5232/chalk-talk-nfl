@@ -419,9 +419,8 @@ def alert_market(key, sub, sport, et, ev, rows, seen, now):
             why = f"longshot (fair {pct(r['fair'])}) -- pricing noise, not value"
         txt = ((x.get("msg_base") or x.get("msg_text") or "") + (f"\n{x['status_line']}" if x.get("status_line") else "")
                + f"\n🚫 **No longer a play** -- {why}")
-        if x.get("taken"):   # you bet it: keep the message, say it's no longer a play
-            post(txt, edit_id=x.get("msg_id"))
-            x.update(withdrawn=now.isoformat(), msg_text=txt)
+        if x.get("taken"):   # you bet it: no 'no longer a play' -- the 'Your bet now' line below tracks its value
+            x.update(withdrawn=now.isoformat())
         else:                # never bet: just remove it
             x.update(withdrawn=now.isoformat(), deleted=now.isoformat() if delete_msg(x.get("msg_id")) else None)
         S.fs_set(f"scan_plays/{pid}", {k: v for k, v in x.items() if k != "_id"})
@@ -442,15 +441,18 @@ def alert_market(key, sub, sport, et, ev, rows, seen, now):
         then_f = x.get("p_fair") or r["fair"]
         then_v = sum((b.get("stake") or 0) * (then_f * (1 + S.payout(b.get("odds") or x["odds"], b.get("book") or x["book"],
                                                                           fee_sport)) - 1) for b in bets) / tot
-        if x.get("value_now") is not None and abs(x["value_now"] - now_v) < 0.005:
+        base = x.get("msg_text") or x.get("msg_base") or ""
+        stale_note = "🚫 **No longer a play" in base
+        if x.get("value_now") is not None and abs(x["value_now"] - now_v) < 0.005 and not stale_note:
             continue          # no real change since the last edit
         icon = "📈" if now_v >= then_v else "📉"
         vline = (f"{icon} **Your bet now: {now_v:+.1%}** (was {then_v:+.1%} when you bet · fair "
                  f"{pct(then_f)} → {pct(r['fair'])}, {datetime.now(S.ET).strftime('%b %-d')})")
-        base = x.get("msg_text") or x.get("msg_base") or ""
-        if not x.get("withdrawn") and x.get("status_line") and x["status_line"] not in base:
+        if x.get("status_line") and x["status_line"] not in base:
             base += f"\n{x['status_line']}"
-        base = "\n".join(ln for ln in base.split("\n") if not ln.startswith(("📈 **Your bet now", "📉 **Your bet now")))
+        base = "\n".join(ln for ln in base.split("\n")
+                         if not ln.startswith(("📈 **Your bet now", "📉 **Your bet now", "🚫 **No longer a play")))
+        x["msg_text"] = base
         post(base + "\n" + vline, edit_id=x["msg_id"])
         x.update(value_now=round(now_v, 4), value_line=vline)
         S.fs_set(f"scan_plays/{pid}", {k: v for k, v in x.items() if k != "_id"})
