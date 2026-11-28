@@ -4258,7 +4258,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["sharpprobe", "closefix", "whatif", "jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["soccerprobe", "sharpprobe", "closefix", "whatif", "jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -4494,6 +4494,27 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "soccerprobe":   # one EPL game: which books our feed has for each extra soccer market (counts only)
+        key = os.environ.get("ODDS_API_KEY")
+        evs = [e for e in requests.get(f"{ODDS}/soccer_epl/events", params=dict(apiKey=key), timeout=30).json()
+               if e["commence_time"] > datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
+        if not evs:
+            print("no upcoming EPL games"); return
+        e = evs[0]
+        for mkt in ("spreads", "draw_no_bet", "btts", "alternate_spreads", "alternate_totals", "team_totals",
+                    "alternate_totals_corners", "totals_corners"):
+            r = requests.get(f"{ODDS}/soccer_epl/events/{e['id']}/odds", timeout=30, params=dict(
+                apiKey=key, bookmakers=",".join(books_for("epl") + ["kalshi", "polymarket", "prophetx"]),
+                markets=mkt, oddsFormat="american"))
+            if not r.ok:
+                print(f"{mkt:26s} not available ({r.status_code})"); continue
+            bks = {}
+            for b in (r.json() or {}).get("bookmakers", []):
+                for m in b.get("markets", []):
+                    pts = sorted({o.get("point") for o in m.get("outcomes", []) if o.get("point") is not None})
+                    bks[b["key"]] = f"{len(m.get('outcomes', []))} prices" + (f", lines {pts[:6]}" if pts else "")
+            print(f"{mkt:26s} credits {r.headers.get('x-requests-last')}: " + ("; ".join(f"{k} ({v})" for k, v in bks.items()) or "no books"))
         return
     if a.mode == "sharpprobe":   # which candidate sharp books / exchanges price our sports (counts only, ~15 credits)
         key = os.environ.get("ODDS_API_KEY")
