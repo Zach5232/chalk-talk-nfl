@@ -60,7 +60,7 @@ SPORTS = {
     "epl":     dict(odds="soccer_epl", novig="EPL", poly=["epl"], label="EPL", three_way=True, espn="soccer/eng.1",
                     kalshi=dict(h2h="KXEPLGAME", total="KXEPLTOTAL", spread="KXEPLSPREAD"), sd=dict(total=1.7, spread=1.6), max_move=0.0, markets="h2h,totals"),
     "ucl":     dict(odds="soccer_uefa_champs_league", novig=None, poly=["ucl"], label="UCL", three_way=True,
-                    espn="soccer/uefa.champions", kalshi=dict(h2h="KXUCLGAME", total="KXUCLTOTAL"), sd=dict(total=1.7, spread=1.6),
+                    espn="soccer/uefa.champions", kalshi=dict(h2h="KXUCLGAME", total="KXUCLTOTAL", spread="KXUCLSPREAD"), sd=dict(total=1.7, spread=1.6),
                     max_move=0.0, markets="h2h,totals"),
     "laliga":  dict(odds="soccer_spain_la_liga", novig=None, poly=["lal"], label="La Liga", three_way=True,
                     espn="soccer/esp.1", kalshi=dict(h2h="KXLALIGAGAME", total="KXLALIGATOTAL"), sd=dict(total=1.7, spread=1.6),
@@ -75,7 +75,7 @@ SPORTS = {
                     espn="soccer/fra.1", kalshi=dict(h2h="KXLIGUE1GAME", total="KXLIGUE1TOTAL"), sd=dict(total=1.7, spread=1.6),
                     max_move=0.0, markets="h2h,totals"),
     "mls":     dict(odds="soccer_usa_mls", novig="MLS", poly=["mls"], label="MLS", three_way=True,
-                    espn="soccer/usa.1", kalshi=dict(h2h="KXMLSGAME", total="KXMLSTOTAL"), sd=dict(total=1.7, spread=1.6),
+                    espn="soccer/usa.1", kalshi=dict(h2h="KXMLSGAME", total="KXMLSTOTAL", spread="KXMLSSPREAD"), sd=dict(total=1.7, spread=1.6),
                     max_move=0.0, markets="h2h,totals"),
     # tennis: the Odds API lists each tournament separately ('tennis_atp_paris_masters'); every active one is pulled
     "atp":     dict(odds=None, odds_prefix="tennis_atp", novig="ATP", poly=["atp"], label="ATP",
