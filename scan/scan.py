@@ -4601,7 +4601,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["watchdog", "soccerprobe", "sharpprobe", "closefix", "whatif", "jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["teamprobe", "watchdog", "soccerprobe", "sharpprobe", "closefix", "whatif", "jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -4840,6 +4840,27 @@ def main():
         return
     if a.mode == "watchdog":   # is the scanner alive? exit 3 = down during active hours (the workflow restarts it)
         sys.exit(watchdog())
+    if a.mode == "teamprobe":   # one game per sport: which books our feed has for team totals (counts only)
+        key = os.environ.get("ODDS_API_KEY")
+        for sp in ("ncaab", "nba", "nhl", "nfl", "ncaaf"):
+            ok_ = SPORTS[sp]["odds"]
+            evs = [e for e in requests.get(f"{ODDS}/{ok_}/events", params=dict(apiKey=key), timeout=30).json()
+                   if e["commence_time"] > datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
+            if not evs:
+                print(sp, "no upcoming games"); continue
+            e = evs[0]
+            r = requests.get(f"{ODDS}/{ok_}/events/{e['id']}/odds", timeout=30, params=dict(
+                apiKey=key, bookmakers=",".join(BOOKS), markets="team_totals,alternate_team_totals", oddsFormat="american"))
+            if not r.ok:
+                print(sp, "error", r.status_code); continue
+            bks = {}
+            for b in (r.json() or {}).get("bookmakers", []):
+                for m in b.get("markets", []):
+                    pts = sorted({o.get("point") for o in m.get("outcomes", []) if o.get("point") is not None})
+                    bks.setdefault(b["key"], []).append(f"{m['key']}: {len(m.get('outcomes', []))} prices ({len(pts)} lines)")
+            print(f"{SPORTS[sp]['label']} (credits {r.headers.get('x-requests-last')}): " +
+                  ("; ".join(f"{k} [{', '.join(v)}]" for k, v in bks.items()) or "no books"))
+        return
     if a.mode == "soccerprobe":   # one EPL game: which books our feed has for each extra soccer market (counts only)
         key = os.environ.get("ODDS_API_KEY")
         evs = [e for e in requests.get(f"{ODDS}/soccer_epl/events", params=dict(apiKey=key), timeout=30).json()
