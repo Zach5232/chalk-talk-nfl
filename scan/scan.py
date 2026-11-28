@@ -3423,6 +3423,87 @@ def jr_import():
     log(f"jrimport: {len(jr)} rows, {added} added, {fixed} fixed, {same} same, {merged} merged, {nomatch} no alert")
 
 
+HIST_MAX_CREDITS = int(os.environ.get("HIST_MAX_CREDITS", "3000"))
+
+
+def close_backfill(since_day):
+    """Closing lines from the Odds API's historical snapshots (the last one before each game's start, same 10 books),
+    for every start time where you have a bet since `since_day` (ET). Every play in those games is re-closed: p_close,
+    p_close_pin and the CLV fields. Counts and averages only in the log; a summary goes to the trophy room."""
+    key = os.environ.get("ODDS_API_KEY")
+    now = datetime.now(timezone.utc)
+    since = datetime.fromisoformat(since_day).replace(tzinfo=ET)
+    plays = [x for x in fs_recent("scan_plays", "start", since.astimezone(timezone.utc).isoformat())
+             if x.get("kind") in ("h2h", "spread", "total") and datetime.fromisoformat(x["start"]) < now
+             and x.get("p_close") is not None]
+    slots = {}
+    for x in plays:   # one snapshot per (sport feed, start time), markets = what's needed there
+        k = (x.get("okey") or SPORTS[x["sport"]]["odds"], x["start"])
+        slots.setdefault(k, {"sport": x["sport"], "kinds": set(), "plays": [], "mine": False})
+        slots[k]["kinds"].add(x["kind"]); slots[k]["plays"].append(x)
+        slots[k]["mine"] |= bool(x.get("taken"))
+    todo = [(k, v) for k, v in slots.items() if v["mine"]]
+    log(f"closefix: {len(plays)} plays, {len(slots)} start times, {len(todo)} with your bets")
+    base = ODDS.rsplit("/sports", 1)[0]
+    mk = {"h2h": "h2h", "spread": "spreads", "total": "totals"}
+    spent, done, moved, d_all, d_mine, d_pin = 0, 0, 0, [], [], []
+    for (okey, start), v in sorted(todo, key=lambda kv: kv[0][1]):
+        if spent >= HIST_MAX_CREDITS:
+            log(f"closefix: credit limit {HIST_MAX_CREDITS} reached -- stopping")
+            break
+        t = datetime.fromisoformat(start) - timedelta(minutes=1)
+        r = requests.get(f"{base}/historical/sports/{okey}/odds", timeout=60, params=dict(
+            apiKey=key, date=t.strftime("%Y-%m-%dT%H:%M:%SZ"), bookmakers=",".join(BOOKS),
+            markets=",".join(sorted(mk[k_] for k_ in v["kinds"])), oddsFormat="american"))
+        note_used(r)
+        c = int(r.headers.get("x-requests-last") or 0)
+        spent += c
+        if not r.ok:
+            log(f"closefix: snapshot failed ({r.status_code})")
+            continue
+        body = r.json() or {}
+        evs = {e["id"]: e for e in (body.get("data") or [])}
+        three = bool(SPORTS[v["sport"]].get("three_way"))
+        for x in v["plays"]:
+            e = evs.get(x["event_id"])
+            if not e or datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) <= datetime.fromisoformat(body.get("timestamp", start).replace("Z", "+00:00")):
+                continue      # game missing, or already under way at the snapshot (live odds): skip
+            rows = quotes(e, three).get(x["kind"]) or []
+            views = fair_views(x["sport"], x["kind"], rows)
+            pc = fair_side(x["sport"], x["kind"], views, x["line"], x["side"])
+            pp = fair_side(x["sport"], x["kind"], views, x["line"], x["side"], only=SHARP)
+            if pc is None:
+                continue
+            old_c = x.get("clv")
+            pay = payout(x["odds"], x["book"], x["sport"])
+            upd = dict(p_close_old=x.get("p_close"), p_close=round(pc, 4),
+                       p_close_pin=round(pp, 4) if pp is not None else x.get("p_close_pin"),
+                       close_at=body.get("timestamp"), close_src="historical")
+            if x.get("result") in ("win", "loss", "push"):
+                upd["clv"] = round(pc * (1 + pay) - 1, 4)
+                if pp is not None:
+                    upd["clv_pin"] = round(pp * (1 + pay) - 1, 4)
+                if x.get("taken"):
+                    pay_t = payout(x.get("taken_odds") or x["odds"], _book_held(x), x["sport"])
+                    upd["clv_taken"] = round(pc * (1 + pay_t) - 1, 4)
+            if abs(pc - (x.get("p_close") or pc)) > 0.0005:
+                moved += 1
+            d_all.append(pc - (x.get("p_close") or pc))
+            if x.get("taken") and old_c is not None and "clv" in upd:
+                d_mine.append(upd["clv"] - old_c)
+            x.update(upd)
+            fs_set(f"scan_plays/{x['_id']}", {k_: v_ for k_, v_ in x.items() if k_ != "_id"})
+            done += 1
+    avg = lambda xs: sum(xs) / len(xs) if xs else 0.0
+    log(f"closefix: {done} plays re-closed ({moved} changed), credits {spent}, "
+        f"avg close shift {avg(d_all) * 100:+.2f} pts, your bets' CLV change {avg(d_mine) * 100:+.2f} pts over {len(d_mine)}")
+    report_send("\n".join([
+        "### 🔁 Closing lines re-checked (true last pre-game price)",
+        f"• **{done}** plays re-closed from snapshots 1 min before start ({moved} changed)",
+        f"• Your bets: CLV changed by **{avg(d_mine) * 100:+.2f} pts** on average ({len(d_mine)} bets)",
+        f"-# {spent} credits. CLV in reports now uses these closes."]))
+
+
 def sweat_guide(plays, now, hours=6):
     """'What to watch': games with your logged bets starting in the next few hours (or under way), most money first,
     each with what to root for and the best / worst case. -> text or None."""
@@ -4138,7 +4219,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["whatif", "jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["sharpprobe", "closefix", "whatif", "jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -4374,6 +4455,33 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "sharpprobe":   # which candidate sharp books / exchanges price our sports (counts only, ~15 credits)
+        key = os.environ.get("ODDS_API_KEY")
+        cands = ["betfair_ex_eu", "betfair_ex_uk", "matchbook", "smarkets", "lowvig", "betopenly", "betanysports",
+                 "everygame", "gtbets", "mybookieag"]
+        for sp in ("ncaab", "nba", "nhl", "nfl", "ncaaf"):
+            ok_ = SPORTS[sp]["odds"]
+            r = requests.get(f"{ODDS}/{ok_}/odds", timeout=60, params=dict(
+                apiKey=key, bookmakers=",".join(cands), markets="h2h,spreads,totals", oddsFormat="american",
+                commenceTimeTo=(datetime.now(timezone.utc) + timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")))
+            evs = r.json() if r.ok else []
+            n_ev = len(requests.get(f"{ODDS}/{ok_}/events", params=dict(apiKey=key, commenceTimeTo=(
+                datetime.now(timezone.utc) + timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")), timeout=30).json() or [])
+            cov = {b: {"h2h": 0, "spreads": 0, "totals": 0} for b in cands}
+            for e in evs:
+                for b in e.get("bookmakers", []):
+                    for m in b.get("markets", []):
+                        if b["key"] in cov and m["key"] in cov[b["key"]]:
+                            cov[b["key"]][m["key"]] += 1
+            print(f"{SPORTS[sp]['label']}: {n_ev} games in the next 48h (credits {r.headers.get('x-requests-last')})")
+            for b in cands:
+                c_ = cov[b]
+                if any(c_.values()):
+                    print(f"   {b:15s} ML {c_['h2h']:3d}  spread {c_['spreads']:3d}  total {c_['totals']:3d}")
+        return
+    if a.mode == "closefix":   # re-score closing lines since Monday from historical snapshots taken 1 min before each start
+        close_backfill(os.environ.get("SCAN_SPORTS") or "2026-11-23")
         return
     if a.mode == "whatif":   # today's alerts (ET): how many the far-alternate rule (3+ pts off, EV < 4%) would cut
         now = datetime.now(timezone.utc)
