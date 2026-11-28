@@ -2238,6 +2238,13 @@ def alert_text(p, g, first=None):
            f"**{p['label']} · {price_str(p['odds'], p['book'], p.get('price_prob'))} @ {bk}**\n"
            f"Fair {_pct(p['p_fair'])}% ({p['fair_odds']:+d}) · EV {p['ev']:+.1%} · bet ${p['stake_usd']:g} to win ${p.get('to_win') or p['stake_usd'] * payout(p['odds'], p['book'], p['sport']):,.0f}"
            + (f" ({p['stake_why']})" if p.get("stake_why") else "") + f"{good}{size}")
+    if p.get("sport") == "nhl":
+        try:
+            gl = goalie_line(g)
+            if gl:
+                txt += f"\n{gl}"
+        except Exception:  # noqa: BLE001
+            pass
     if p["book"] not in EXCHANGES:   # sportsbook prices come from the last pull: say how old
         u = ((g.get("upd") or {}).get(p["kind"]) or {}).get(p["book"]) or g.get("at")
         try:
@@ -2446,6 +2453,10 @@ def record(found, seen, now):
         try:
             base["fv"] = fair_variants(p["sport"], g, p["kind"], p["side"], p["line"], p["book"], now)
             base["bv"] = book_views(p["sport"], g, p["kind"], p["side"], p["line"])
+            if p["sport"] == "nhl":
+                ge = goalies_for(g)
+                if ge:   # for the review: CLV with confirmed vs unconfirmed starters
+                    base["goalies"] = {k: ge.get(k) for k in ("home_goalie", "home_status", "away_goalie", "away_status")}
         except Exception:  # noqa: BLE001 -- the test never blocks an alert
             pass
         if p.get("test"):   # 1%-to-bar play in a sharp market: logged and graded, never posted
@@ -2786,6 +2797,80 @@ def live_status(sport, games, quotes_, seen, now, full):
 # ---------------- news: ESPN injury reports (free) ----------------
 INJURY_FEED = {"nba": "basketball/nba", "nfl": "football/nfl", "nhl": "hockey/nhl"}
 NEWS_PULL_GAP_MIN = 10     # news can pull sooner than the usual 15-minute gap
+
+
+# ---------------- NHL starting goalies (free: DailyFaceoff + RotoWire, as in the NHL model) ----------------
+GOALIES = {"at": 0, "data": []}   # [{home_team, away_team, home_goalie, away_goalie, home_status, away_status}]
+
+
+def _g_status(raw):
+    r = (raw or "").lower()
+    return "confirmed" if "confirm" in r else "likely" if any(k in r for k in ("likely", "expected", "probable", "projected")) else "unconfirmed"
+
+
+def goalie_report():
+    """Starting goalies for today's NHL games, re-read at most every 4 minutes. DailyFaceoff first, RotoWire fills in."""
+    if time.time() - GOALIES["at"] < 240:
+        return GOALIES["data"]
+    day = datetime.now(ET).strftime("%Y-%m-%d")
+    out = []
+    try:
+        r = requests.get(f"https://www.dailyfaceoff.com/starting-goalies/{day}", timeout=20,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', r.text, re.S)
+        for g in json.loads(m.group(1))["props"]["pageProps"]["data"]:
+            out.append({f"{sd}_{k}": v for sd in ("home", "away") for k, v in (
+                ("team", g.get(f"{sd}TeamName") or ""), ("goalie", g.get(f"{sd}GoalieName")),
+                ("status", _g_status(g.get(f"{sd}NewsStrengthName"))))})
+    except Exception:  # noqa: BLE001
+        pass
+    if not out:
+        try:
+            for g in requests.get("https://www.rotowire.com/hockey/tables/projected-goalies.php", params={"date": day},
+                                  timeout=20, headers={"User-Agent": "Mozilla/5.0"}).json():
+                out.append(dict(home_team=g.get("hometeamname") or g.get("hometeam") or "",
+                                away_team=g.get("visitteamname") or g.get("visitteam") or "",
+                                home_goalie=g.get("homePlayer"), away_goalie=g.get("visitPlayer"),
+                                home_status=_g_status(g.get("homeStatus")), away_status=_g_status(g.get("visitStatus"))))
+        except Exception:  # noqa: BLE001
+            pass
+    if out:
+        GOALIES.update(at=time.time(), data=out)
+    else:
+        GOALIES["at"] = time.time() - 120   # both down: try again in 2 minutes
+    return GOALIES["data"]
+
+
+def goalies_for(g):
+    """This game's goalie entry, matched on team names, or None."""
+    for e in goalie_report():
+        if (name_hits(e["home_team"], g["home"]) or name_hits(g["home"], e["home_team"])) and \
+                (name_hits(e["away_team"], g["away"]) or name_hits(g["away"], e["away_team"])):
+            return e
+    return None
+
+
+def goalie_line(g):
+    e = goalies_for(g)
+    if not e:
+        return None
+    mark = {"confirmed": " ✅", "likely": " (likely)", "unconfirmed": " (unconfirmed)"}
+    return (f"🥅 {e.get('away_goalie') or '?'}{mark.get(e.get('away_status'), '')} vs "
+            f"{e.get('home_goalie') or '?'}{mark.get(e.get('home_status'), '')}")
+
+
+def goalie_changes(prev, upcoming):
+    """Games in `upcoming` whose starters or confirmations changed since `prev` -> (new snapshot, [game ids])."""
+    snap, changed = {}, []
+    for gid, g in upcoming.items():
+        e = goalies_for(g)
+        if not e:
+            continue
+        k = (e.get("home_goalie"), e.get("home_status"), e.get("away_goalie"), e.get("away_status"))
+        snap[gid] = k
+        if prev is not None and gid in prev and prev[gid] != k:
+            changed.append(gid)
+    return snap, changed
 
 
 def injury_snapshot(sport):
@@ -3320,6 +3405,15 @@ def watch(minutes, sports):
                 S["inj"] = cur          # news stays pending until a pull has priced it
             if news:
                 reasons.append(f"injury news ({len(news)} team(s))")
+            if s == "nhl" and upcoming:
+                try:
+                    snap, gch = goalie_changes(S.get("goalies"), upcoming)
+                    if gch:
+                        reasons.append(f"goalie news ({len(gch)} game(s))")
+                        news = news or gch    # lets it pull after the shorter news gap
+                    S["goalies"] = snap
+                except Exception:  # noqa: BLE001
+                    pass
             # exchange prices that clear the bar
             found, stale = [], []
             for x in q:
