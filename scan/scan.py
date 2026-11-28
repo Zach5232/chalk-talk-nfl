@@ -406,6 +406,9 @@ def bar_for(book, hours_to_start, sport=None):
     return SPORT_BAR.get(sport, BAR)
 
 
+FAR_ALT_PTS, FAR_ALT_BAR = 3.0, 0.04   # 3+ points off Pinnacle's main line, not priced by Pinnacle: 4% bar
+
+
 def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None, allow_test=False):
     """A play dict if (book, odds) on this side clears the bar, else None. g = saved game (with views)."""
     views = (g.get("views") or {}).get(kind)
@@ -423,6 +426,10 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None, allow
     bar = bar_for(book, hrs, sport)
     if pw < LONGSHOT_P:
         bar = max(bar, BAR_STRICT)
+    pin = [l0 for bk, w, l0, q in views if bk == SHARP and l0 is not None]
+    off_main = round(abs(line - pin[0]), 1) if (pin and line is not None) else 0.0
+    if off_main >= FAR_ALT_PTS and not any(abs(l0 - line) < 1e-9 for l0 in pin):
+        bar = max(bar, FAR_ALT_BAR)   # far alternate Pinnacle doesn't price itself: the fair line is a model estimate
     test = overcap = False
     if not (bar <= ev <= MAX_EV and ev_pin >= bar):
         if allow_test and MAX_EV < ev <= OVERCAP_MAX and ev_pin >= bar:
@@ -431,8 +438,6 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None, allow
             test = True               # sharp-market test: 1%+ vs consensus AND Pinnacle, under the bar
         else:
             return None
-    pin = [l0 for bk, w, l0, q in views if bk == SHARP and l0 is not None]
-    off_main = round(abs(line - pin[0]), 1) if (pin and line is not None) else 0.0
     kelly = ev / pay
     stake = min(kelly * KELLY, MAX_STAKE)
     to_win = bet_size(stake * BANKROLL) * pay
