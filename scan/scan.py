@@ -303,7 +303,7 @@ def fair_at(sport, kind, views, line, without=None, only=None, mm=None):
     return sum(w * fn(line) for w, fn in use) / sum(w for w, _ in use)
 
 
-SPORT_BAR = {"nfl": 0.02, "ncaaf": 0.02, "nhl": 0.02, "ncaab": 0.02, "nba": 0.02}   # sharp markets + CBB (logger: 2% bar, +2% CLV)
+SPORT_BAR = {"nfl": 0.02, "ncaaf": 0.02, "nhl": 0.015, "ncaab": 0.02, "nba": 0.02}   # sharp markets + CBB (logger: 2% bar, +2% CLV)
 
 
 def _fair_w(sport, kind, views, line, side, without, weight):
