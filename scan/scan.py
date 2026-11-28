@@ -2532,6 +2532,11 @@ def record(found, seen, now):
                 fs_set(f"scan_plays/{pid}", d_)
                 seen[pid] = d_
             continue
+        try:
+            if game_underway(p["sport"], g):
+                continue      # ESPN says it has started: any price now is live -- never alert it
+        except Exception:  # noqa: BLE001
+            pass
         if not SPORTS[p["sport"]].get("alerts", True) or p["book"] in LOG_ONLY_BOOKS or book_paused(p["book"], now):   # log-only league / book: priced and graded, never posted
             if not prev:
                 d_ = dict(base, found=now.isoformat(), alerted=False, shadow=True)
@@ -4068,6 +4073,46 @@ def day_summary(now):
 # ---------------- grading ----------------
 ESPN = {"nfl": "football/nfl", "nba": "basketball/nba", "ncaab": "basketball/mens-college-basketball", "nhl": "hockey/nhl",
         "ncaaf": "football/college-football"}
+
+
+ESPN_LIVE = {}   # sport -> (time read, [{home names, away names, state}])
+
+
+def espn_states(sport):
+    """Today's ESPN scoreboard: each game's state ('pre' / 'in' / 'post'), re-read at most once a minute (free)."""
+    t, rows = ESPN_LIVE.get(sport, (0, []))
+    if time.time() - t < 60 or SPORTS[sport].get("odds_prefix"):
+        return rows
+    params = dict(dates=datetime.now(ET).strftime("%Y%m%d"), limit=500)
+    if sport == "ncaab":
+        params["groups"] = 50
+    if sport == "ncaaf":
+        params["groups"] = 80
+    try:
+        d = _get(f"https://site.api.espn.com/apis/site/v2/sports/{SPORTS[sport].get('espn') or ESPN[sport]}/scoreboard",
+                 params) or {}
+    except Exception:  # noqa: BLE001
+        d = {}
+    rows = []
+    for e in d.get("events", []):
+        c = (e.get("competitions") or [{}])[0]
+        teams = {t_["homeAway"]: t_ for t_ in c.get("competitors", [])}
+        if set(teams) != {"home", "away"}:
+            continue
+        nm = lambda t_: [t_["team"].get(k) for k in ("displayName", "shortDisplayName", "location", "name") if t_["team"].get(k)]
+        rows.append(dict(home=nm(teams["home"]), away=nm(teams["away"]),
+                         state=(c.get("status", {}).get("type", {}) or {}).get("state")))
+    ESPN_LIVE[sport] = (time.time(), rows)
+    return rows
+
+
+def game_underway(sport, g):
+    """True if ESPN shows this game in progress or final (a feed's start time can be wrong)."""
+    for r in espn_states(sport):
+        if r["state"] in ("in", "post") and any(name_hits(n, g["home"]) or name_hits(g["home"], n) for n in r["home"]) \
+                and any(name_hits(n, g["away"]) or name_hits(g["away"], n) for n in r["away"]):
+            return True
+    return False
 
 
 def espn_finals(sport, day):
