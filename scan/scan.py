@@ -24,7 +24,7 @@ A better number later edits that same message ("Better number at ...", showing t
 Storage: Firestore scan_state/* and scan_plays/*. This repo is public: no odds are written to it and the log prints
 counts only (prices go to Firestore and Discord). SCAN_DRY=1 keeps state in local files and prints alerts instead.
 """
-import argparse, csv, io, json, math, os, queue, re, threading, time
+import argparse, collections, csv, io, json, math, os, queue, re, threading, time
 from datetime import datetime, timedelta, timezone
 from statistics import NormalDist
 from zoneinfo import ZoneInfo
@@ -4112,7 +4112,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["whatif", "jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -4347,6 +4347,21 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "whatif":   # today's alerts (ET): how many the far-alternate rule (3+ pts off, EV < 4%) would cut
+        now = datetime.now(timezone.utc)
+        day = now.astimezone(ET).strftime("%Y-%m-%d")
+        ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(hours=30)).isoformat())
+              if x.get("alerted") and not x.get("superseded")
+              and datetime.fromisoformat(x["start"]).astimezone(ET).strftime("%Y-%m-%d") == day]
+        cut = [x for x in ps if (x.get("off_main") or 0) >= 3 and (x.get("ev") or 0) < 0.04]
+        tk = [x for x in ps if x.get("taken")]
+        tc = [x for x in cut if x.get("taken")]
+        def rec(xs):
+            w = sum(x.get("result") == "win" for x in xs); l_ = sum(x.get("result") == "loss" for x in xs)
+            return f"{w}-{l_} ({sum(1 for x in xs if not x.get('result'))} open)"
+        print(f"{day}: alerts {len(ps)}, you bet {len(tk)} | rule would cut {len(cut)} alerts, {len(tc)} of your bets "
+              f"| by sport {dict(collections.Counter(x['sport'] for x in cut))} | your cut bets {rec(tc)}")
         return
     if a.mode == "jrimport":   # the newest Juice Reel CSV posted in the trophy room -> fix / add your bets
         jr_import()
