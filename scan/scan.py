@@ -101,7 +101,15 @@ BET_BOOKS = {"draftkings", "novig", "prophetx", "kalshi", "polymarket", "fanduel
 # Circa: as sharp as Pinnacle in football and first to move (Nov 17-23 study) -> 3x; in basketball it adds nothing the
 # blend doesn't already have (Nov 23-24 backtests) -> 1x. Other sports: 1x until the live test says otherwise.
 CIRCA_W = {"nfl": 3.0, "ncaaf": 3.0}
-WEIGHTS = {"pinnacle": 3.0, "circasports": 1.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
+
+
+def books_for(sport):
+    """The 10 books in a sport's paid pull. Soccer: Betfair Exchange (the sharpest soccer market; fair line only -- not
+    open to US bettors) takes Circa's slot, since Circa barely prices soccer."""
+    if SPORTS.get(sport, {}).get("three_way"):
+        return ["betfair_ex_eu" if b == "circasports" else b for b in BOOKS]
+    return BOOKS
+WEIGHTS = {"betfair_ex_eu": 3.0, "pinnacle": 3.0, "circasports": 1.0, "novig": 2.0, "prophetx": 2.0, "kalshi": 2.0, "polymarket": 2.0}
 # pregame taker fees, checked on real slips (see nhl-model model_config.json exchange_fees)
 FEES = {"kalshi": ("parabolic", 0.07), "polymarket": ("parabolic", 0.07), "prophetx": ("winnings", 0.02)}
 FEES_BY_SPORT = {("nhl", "prophetx"): ("parabolic", 0.035)}
@@ -888,7 +896,7 @@ def pull(sport, now, st, reason):
     if not can_spend(st, now):
         log(f"[{sport}] credit budget reached (month {st['used']}/{CREDIT_CAP}) -- no pull ({reason})")
         return None, []
-    params = dict(apiKey=key, bookmakers=",".join(BOOKS), markets=SPORTS[sport].get("markets", "h2h,spreads,totals"),
+    params = dict(apiKey=key, bookmakers=",".join(books_for(sport)), markets=SPORTS[sport].get("markets", "h2h,spreads,totals"),
                   oddsFormat="american", includeLinks="true",
                   commenceTimeFrom=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                   commenceTimeTo=(now + timedelta(hours=HOURS_AHEAD)).strftime("%Y-%m-%dT%H:%M:%SZ"))
