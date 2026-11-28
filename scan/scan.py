@@ -62,16 +62,16 @@ SPORTS = {
     "ucl":     dict(odds="soccer_uefa_champs_league", novig=None, poly=["ucl"], label="UCL", three_way=True,
                     espn="soccer/uefa.champions", kalshi=dict(h2h="KXUCLGAME", total="KXUCLTOTAL"), sd=dict(total=1.7),
                     max_move=0.0, markets="h2h,totals"),
-    "laliga":  dict(odds="soccer_spain_la_liga", novig=None, poly=["lal"], label="La Liga", three_way=True, alerts=False,
+    "laliga":  dict(odds="soccer_spain_la_liga", novig=None, poly=["lal"], label="La Liga", three_way=True,
                     espn="soccer/esp.1", kalshi=dict(h2h="KXLALIGAGAME", total="KXLALIGATOTAL"), sd=dict(total=1.7),
                     max_move=0.0, markets="h2h,totals"),
-    "seriea":  dict(odds="soccer_italy_serie_a", novig=None, poly=["sea"], label="Serie A", three_way=True, alerts=False,
+    "seriea":  dict(odds="soccer_italy_serie_a", novig=None, poly=["sea"], label="Serie A", three_way=True,
                     espn="soccer/ita.1", kalshi=dict(h2h="KXSERIEAGAME", total="KXSERIEATOTAL"), sd=dict(total=1.7),
                     max_move=0.0, markets="h2h,totals"),
     "bundes":  dict(odds="soccer_germany_bundesliga", novig=None, poly=["bun"], label="Bundesliga", three_way=True,
-                    alerts=False, espn="soccer/ger.1", kalshi=dict(h2h="KXBUNDESLIGAGAME", total="KXBUNDESLIGATOTAL"),
+                    espn="soccer/ger.1", kalshi=dict(h2h="KXBUNDESLIGAGAME", total="KXBUNDESLIGATOTAL"),
                     sd=dict(total=1.7), max_move=0.0, markets="h2h,totals"),
-    "ligue1":  dict(odds="soccer_france_ligue_one", novig=None, poly=["fl1"], label="Ligue 1", three_way=True, alerts=False,
+    "ligue1":  dict(odds="soccer_france_ligue_one", novig=None, poly=["fl1"], label="Ligue 1", three_way=True,
                     espn="soccer/fra.1", kalshi=dict(h2h="KXLIGUE1GAME", total="KXLIGUE1TOTAL"), sd=dict(total=1.7),
                     max_move=0.0, markets="h2h,totals"),
     "mls":     dict(odds="soccer_usa_mls", novig="MLS", poly=["mls"], label="MLS", three_way=True,
@@ -313,7 +313,7 @@ def fair_at(sport, kind, views, line, without=None, only=None, mm=None):
     return sum(w * fn(line) for w, fn in use) / sum(w for w, _ in use)
 
 
-SPORT_BAR = {"nfl": 0.02, "ncaaf": 0.02, "nhl": 0.015, "ncaab": 0.02, "nba": 0.02}   # sharp markets + CBB (logger: 2% bar, +2% CLV)
+SPORT_BAR = {"nfl": 0.02, "ncaaf": 0.02, "nhl": 0.015, "ncaab": 0.02, "nba": 0.02, "laliga": 0.03, "seriea": 0.03, "bundes": 0.03, "ligue1": 0.03}   # sharp markets + CBB (logger: 2% bar, +2% CLV)
 
 
 def _fair_w(sport, kind, views, line, side, without, weight):
