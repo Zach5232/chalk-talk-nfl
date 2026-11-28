@@ -360,7 +360,10 @@ def fair_variants(sport, g, kind, side, line, book, now):
                nocirca=_fair_w(sport, kind, views, line, side, book, lambda bk, w: 0.0 if bk == "circasports" else w),
                circa1x=_fair_w(sport, kind, views, line, side, book, lambda bk, w: 1.0 if bk == "circasports" else w),
                circa3x=_fair_w(sport, kind, views, line, side, book, lambda bk, w: 3.0 if bk == "circasports" else w),
-               circa=fair_side(sport, kind, views, line, side, only="circasports"))
+               circa=fair_side(sport, kind, views, line, side, only="circasports"),
+               # the exchange test: are exchange prices sharp enough to deserve 2x? (0x = books only, 1x = like a book)
+               noex=_fair_w(sport, kind, views, line, side, book, lambda bk, w: 0.0 if bk in EXCHANGES else w),
+               ex1x=_fair_w(sport, kind, views, line, side, book, lambda bk, w: 1.0 if bk in EXCHANGES else w))
     mid = (g.get("exmid") or {}).get(f"{kind}|{line}")
     if mid and out["live"] is not None and (now - datetime.fromisoformat(mid[1])).total_seconds() < 600 and side in ("a", "b"):
         m = mid[0] if side == "a" else 1 - mid[0]
@@ -3885,7 +3888,7 @@ def fair_report(ps):
         return [f"  fair-line test: {len(xs)} plays with variants + Pinnacle close so far"]
     out = ["  fair-line test (truth = Pinnacle no-vig close): method / plays / avg miss / 2%+ picks / beat close / CLV"
            " / CLV vs consensus close"]
-    for v in ("live", "circa3x", "circa1x", "nocirca", "circa", "pin", "equal", "fresh", "exblend"):
+    for v in ("live", "circa3x", "circa1x", "nocirca", "circa", "pin", "equal", "fresh", "exblend", "noex", "ex1x"):
         ys = [p for p in xs if v in p["fv"]]
         if not ys:
             continue
