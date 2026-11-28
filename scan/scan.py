@@ -2324,7 +2324,9 @@ def _note_for(kind, text, other, better):
                if better else "The other one is the better value -- take only one."))
 
 
-LOCK_MIN = float(os.environ.get("LOCK_MIN", "2"))   # lock-in alerts only when the guaranteed profit is at least this
+LOCK_MIN = float(os.environ.get("LOCK_MIN", "2"))
+OTHER_SIDE_MARGIN = 0.015     # the other side of a bet you hold is sent only if its EV beats that bet's by 1.5+ points
+OTHER_SIDE_GAP_MIN_EV = 0.03  # ... and, when both can lose (a gap between the lines), it's at least 3% itself   # lock-in alerts only when the guaranteed profit is at least this
 
 
 def lock_profit(o, p):
@@ -2451,7 +2453,7 @@ def record(found, seen, now):
                     break
                 rel = relation(p, o, g)
                 if rel and rel[0] == "arb" and lock_profit(o, p) < LOCK_MIN:
-                    if p["ev"] <= o["ev"]:
+                    if p["ev"] < o["ev"] + OTHER_SIDE_MARGIN:
                         skip = True      # owner's rule: a lock-in worth under $2 isn't worth the fiddly second bet
                         break
                     # ...unless this side is now the better value: post it as its own bet at its own stake (no matching)
@@ -2468,7 +2470,8 @@ def record(found, seen, now):
                         pay_ = payout(p["odds"], p["book"], p["sport"])
                         for d_ in (base, extra):
                             d_.update(stake_usd=ps_[0], to_win=round(ps_[0] * pay_, 2), stake_why=ps_[1])
-                elif rel and p["ev"] > o["ev"] and rel[0] == "conflict":
+                elif (rel and rel[0] == "conflict" and p["ev"] >= o["ev"] + OTHER_SIDE_MARGIN
+                      and p["ev"] >= OTHER_SIDE_GAP_MIN_EV):
                     # owner's rule: a better-value other side is still sent, as its own bet -- with the gap spelled out
                     notes.append(f"↔️ **Other side of your bet** on {o['label']} (EV {o['ev']:+.1%} when alerted; this side "
                                  f"{p['ev']:+.1%}): {rel[1]}. Each bet is +EV on its own, so this one is worth taking at the "
