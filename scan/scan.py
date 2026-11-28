@@ -317,7 +317,8 @@ def fair_at(sport, kind, views, line, without=None, only=None, mm=None):
         if d <= mm + 1e-9 and (bk not in best or d < best[bk][0]):
             best[bk] = (d, w, l0, q)
     use = [(w, mover(sport, kind, l0, q)) for d, w, l0, q in best.values()]
-    if not use or (only is None and len(use) < MIN_BOOKS):
+    need = 2 if SPORTS[sport].get("three_way") else MIN_BOOKS   # soccer spreads / totals: fewer books list each number
+    if not use or (only is None and (len(use) < need or (need == 2 and SHARP not in best))):
         return None
     return sum(w * fn(line) for w, fn in use) / sum(w for w, _ in use)
 
@@ -439,6 +440,13 @@ def evaluate(sport, g, kind, side, line, book, odds, now, price_prob=None, allow
         return None
     pay = payout(odds, book, sport)
     ev, ev_pin = pw * pay - (1 - pw), ppw * pay - (1 - ppw)
+    if kind == "spread" and line == 0 and SPORTS[sport].get("three_way"):   # draw no bet: a draw refunds the stake
+        hv = (g.get("views") or {}).get("h2h") or []
+        pd = fair_side(sport, "h2h", hv, None, "d") if hv else None
+        pdp = fair_side(sport, "h2h", hv, None, "d", only=SHARP) if hv else None
+        if pd is None or pdp is None:
+            return None
+        ev, ev_pin = ev * (1 - pd), ev_pin * (1 - pdp)
     hrs = (datetime.fromisoformat(g["start"]) - now).total_seconds() / 3600
     if hrs * 60 < START_BUFFER_MIN:
         return None
@@ -738,7 +746,12 @@ def odds_keys(sport, key):
 
 
 # ---------------- alternate lines (per game, Pinnacle's own alternates as the fair price) ----------------
-ALT_SPORTS = {"nfl", "ncaaf", "nhl", "nba"}
+ALT_SPORTS = {"nfl", "ncaaf", "nhl", "nba", "epl", "ucl", "mls"}
+# soccer extras (per game, near kickoff): spreads + alternate spreads / totals + draw no bet, half-goal lines (no
+# pushes) and DNB only. Pinnacle prices all of them; Kalshi / Polymarket join the books (they list goal spreads).
+SOCCER_ALT_BOOKS = ["pinnacle", "novig", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag", "williamhill_us",
+                    "kalshi", "polymarket"]
+SOCCER_ALT_WINDOW_H, SOCCER_ALT_REFRESH_MIN = 3, 60
 ALT_WINDOW_H = 6           # only games starting within this many hours (when alerts post)
 ALT_REFRESH_MIN = 120
 ALT_Q, ALT_Q_AT = {}, {}   # sport -> {(gid, kind, side, line, book): odds} from alternate pulls (kept apart from BOOK_Q)
@@ -750,7 +763,11 @@ def alt_rows(event, three_way=False):
     out = {"spread": [], "total": []}
     for bm in event.get("bookmakers", []):
         for mk in bm.get("markets", []):
-            if mk["key"] == "alternate_spreads":
+            if mk["key"] == "draw_no_bet" and three_way:   # soccer: a draw refunds = handicap 0
+                o = {x["name"]: x["price"] for x in mk["outcomes"]}
+                if home in o and away in o:
+                    out["spread"].append(dict(book=bm["key"], line=0.0, a=o[home], b=o[away]))
+            elif mk["key"] in ("alternate_spreads", "spreads"):
                 hb = {o["point"]: o["price"] for o in mk["outcomes"] if o.get("name") == home and o.get("point") is not None}
                 ab = {o["point"]: o["price"] for o in mk["outcomes"] if o.get("name") == away and o.get("point") is not None}
                 for h, pr in hb.items():
@@ -764,6 +781,10 @@ def alt_rows(event, three_way=False):
                         out["total"].append(dict(book=bm["key"], line=L, a=pr, b=un[L]))
     for k in out:
         out[k] = [r for r in out[k] if all(100 <= abs(float(r[x])) <= 1500 for x in ("a", "b"))]
+        if three_way:   # soccer: half-goal lines (no push) and the 0 handicap (draw no bet) only; no quarter lines
+            out[k] = [r for r in out[k] if (r["line"] * 2) % 2 == 1 or (k == "spread" and r["line"] == 0)]
+        seen_ = set()   # one row per book and line ('spreads' and 'alternate_spreads' can both list it)
+        out[k] = [r for r in out[k] if not ((r["book"], r["line"]) in seen_ or seen_.add((r["book"], r["line"])))]
     return out
 
 
@@ -773,9 +794,9 @@ def merge_alt_views(S):
         g = S["games"].get(gid)
         if not g:
             continue
-        for kind, vs in kinds.items():
-            have = {(v[0], v[2]) for v in g.setdefault("views", {}).setdefault(kind, [])}
-            g["views"][kind] += [v for v in vs if (v[0], v[2]) not in have]
+        for kind, vs in kinds.items():   # a book's own alternate price replaces anything derived for that number
+            new = {(v[0], v[2]) for v in vs}
+            g.setdefault("views", {})[kind] = [v for v in g["views"].get(kind, []) if (v[0], v[2]) not in new] + list(vs)
 
 
 def pull_alts(sport, S, now, st):
@@ -790,15 +811,17 @@ def pull_alts(sport, S, now, st):
     plays, cost, n = [], 0, 0
     for gid, g in list(S["games"].items()):
         st_ = datetime.fromisoformat(g["start"])
-        if not (now < st_ < now + timedelta(hours=ALT_WINDOW_H)):
+        soc = bool(SPORTS[sport].get("three_way"))
+        if not (now < st_ < now + timedelta(hours=SOCCER_ALT_WINDOW_H if soc else ALT_WINDOW_H)):
             continue
         last = S["alt_at"].get(gid)
-        if last and (now - datetime.fromisoformat(last)).total_seconds() < ALT_REFRESH_MIN * 60:
+        if last and (now - datetime.fromisoformat(last)).total_seconds() < (SOCCER_ALT_REFRESH_MIN if soc else ALT_REFRESH_MIN) * 60:
             continue
-        if not can_spend(st, now, 2):
+        if not can_spend(st, now, 4 if soc else 2):
             break
-        r = requests.get(f"{ODDS}/{okey}/events/{gid}/odds", timeout=30, params=dict(
-            apiKey=key, bookmakers=",".join(BOOKS), oddsFormat="american", markets="alternate_spreads,alternate_totals"))
+        r = requests.get(f"{ODDS}/{g.get('okey') or okey}/events/{gid}/odds", timeout=30, params=dict(
+            apiKey=key, bookmakers=",".join(SOCCER_ALT_BOOKS if soc else BOOKS), oddsFormat="american",
+            markets="spreads,alternate_spreads,alternate_totals,draw_no_bet" if soc else "alternate_spreads,alternate_totals"))
         S["alt_at"][gid] = now.isoformat()
         note_used(r)
         if r.status_code != 200:
@@ -806,7 +829,7 @@ def pull_alts(sport, S, now, st):
         c = int(r.headers.get("x-requests-last") or 2)
         cost += c
         charge(st, now, c)
-        rows = alt_rows(r.json())
+        rows = alt_rows(r.json(), three_way=soc)
         if not any(x["book"] == SHARP for v in rows.values() for x in v):
             continue          # no Pinnacle alternates: nothing trustworthy to price against
         n += 1
