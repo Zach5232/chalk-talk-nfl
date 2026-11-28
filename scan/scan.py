@@ -336,6 +336,19 @@ def _fair_w(sport, kind, views, line, side, without, weight):
 FRESH_HALF_MIN = 30        # 'fresh' variant: a book's weight halves for every 30 minutes since its last update
 
 
+def book_views(sport, kind_g, kind=None, side=None, line=None):
+    """Each book's own no-vig chance for this side at this number (moved to it within the sport's limit) -- logged per
+    play so each book's sharpness can be measured sport by sport."""
+    g = kind_g
+    views = (g.get("views") or {}).get(kind)
+    out = {}
+    for bk in {v[0] for v in views or []}:
+        q = fair_side(sport, kind, views, line, side, only=bk)
+        if q is not None:
+            out[bk] = round(q, 4)
+    return out
+
+
 def fair_variants(sport, g, kind, side, line, book, now):
     """The fair chance for this side under each candidate method, for the side-by-side test (vs Pinnacle's close):
     live (what alerts use) · pin (Pinnacle only) · equal (every book weight 1) · fresh (stale prices discounted)
@@ -2321,6 +2334,7 @@ def record(found, seen, now):
                     **({"okey": g["okey"]} if g.get("okey") else {}), **extra)
         try:
             base["fv"] = fair_variants(p["sport"], g, p["kind"], p["side"], p["line"], p["book"], now)
+            base["bv"] = book_views(p["sport"], g, p["kind"], p["side"], p["line"])
         except Exception:  # noqa: BLE001 -- the test never blocks an alert
             pass
         if p.get("test"):   # 1%-to-bar play in a sharp market: logged and graded, never posted
@@ -3881,6 +3895,35 @@ def circa_report(ps):
     return out
 
 
+def book_report(ps):
+    """Sharpness by book and sport, from each book's own no-vig chance at alert time (logged per play): how far it was
+    from Pinnacle's close and from the consensus close (lower = sharper), and Brier score vs the actual result."""
+    xs = [p for p in ps if p.get("bv") and p.get("result") in ("win", "loss")]
+    if len(xs) < 20:
+        return [f"  book sharpness: {len(xs)} graded plays with per-book prices so far (logging started Nov 28)"]
+    out = ["  book sharpness (per sport): book / plays / miss vs Pinnacle close / miss vs consensus close / Brier vs result"]
+    for sp in SPORTS:
+        ys = [p for p in xs if p.get("sport") == sp]
+        if len(ys) < 20:
+            continue
+        rows = []
+        for bk in sorted({b for p in ys for b in p["bv"]}):
+            zs = [p for p in ys if bk in p["bv"]]
+            if len(zs) < 15:
+                continue
+            mp = [abs(p["bv"][bk] - p["p_close_pin"]) for p in zs if p.get("p_close_pin") is not None]
+            mc = [abs(p["bv"][bk] - p["p_close"]) for p in zs if p.get("p_close") is not None]
+            br = sum((p["bv"][bk] - (p["result"] == "win")) ** 2 for p in zs) / len(zs)
+            rows.append((sum(mp) / len(mp) if mp else 9, bk, len(zs), mp, mc, br))
+        if rows:
+            out.append(f"  {SPORTS[sp]['label']}")
+            for m_, bk, n, mp, mc, br in sorted(rows):
+                out.append(f"    {BOOK_NAMES.get(bk, bk):12s} {n:4d}  "
+                           + (f"{sum(mp) / len(mp) * 100:5.2f} pts" if mp else "   -    ") + "  "
+                           + (f"{sum(mc) / len(mc) * 100:5.2f} pts" if mc else "   -    ") + f"  {br:.4f}")
+    return out
+
+
 def fair_report(ps):
     """Which fair-line method best predicts Pinnacle's no-vig close, and whose 2%+ picks beat it most."""
     xs = [p for p in ps if p.get("fv") and p.get("p_close_pin") is not None]
@@ -3927,7 +3970,7 @@ def timing_report(now, days=30):
         out.append(f"  {SPORTS[sport]['label']:10s} " + " | ".join(cells))
     graded = [p for p in fs_recent("scan_plays", "start", (now - timedelta(days=days)).isoformat())
               if p.get("result") in ("win", "loss", "push") and not p.get("superseded")]
-    out += fair_report(graded) + circa_report(graded)
+    out += fair_report(graded) + circa_report(graded) + book_report(graded)
     # every edge size: posted alerts and logged tests (1-2% under the bar, 12-30% over the cap)
     out.append("  edge size: plays / avg CLV / beat close / record   (posted = alerts; logged = tests, never posted)")
     for lo, hi in ((0.01, 0.02), (0.02, 0.04), (0.04, 0.07), (0.07, 0.12), (0.12, 0.30)):
