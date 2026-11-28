@@ -3318,8 +3318,10 @@ def jr_import():
         return
     msgs = bot("GET", f"/channels/{tid}/messages", params={"limit": 50}) or []
     att = next((at_ for m in msgs for at_ in m.get("attachments", [])
-                if at_.get("filename", "").lower().startswith("juicereelbets") and at_["filename"].endswith(".csv")), None)
+                if at_.get("filename", "").lower().endswith(".csv") and "logged_bets" not in at_["filename"]), None)
     if not att:
+        log(f"jrimport: {len(msgs)} messages read, {sum(len(m.get('attachments', [])) for m in msgs)} attachments, "
+            f"{sum(1 for m in msgs if not m.get('author', {}).get('bot'))} from people")
         report_send("-# No Juice Reel CSV found in the last 50 messages here -- attach the export file and run it again.")
         log("jrimport: no file")
         return
