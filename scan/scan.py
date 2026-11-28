@@ -24,7 +24,7 @@ A better number later edits that same message ("Better number at ...", showing t
 Storage: Firestore scan_state/* and scan_plays/*. This repo is public: no odds are written to it and the log prints
 counts only (prices go to Firestore and Discord). SCAN_DRY=1 keeps state in local files and prints alerts instead.
 """
-import argparse, collections, csv, io, json, math, os, queue, re, threading, time
+import argparse, collections, csv, io, json, math, os, queue, re, sys, threading, time
 from datetime import datetime, timedelta, timezone
 from statistics import NormalDist
 from zoneinfo import ZoneInfo
@@ -2071,6 +2071,31 @@ def _answer(it):
         log(f"button answer failed: {type(e).__name__}")
 
 
+GW = [None]            # the live gateway socket (for the bot's status line)
+PRESENCE = ["Starting up"]
+
+
+def set_presence(text):
+    """The bot's Discord status: online + 'Watching <text>' while the scanner runs (offline = scanner down)."""
+    PRESENCE[0] = text
+    ws = GW[0]
+    if not ws:
+        return
+    try:
+        ws.send(json.dumps({"op": 3, "d": {"since": None, "status": "online", "afk": False,
+                                           "activities": [{"name": text[:120], "type": 3}]}}))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def heartbeat(mode, extra=None):
+    """scan_state/heartbeat: when the scanner last finished a check (read by the watchdog)."""
+    try:
+        fs_set("scan_state/heartbeat", {"at": datetime.now(timezone.utc).isoformat(), "mode": mode, **(extra or {})})
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def gateway():
     """Discord gateway connection (thread): receives button taps and form submits. Reconnects on drops."""
     import websocket   # websocket-client
@@ -2096,6 +2121,8 @@ def gateway():
                     seq[0] = msg["s"]
                 if msg["op"] == 0 and msg.get("t") == "READY":
                     log("gateway: listening for Bet it / Pass taps")
+                    GW[0] = ws
+                    set_presence(PRESENCE[0])
                 if msg["op"] == 0 and msg.get("t") == "INTERACTION_CREATE":
                     threading.Thread(target=_answer, args=(msg["d"],), daemon=True).start()
                 elif msg["op"] == 1:
@@ -2106,6 +2133,7 @@ def gateway():
             log(f"gateway: {type(e).__name__} -- reconnecting")
         finally:
             alive[0] = False
+            GW[0] = None
             try:
                 ws and ws.close()
             except Exception:  # noqa: BLE001
@@ -3150,6 +3178,37 @@ def refresh_msg_doc(seen, now):
                and datetime.fromisoformat(x["start"]) > now - timedelta(hours=6)}
 
 
+WATCHDOG_STALE_MIN = 20
+
+
+def watchdog():
+    """Checks the scanner's heartbeat. During active hours (7 AM weekends / 9 AM weekdays to midnight ET) a heartbeat
+    older than 20 minutes = down: one 🚨 post in #value-plays, exit 3 so the workflow starts it again. When the
+    heartbeat is fresh again: one ✅ post. Two database reads a run."""
+    now = datetime.now(timezone.utc)
+    et = now.astimezone(ET)
+    start_h = 7 if et.weekday() >= 5 else 9
+    active = (et.hour, et.minute) >= (start_h, 20) and (et.hour, et.minute) <= (23, 45)
+    hb = fs_get("scan_state/heartbeat") or {}
+    st = fs_get("scan_state/watchdog") or {}
+    try:
+        age = (now - datetime.fromisoformat(hb["at"])).total_seconds() / 60
+    except (KeyError, TypeError, ValueError):
+        age = 1e9
+    down = active and age > WATCHDOG_STALE_MIN
+    last = datetime.fromisoformat(hb["at"]).astimezone(ET).strftime("%-I:%M %p") if hb.get("at") else "?"
+    if down and not st.get("down"):
+        discord_send(f"🚨 **Scanner is down** -- last check {last} ET. Restarting it automatically; "
+                     f"I'll post here when it's back.", buttons=False)
+        fs_set("scan_state/watchdog", {"down": True, "since": now.isoformat()})
+    elif not down and st.get("down") and age <= WATCHDOG_STALE_MIN:
+        mins = int((now - datetime.fromisoformat(st["since"])).total_seconds() // 60) if st.get("since") else 0
+        discord_send(f"✅ **Scanner is back** (last check {last} ET, down about {mins} min).", buttons=False)
+        fs_set("scan_state/watchdog", {"down": False, "since": None})
+    log(f"watchdog: active={active} heartbeat {age:.0f} min old -> {'DOWN' if down else 'ok'}")
+    return 3 if down else 0
+
+
 def listen(minutes):
     """Overnight: no prices pulled, just Bet it / Line moved / Pass taps on alerts (e.g. tomorrow's early games)."""
     if not bot_on():
@@ -3161,7 +3220,13 @@ def listen(minutes):
     refresh_msg_doc(seen, now)
     threading.Thread(target=gateway, daemon=True).start()
     log(f"listening for taps for {minutes:.0f} minutes ({len(MSG_DOC)} alerts open)")
+    set_presence("overnight · taps only · alerts resume in the morning")
+    heartbeat("listen")
+    k = 0
     while time.time() < t_end:
+        k += 1
+        if k % 30 == 0:
+            heartbeat("listen")
         time.sleep(min(20, max(0, t_end - time.time())))
         refresh_msg_doc(seen, datetime.now(timezone.utc))
         n = apply_taps(seen)
@@ -3332,6 +3397,9 @@ def watch(minutes, sports):
                     fs_set("scan_state/sweat", {"key": f"{et_.strftime('%Y-%m-%d')}_{slot}", "at": now.isoformat()})
             except Exception as e:  # noqa: BLE001
                 log(f"sweat guide failed: {type(e).__name__}")
+        set_presence(f"prices · last check {datetime.now(ET).strftime('%-I:%M %p')}")
+        if cycle % 4 == 1:
+            heartbeat("watch", {"cycle": cycle})
         log(f"cycle {cycle}: {n_quotes} exchange prices checked, {n_alerts} alert(s), {n_edits} status update(s); "
             f"credits {st['used']}/{CREDIT_CAP}")
         time.sleep(max(0, min(CYCLE_S, t_end - time.time())))
@@ -4325,7 +4393,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["soccerprobe", "sharpprobe", "closefix", "whatif", "jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["watchdog", "soccerprobe", "sharpprobe", "closefix", "whatif", "jrimport", "betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -4562,6 +4630,8 @@ def main():
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
         return
+    if a.mode == "watchdog":   # is the scanner alive? exit 3 = down during active hours (the workflow restarts it)
+        sys.exit(watchdog())
     if a.mode == "soccerprobe":   # one EPL game: which books our feed has for each extra soccer market (counts only)
         key = os.environ.get("ODDS_API_KEY")
         evs = [e for e in requests.get(f"{ODDS}/soccer_epl/events", params=dict(apiKey=key), timeout=30).json()
