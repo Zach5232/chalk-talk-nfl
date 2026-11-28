@@ -67,7 +67,7 @@ jobs:
                 # overnight: wait (free on a public repo) until the morning start, at most 5.5h, then hand off
                 WAKE=$(date -u -d "$(date -u +%Y-%m-%d) $START:00" +%s); WAIT=$(( WAKE - NOW )); [ "$WAIT" -gt 19800 ] && WAIT=19800
                 echo "overnight -- listening for taps for $((WAIT / 60)) minutes"
-                python3 scan/scan.py listen --minutes "$((WAIT / 60))" || sleep 60; exit 0
+                python3 scan/scan.py listen --minutes "$((WAIT / 60))" || sleep 1800; exit 0
               fi
               [ "$MIN" -lt 10 ] && { echo "under 10 minutes left tonight -- handing off"; exit 0; }
               python3 scan/scan.py grade || true   # finals + the morning report (posts once, mornings only)
