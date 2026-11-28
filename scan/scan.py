@@ -58,7 +58,7 @@ SPORTS = {
     # soccer: 3-way moneyline (home / away / draw, 90 min + stoppage) and half-goal totals. alerts=False: priced
     # and graded but not posted, until its record says it's worth betting.
     "epl":     dict(odds="soccer_epl", novig="EPL", poly=["epl"], label="EPL", three_way=True, espn="soccer/eng.1",
-                    kalshi=dict(h2h="KXEPLGAME", total="KXEPLTOTAL"), sd=dict(total=1.7, spread=1.6), max_move=0.0, markets="h2h,totals"),
+                    kalshi=dict(h2h="KXEPLGAME", total="KXEPLTOTAL", spread="KXEPLSPREAD"), sd=dict(total=1.7, spread=1.6), max_move=0.0, markets="h2h,totals"),
     "ucl":     dict(odds="soccer_uefa_champs_league", novig=None, poly=["ucl"], label="UCL", three_way=True,
                     espn="soccer/uefa.champions", kalshi=dict(h2h="KXUCLGAME", total="KXUCLTOTAL"), sd=dict(total=1.7, spread=1.6),
                     max_move=0.0, markets="h2h,totals"),
@@ -812,11 +812,18 @@ def pull_alts(sport, S, now, st):
     for gid, g in list(S["games"].items()):
         st_ = datetime.fromisoformat(g["start"])
         soc = bool(SPORTS[sport].get("three_way"))
-        if not (now < st_ < now + timedelta(hours=SOCCER_ALT_WINDOW_H if soc else ALT_WINDOW_H)):
+        if not (now < st_ < now + timedelta(hours=ALT_WINDOW_H)):
             continue
         last = S["alt_at"].get(gid)
-        if last and (now - datetime.fromisoformat(last)).total_seconds() < (SOCCER_ALT_REFRESH_MIN if soc else ALT_REFRESH_MIN) * 60:
+        forced = gid in S.get("alt_force", set())
+        if forced:   # an exchange price on this game looked like value: re-price it now (at most every 10 min)
+            if last and (now - datetime.fromisoformat(last)).total_seconds() < STALE_FAIR_MIN * 60:
+                continue
+        elif not (now < st_ < now + timedelta(hours=SOCCER_ALT_WINDOW_H if soc else ALT_WINDOW_H)):
             continue
+        elif last and (now - datetime.fromisoformat(last)).total_seconds() < (SOCCER_ALT_REFRESH_MIN if soc else ALT_REFRESH_MIN) * 60:
+            continue
+        S.get("alt_force", set()).discard(gid)
         if not can_spend(st, now, 4 if soc else 2):
             break
         r = requests.get(f"{ODDS}/{g.get('okey') or okey}/events/{gid}/odds", timeout=30, params=dict(
@@ -1199,7 +1206,7 @@ def kalshi_quotes(sport, games, ml_only=False):
     for kind, series in SPORTS[sport]["kalshi"].items():
         if ml_only and kind != "h2h":
             continue
-        if kind == "spread" and "spreads" not in SPORTS[sport].get("markets", "spreads"):
+        if kind == "spread" and "spreads" not in SPORTS[sport].get("markets", "spreads") and not SPORTS[sport].get("three_way"):
             continue
         try:
             ms = kalshi_markets(series)
@@ -1233,7 +1240,7 @@ def kalshi_quotes(sport, games, ml_only=False):
                 if 0 < ya < 1:
                     out.append(ex_quote(gid, g, "h2h", "a" if is_home else "b", None, "kalshi", ya, ys))
             elif kind == "spread":
-                t = re.match(r"^(.*) wins by over ([\d.]+)", title)
+                t = re.match(r"^(.*?) wins by (?:over|more than) ([\d.]+)", title)
                 if not t:
                     continue
                 who, n = t.group(1), float(t.group(2))
@@ -3225,6 +3232,13 @@ def watch(minutes, sports):
                     continue
                 p = evaluate(s, x["g"], x["kind"], x["side"], x["line"], x["book"], x["odds"], now, x["prob"], allow_test=True)
                 if not p:
+                    continue
+                if SPORTS[s].get("three_way") and x["kind"] in ("spread", "total") and s in ALT_SPORTS:
+                    la = S.get("alt_at", {}).get(x["gid"])   # soccer spreads / totals: priced by the per-game pull
+                    if la and (now - datetime.fromisoformat(la)).total_seconds() < STALE_FAIR_MIN * 60:
+                        found.append((x["gid"], x["g"], p, x["size"]))
+                    else:
+                        S.setdefault("alt_force", set()).add(x["gid"])   # re-price that game now, alert next minute
                     continue
                 if age_min < STALE_FAIR_MIN:
                     found.append((x["gid"], x["g"], p, x["size"]))
