@@ -94,6 +94,31 @@ SHARP = "pinnacle"
 # Kalshi and Polymarket come from their free feeds every minute, so they don't take paid slots.
 # DraftKings was log-only (Nov 24): dropped for Circa. The log-only switch stays for any future test book.
 LOG_ONLY_BOOKS = {"draftkings"}
+NOFUNDS = {}   # book -> ISO time its 'no funds' pause ends (a No funds tap pauses that book until 7 AM next day)
+
+
+def book_paused(book, now=None):
+    t = NOFUNDS.get(book)
+    if not t:
+        return False
+    try:
+        return (now or datetime.now(timezone.utc)) < datetime.fromisoformat(t)
+    except ValueError:
+        return False
+
+
+def save_nofunds():
+    try:
+        fs_set("scan_state/nofunds", {k: v for k, v in NOFUNDS.items() if book_paused(k)})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_nofunds():
+    try:
+        NOFUNDS.update(fs_get("scan_state/nofunds") or {})
+    except Exception:  # noqa: BLE001
+        pass
 BOOKS = ["pinnacle", "circasports", "novig", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag", "williamhill_us",
          "espnbet"]
 BET_BOOKS = {"draftkings", "novig", "prophetx", "kalshi", "polymarket", "fanduel", "betrivers", "ballybet", "betmgm", "betonlineag",
@@ -2162,7 +2187,11 @@ def apply_taps(seen):
             line = "❌ **Passed**"
         elif what == "nofunds":
             x.update(taken=False, pass_reason="no funds")
-            line = f"💸 **No funds** at {BOOK_NAMES.get(x['book'], x['book'])}"
+            nt = datetime.now(ET).replace(hour=7, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            NOFUNDS[x["book"]] = nt.astimezone(timezone.utc).isoformat()
+            save_nofunds()
+            line = (f"💸 **No funds** at {BOOK_NAMES.get(x['book'], x['book'])} -- its alerts are paused until 7 AM "
+                    f"tomorrow (other books still alert; log a bet there to turn it back on)")
         elif what == "moved":
             line_now = stake   # for 'moved' the stake slot carries the line you saw (or None = same as the alert)
             x.update(taken=False, pass_reason="line moved", moved_odds=odds, moved_price=pr, moved_line_seen=line_now,
@@ -2175,6 +2204,8 @@ def apply_taps(seen):
             line = "❌ **Missed -- line moved**" + (f" (now {' '.join(bits)})" if bits else "")
         else:
             x.update(taken=True, stake_taken=stake, taken_odds=odds, taken_price=pr, taken_book=tbk)
+            if NOFUNDS.pop(tbk or x["book"], None):   # you bet there again: it has money -- alerts back on
+                save_nofunds()
             line = f"✅ **You bet** ${stake:g} at {price_str(odds, tbk or x['book'], pr)}" + \
                 (f" @ {BOOK_NAMES.get(tbk, tbk)}" if tbk else "")
             if x.get("kind") == "future":   # futures: every tap is another bet on the same pick, each kept
@@ -2457,7 +2488,7 @@ def record(found, seen, now):
     best = {}
     for gid, g, p, size in found:   # one play per game / market / side: the best EV across books and alt lines
         k = (p["sport"], gid, p["kind"], p["side"], bool(p.get("test")),   # test plays never crowd out real ones,
-             p["book"] in LOG_ONLY_BOOKS)                                   # nor do log-only books (DraftKings)
+             p["book"] in LOG_ONLY_BOOKS or book_paused(p["book"], now))     # nor do log-only / out-of-funds books
         if k not in best or p["ev"] > best[k][2]["ev"]:
             best[k] = (gid, g, p, size)
     backup = {}   # best play at a sportsbook (not Novig) per game/market/side, shown on Novig alerts
@@ -2501,7 +2532,7 @@ def record(found, seen, now):
                 fs_set(f"scan_plays/{pid}", d_)
                 seen[pid] = d_
             continue
-        if not SPORTS[p["sport"]].get("alerts", True) or p["book"] in LOG_ONLY_BOOKS:   # log-only league / book: priced and graded, never posted
+        if not SPORTS[p["sport"]].get("alerts", True) or p["book"] in LOG_ONLY_BOOKS or book_paused(p["book"], now):   # log-only league / book: priced and graded, never posted
             if not prev:
                 d_ = dict(base, found=now.isoformat(), alerted=False, shadow=True)
                 fs_set(f"scan_plays/{pid}", d_)
@@ -2708,7 +2739,7 @@ def best_elsewhere(sport, g, x, free, now):
     srcs += [(k, o, None, at.astimezone(ET).strftime("%-I:%M %p") if at else "") for k, o in BOOK_Q.get(sport, {}).items()]
     for (gid, kind, side, line, book), odds, pp, when in srcs:
         if (gid != x["event_id"] or kind != x["kind"] or side != x["side"] or book == x["book"]
-                or book not in BET_BOOKS or book in LOG_ONLY_BOOKS):
+                or book not in BET_BOOKS or book in LOG_ONLY_BOOKS or book_paused(book, now)):
             continue
         p = evaluate(sport, g, kind, side, line, book, odds, now, pp)
         if p and (best is None or p["ev"] > best[0]["ev"]):
@@ -3366,6 +3397,7 @@ def watch(minutes, sports):
                      buttons=False)
         POST = False
     t_end = time.time() + minutes * 60
+    load_nofunds()
     seen = {p["_id"]: p for p in fs_recent("scan_plays", "start", (datetime.now(timezone.utc) - timedelta(hours=8)).isoformat())}
     BOT_MSGS.update(x["msg_id"] for x in seen.values() if x.get("via") == "bot" and x.get("msg_id"))
     refresh_msg_doc(seen, datetime.now(timezone.utc))
