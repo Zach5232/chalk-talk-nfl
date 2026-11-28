@@ -139,7 +139,7 @@ SWEEP_GAP_MIN = int(os.environ.get("SWEEP_GAP_MIN", "30"))   # re-pull sportsboo
 SWEEP_WITHIN_H = 6                                             # ... i.e. start within this many hours
 EMPTY_RETRY_MIN = 90       # a sport with no known upcoming games re-pulls this often (an empty pull can be a glitch)
 MIN_PULL_GAP_MIN = 15
-CLOSE_WINDOW_MIN = 20
+CLOSE_WINDOW_MIN = 12       # closing-line pull this close to the start (and any later pre-game pull updates it)
 START_BUFFER_MIN = 3       # no plays this close to (or after) the start: prices turn live and the fair line is pregame
 
 
@@ -2997,14 +2997,20 @@ def save_fair(sport, games, pulled, mids):
 
 
 def close_lines(sport, games, plays, now):
-    """Closing line for every logged play in a game about to start: consensus and Pinnacle at the play's line."""
+    """Closing line for every logged play in a game about to start: consensus and Pinnacle at the play's line. Re-taken
+    from every newer pre-game pull until the start, so the last pre-game price is the close (pulls never include started
+    games, so no live odds get in)."""
     n = 0
     for p in plays:
-        if p.get("sport") != sport or p.get("p_close") is not None:
+        if p.get("sport") != sport:
             continue
         g = games.get(p["event_id"])
         if not g or (datetime.fromisoformat(g["start"]) - now).total_seconds() > CLOSE_WINDOW_MIN * 60:
             continue
+        if datetime.fromisoformat(g["start"]) <= now:
+            continue
+        if p.get("p_close") is not None and p.get("close_pull") and g.get("at") and g["at"] <= p["close_pull"]:
+            continue          # already closed from this pull (or a newer one)
         views = (g.get("views") or {}).get(p["kind"])
         if not views:
             continue
@@ -3013,7 +3019,8 @@ def close_lines(sport, games, plays, now):
         if pc is None:
             continue
         doc = {k: v for k, v in p.items() if k != "_id"}
-        doc.update(p_close=round(pc, 4), p_close_pin=round(pp, 4) if pp is not None else None, close_at=now.isoformat())
+        doc.update(p_close=round(pc, 4), p_close_pin=round(pp, 4) if pp is not None else None, close_at=now.isoformat(),
+                   close_pull=g.get("at"))
         fs_set(f"scan_plays/{p.get('_id') or play_id(p, p['event_id'])}", doc)
         p.update(doc)
         n += 1
@@ -4302,6 +4309,7 @@ def main():
         for k_, t_ in sorted(bks.items()):
             print(f"  {k_:22s} {t_}")
         print("circa offered:", any("circa" in (k_ + str(t_)).lower() for k_, t_ in bks.items()))
+        print("bookmaker.eu offered:", any(k_.startswith("bookmaker") or "bookmaker" in str(t_).lower() for k_, t_ in bks.items()))
         return
     if a.mode == "pxprobe":
         return px_probe()
