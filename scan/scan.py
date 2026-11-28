@@ -58,24 +58,24 @@ SPORTS = {
     # soccer: 3-way moneyline (home / away / draw, 90 min + stoppage) and half-goal totals. alerts=False: priced
     # and graded but not posted, until its record says it's worth betting.
     "epl":     dict(odds="soccer_epl", novig="EPL", poly=["epl"], label="EPL", three_way=True, espn="soccer/eng.1",
-                    kalshi=dict(h2h="KXEPLGAME", total="KXEPLTOTAL"), sd=dict(total=1.7), max_move=0.0, markets="h2h,totals"),
+                    kalshi=dict(h2h="KXEPLGAME", total="KXEPLTOTAL"), sd=dict(total=1.7, spread=1.6), max_move=0.0, markets="h2h,totals"),
     "ucl":     dict(odds="soccer_uefa_champs_league", novig=None, poly=["ucl"], label="UCL", three_way=True,
-                    espn="soccer/uefa.champions", kalshi=dict(h2h="KXUCLGAME", total="KXUCLTOTAL"), sd=dict(total=1.7),
+                    espn="soccer/uefa.champions", kalshi=dict(h2h="KXUCLGAME", total="KXUCLTOTAL"), sd=dict(total=1.7, spread=1.6),
                     max_move=0.0, markets="h2h,totals"),
     "laliga":  dict(odds="soccer_spain_la_liga", novig=None, poly=["lal"], label="La Liga", three_way=True,
-                    espn="soccer/esp.1", kalshi=dict(h2h="KXLALIGAGAME", total="KXLALIGATOTAL"), sd=dict(total=1.7),
+                    espn="soccer/esp.1", kalshi=dict(h2h="KXLALIGAGAME", total="KXLALIGATOTAL"), sd=dict(total=1.7, spread=1.6),
                     max_move=0.0, markets="h2h,totals"),
     "seriea":  dict(odds="soccer_italy_serie_a", novig=None, poly=["sea"], label="Serie A", three_way=True,
-                    espn="soccer/ita.1", kalshi=dict(h2h="KXSERIEAGAME", total="KXSERIEATOTAL"), sd=dict(total=1.7),
+                    espn="soccer/ita.1", kalshi=dict(h2h="KXSERIEAGAME", total="KXSERIEATOTAL"), sd=dict(total=1.7, spread=1.6),
                     max_move=0.0, markets="h2h,totals"),
     "bundes":  dict(odds="soccer_germany_bundesliga", novig=None, poly=["bun"], label="Bundesliga", three_way=True,
                     espn="soccer/ger.1", kalshi=dict(h2h="KXBUNDESLIGAGAME", total="KXBUNDESLIGATOTAL"),
-                    sd=dict(total=1.7), max_move=0.0, markets="h2h,totals"),
+                    sd=dict(total=1.7, spread=1.6), max_move=0.0, markets="h2h,totals"),
     "ligue1":  dict(odds="soccer_france_ligue_one", novig=None, poly=["fl1"], label="Ligue 1", three_way=True,
-                    espn="soccer/fra.1", kalshi=dict(h2h="KXLIGUE1GAME", total="KXLIGUE1TOTAL"), sd=dict(total=1.7),
+                    espn="soccer/fra.1", kalshi=dict(h2h="KXLIGUE1GAME", total="KXLIGUE1TOTAL"), sd=dict(total=1.7, spread=1.6),
                     max_move=0.0, markets="h2h,totals"),
     "mls":     dict(odds="soccer_usa_mls", novig="MLS", poly=["mls"], label="MLS", three_way=True,
-                    espn="soccer/usa.1", kalshi=dict(h2h="KXMLSGAME", total="KXMLSTOTAL"), sd=dict(total=1.7),
+                    espn="soccer/usa.1", kalshi=dict(h2h="KXMLSGAME", total="KXMLSTOTAL"), sd=dict(total=1.7, spread=1.6),
                     max_move=0.0, markets="h2h,totals"),
     # tennis: the Odds API lists each tournament separately ('tennis_atp_paris_masters'); every active one is pulled
     "atp":     dict(odds=None, odds_prefix="tennis_atp", novig="ATP", poly=["atp"], label="ATP",
@@ -187,6 +187,15 @@ def payout(odds, book, sport):
         p = 1 / (1 + pay)
         return 1 / (p + rate * p * (1 - p)) - 1
     return pay * (1 - rate) if kind else pay
+
+
+def dnb_views(g):
+    """Soccer: 'draw no bet' (a draw refunds) priced from each book's 3-way line -- P(home) / (P(home) + P(away)) --
+    saved as a handicap-0 spread view, so ProphetX's 2-way moneyline (a DNB market) can be checked against it."""
+    h2h = (g.get("views") or {}).get("h2h") or []
+    dv = [[bk, w, 0.0, round(q[0] / (q[0] + q[1]), 5)] for bk, w, l0, q in h2h if isinstance(q, list) and q[0] + q[1] > 0]
+    if dv:
+        g["views"]["spread"] = [v for v in g["views"].get("spread", []) if v[2] != 0.0] + dv
 
 
 def mover(sport, kind, line, q):
@@ -466,6 +475,8 @@ def label(g, kind, side, line):
     if kind == "h2h":
         return f"{g['home'] if side == 'a' else g['away']} ML" + (" (90 min)" if g.get("three_way") else "")
     if kind == "spread":
+        if g.get("three_way") and line == 0:
+            return f"{g['home'] if side == 'a' else g['away']} (draw no bet)"
         return f"{g['home']} {line:+g}" if side == "a" else f"{g['away']} {-line:+g}"
     return f"{'Over' if side == 'a' else 'Under'} {line:g}"
 
@@ -944,6 +955,8 @@ def pull(sport, now, st, reason):
         g = dict(home=ev["home_team"], away=ev["away_team"], start=ev["commence_time"].replace("Z", "+00:00"),
                  at=now.isoformat(), views={k: fair_views(sport, k, rows) for k, rows in q.items() if rows},
                  okey=ev.get("_okey"), upd=upd, **({"three_way": True} if three else {}))
+        if three:
+            dnb_views(g)
         games[ev["id"]] = g
         for_tally.append((g, q))
         for kind, rows in q.items():
@@ -1415,7 +1428,17 @@ def px_quotes(sport, games, ml_only=False):
                             out.append(ex_quote(gid, g, "h2h", side, None, "prophetx", prob(top["price"]),
                                                 float(top.get("quantity") or 0) or 0.01, st))
                     continue
-                if three and sub == "moneyline":   # soccer '2 Way' moneyline: different rules on a draw -- not priced yet
+                if three and sub == "moneyline":   # soccer '2 Way' moneyline = draw no bet (a draw refunds): handicap 0
+                    for sd in m.get("selections") or []:
+                        sd = sd if isinstance(sd, list) else [sd]
+                        top = next((x for x in sd if x.get("price") is not None), None)
+                        if not top:
+                            continue
+                        nm = (top.get("name") or "").strip()
+                        side = "a" if norm(nm) == norm(cs["home"]) else "b" if norm(nm) == norm(cs["away"]) else None
+                        if side:
+                            out.append(ex_quote(gid, g, "spread", side, 0.0, "prophetx", prob(top["price"]),
+                                                float(top.get("quantity") or 0) or 0.01, st))
                     continue
                 if sub not in ("moneyline", "spread", "total") or (ml_only and sub != "moneyline"):
                     continue
@@ -3822,6 +3845,9 @@ def selftest():
     check("3-way devig sums to 1", abs(sum(devig_n([prob(130), prob(215), prob(240)])) - 1) < 1e-6)
     check("payout +100 = 1.0", abs(payout(100, "fanduel", "nba") - 1.0) < 1e-9)
     check("payout -110 = 0.909", abs(payout(-110, "fanduel", "nba") - 100 / 110) < 1e-9)
+    dnb = dict(sport="epl", kind="spread", side="b", line=0.0)
+    check("soccer draw no bet: draw refunds, away win wins", grade_result(dnb, 1, 1) == "push" and grade_result(dnb, 0, 2) == "win"
+          and grade_result(dnb, 2, 1) == "loss")
     check("Kalshi fee lowers payout", payout(100, "kalshi", "nba") < 1.0 and payout(100, "kalshi", "nba") > 0.93)
     _fc = FEE_CLOCK[0]
     FEE_CLOCK[0] = NOVIG_FEE_FROM - timedelta(minutes=1)
