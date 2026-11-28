@@ -3061,8 +3061,35 @@ def load_fair(sport):
     return d.get("games") or {}, d.get("pulled")
 
 
+def _clean(v):
+    """NaN / infinity -> None (Firestore rejects them), recursively."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    if isinstance(v, dict):
+        return {k: _clean(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_clean(x) for x in v]
+    return v
+
+
 def save_fair(sport, games, pulled, mids):
-    fs_set(f"scan_state/fair_{sport}", dict(games=games, pulled=pulled, mids=mids))
+    """Saves a sport's fair lines. A failed save is logged, never fatal: the loop keeps its lines in memory."""
+    doc = _clean(dict(games=games, pulled=pulled, mids=mids))
+    try:
+        fs_set(f"scan_state/fair_{sport}", doc)
+    except requests.HTTPError as e:
+        size = len(json.dumps(doc, default=str))
+        msg = re.sub(r"https?://\S+", "", (e.response.text or ""))[:160].replace("\n", " ")
+        log(f"[{sport}] fair-line save failed ({e.response.status_code}, ~{size // 1024} KB): {msg}")
+        if size > 900_000:   # over Firestore's 1 MB document limit: keep only games starting in the next 12 hours
+            now_ = datetime.now(timezone.utc)
+            small = {k: g for k, g in games.items()
+                     if now_ - timedelta(hours=3) < datetime.fromisoformat(g["start"]) < now_ + timedelta(hours=12)}
+            try:
+                fs_set(f"scan_state/fair_{sport}", _clean(dict(games=small, pulled=pulled, mids=mids)))
+                log(f"[{sport}] saved the next-12-hours slice instead ({len(small)} of {len(games)} games)")
+            except requests.HTTPError:
+                pass
 
 
 def close_lines(sport, games, plays, now):
