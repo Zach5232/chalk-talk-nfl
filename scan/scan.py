@@ -2370,6 +2370,12 @@ def record(found, seen, now):
                         pay_ = payout(p["odds"], p["book"], p["sport"])
                         for d_ in (base, extra):
                             d_.update(stake_usd=ps_[0], to_win=round(ps_[0] * pay_, 2), stake_why=ps_[1])
+                elif rel and p["ev"] > o["ev"] and rel[0] == "conflict":
+                    # owner's rule: a better-value other side is still sent, as its own bet -- with the gap spelled out
+                    notes.append(f"↔️ **Other side of your bet** on {o['label']} (EV {o['ev']:+.1%} when alerted; this side "
+                                 f"{p['ev']:+.1%}): {rel[1]}. Each bet is +EV on its own, so this one is worth taking at the "
+                                 f"amount shown.")
+                    rel_tags.append("better_other_side")
                 elif rel:
                     skip = True          # the other side of a bet you hold, with a both-lose gap: don't send
                     break
