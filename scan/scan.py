@@ -24,7 +24,7 @@ A better number later edits that same message ("Better number at ...", showing t
 Storage: Firestore scan_state/* and scan_plays/*. This repo is public: no odds are written to it and the log prints
 counts only (prices go to Firestore and Discord). SCAN_DRY=1 keeps state in local files and prints alerts instead.
 """
-import argparse, json, math, os, queue, re, threading, time
+import argparse, csv, json, math, os, queue, re, threading, time
 from datetime import datetime, timedelta, timezone
 from statistics import NormalDist
 from zoneinfo import ZoneInfo
@@ -4006,7 +4006,7 @@ def timing_report(now, days=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
+    ap.add_argument("mode", choices=["betfile", "sweat", "boostparlay", "scoreparlay", "parlaycheck", "mgmboost", "fdboost", "promo", "watch", "pull", "grade", "books", "cbbbooks", "taken", "cfbrecord", "timing", "day",
                                      "altprobe", "fields", "pxprobe", "mybooks", "listen", "yday", "whygone", "bookprobe", "circatest", "sharpstudy", "futprobe", "pullprobe", "futures"])
     ap.add_argument("sport", nargs="?", default="")
     ap.add_argument("--minutes", type=float, default=330)
@@ -4241,6 +4241,32 @@ def main():
                 line(f"  real plays @ {BOOK_NAMES.get(bk, bk)}", xs)
         pend = [x for x in ps if not x.get("result")]
         print(f"not graded yet: {len(pend)} (games not final, or no ESPN match)")
+        return
+    if a.mode == "betfile":   # your logged bets (last 14 days) as a CSV file in the trophy room -- never in the log
+        now = datetime.now(timezone.utc)
+        ps = [x for x in fs_recent("scan_plays", "start", (now - timedelta(days=14)).isoformat())
+              if x.get("taken") and x.get("kind") in ("h2h", "spread", "total")]
+        import io
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        cols = ["start", "sport", "away", "home", "kind", "side", "label", "line", "alert_book", "taken_book", "stake",
+                "alert_odds", "taken_odds", "taken_price", "tapped_at", "alerted_at", "result", "clv", "clv_pin", "ev",
+                "p_close", "p_close_pin", "fair_at_alert"]
+        w.writerow(cols)
+        for x in sorted(ps, key=lambda x: x["start"]):
+            w.writerow([x.get("start"), x.get("sport"), x.get("away"), x.get("home"), x.get("kind"), x.get("side"),
+                        x.get("label"), x.get("line"), x.get("book"), _book_held(x), x.get("stake_taken"),
+                        x.get("odds_alerted") or x.get("odds"), x.get("taken_odds"), x.get("taken_price"),
+                        x.get("tapped_at"), x.get("alerted_at"), x.get("result"), x.get("clv"), x.get("clv_pin"),
+                        x.get("ev"), x.get("p_close"), x.get("p_close_pin"), x.get("p_fair")])
+        report_send(f"### 📎 Your logged bets (last 14 days)\n-# {len(ps)} bets you tapped Bet it on -- for the export check.")
+        if _TROPHY[0]:
+            r = requests.post(f"{DAPI}/channels/{_TROPHY[0]}/messages", headers={"Authorization": f"Bot {BOT}"},
+                              files={"files[0]": (f"logged_bets_{now.strftime('%Y%m%d')}.csv", buf.getvalue().encode())},
+                              data={"payload_json": json.dumps({"content": ""})}, timeout=60)
+            log(f"bet file posted: {len(ps)} bets, HTTP {r.status_code}")
+        else:
+            log("bet file: trophy room not found")
         return
     if a.mode == "sweat":   # 'what to watch' now (trophy room)
         now = datetime.now(timezone.utc)
