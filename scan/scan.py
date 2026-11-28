@@ -135,6 +135,8 @@ FULL_EVERY = 3             # ... spreads and totals every 3rd cycle
 STALE_FAIR_MIN = 10        # an exchange play against a fair line older than this is confirmed by a pull first
 MOVE_TRIGGER = 0.025
 BASE_GAP_MIN = 180
+SWEEP_GAP_MIN = int(os.environ.get("SWEEP_GAP_MIN", "30"))   # re-pull sportsbooks this often when games are close ...
+SWEEP_WITHIN_H = 6                                             # ... i.e. start within this many hours
 EMPTY_RETRY_MIN = 90       # a sport with no known upcoming games re-pulls this often (an empty pull can be a glitch)
 MIN_PULL_GAP_MIN = 15
 CLOSE_WINDOW_MIN = 20
@@ -3106,8 +3108,12 @@ def watch(minutes, sports):
             pulled = datetime.fromisoformat(S["pulled"]) if S["pulled"] else None
             age_min = (now - pulled).total_seconds() / 60 if pulled else 1e9
             reasons = []
+            soon = [k for k, g in upcoming.items()
+                    if datetime.fromisoformat(g["start"]) < now + timedelta(hours=SWEEP_WITHIN_H)]
             if (age_min >= BASE_GAP_MIN and upcoming) or age_min >= 12 * 60:
                 reasons.append("baseline")
+            elif soon and age_min >= SWEEP_GAP_MIN:   # games within a few hours: sportsbooks re-checked every 30 min
+                reasons.append(f"sweep ({len(soon)} game(s) within {SWEEP_WITHIN_H}h)")
             elif not upcoming and age_min >= EMPTY_RETRY_MIN:   # an empty pull (or a new day): look again soon
                 reasons.append("no games known -- checking again")
             open_plays = [p for p in seen.values() if p.get("sport") == s and (p.get("alerted") or p.get("shadow"))
