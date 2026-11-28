@@ -2434,7 +2434,9 @@ def _taken_note(kind, text, o, p, g=None):
             x = round(stake * d_o / d_p)
             a_only, b_only = stake * (d_o - 1) - x, x * (d_p - 1) - stake
             worst = min(a_only, b_only)
-            hn = f" -- it's now about **{held_now:+.1%}** (the line moved)" if held_now is not None and held_now < 0 else ""
+            hn = (f" -- worth **{held_now:+.1%}** now (was {o['ev']:+.1%} when alerted; the line moved against it)"
+                  if held_now is not None and o.get("ev") is not None else
+                  f" -- worth **{held_now:+.1%}** now" if held_now is not None else "")
             return (f"🛡️ **Protect your bet:** you have {ref}{hn}. Taking this side cuts your worst case from "
                     f"**-${stake:,.0f}** to about **{'-' if worst < 0 else '+'}${abs(worst):,.2f}**, and it's "
                     f"{p['ev']:+.1%} on its own. Small bonus: {text[0]}.")
@@ -2527,6 +2529,15 @@ def record(found, seen, now):
                                  f"amount shown; no need to match amounts.")
                     rel_tags.append("better_other_side")
                     continue
+                if rel and rel[0] == "middle" and _middle_ints(p, o) <= 1:
+                    # one-score window = 'protect your bet': only worth it once the bet you hold has lost its value
+                    try:
+                        hn = _ev_now(o["sport"], g, o["kind"], o["side"], o["line"], _book_held(o), _odds_held(o))
+                    except Exception:  # noqa: BLE001
+                        hn = None
+                    if hn is None or hn >= 0:
+                        skip = True      # your bet still has value: nothing to protect
+                        break
                 if rel and rel[0] in ("middle", "arb"):
                     notes.append(_taken_note(rel[0], rel[1], o, p, g))
                     rel_tags.append(rel[0] + "_with_bet")
